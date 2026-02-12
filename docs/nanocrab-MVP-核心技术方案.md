@@ -71,10 +71,14 @@ MVP 强约束：
   - 负责：Session 路由、上下文组装、策略选择、执行编排、记忆控制、人设装配
   - 是全系统唯一“认知决策入口”
 
-- **Bus（事件层）**
-  - 负责模块解耦：Command/Event 传递
-  - MVP 使用 in-memory async queue
+- **Bus（事件层 — 旁路广播）**
+  - **定位：旁路事件广播，非主链路驱动**
+  - 主链路（消息处理→LLM 调用→回复）保持同步直接调用，Bus 不参与
+  - Bus 负责非阻塞副作用的广播：审计日志、TUI 实时面板、metrics 统计、告警通知
+  - 模式：fire-and-forget，各 listener 独立消费，失败不影响主链路
+  - MVP 使用 in-memory async queue（`tokio::sync::mpsc`）
   - 接口设计预留 backpressure 语义，方便后续切换 NATS/Redis Stream
+  - **vNext 扩展**：多通道出站分发可走 Bus（Gateway publish ReplyReady → 各 ChannelDriver 订阅）
 
 - **Runtime（执行层）**
   - 接收 Core 下发任务并执行
@@ -93,7 +97,9 @@ Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
 
 ## 3. Command / Event Schema（MVP 最小集）
 
-> 先冻结语义协议，再选择传输实现。
+> 先冻结语义协议，再选择传输实现。  
+> **注意**：以下 Command/Event 不代表走 Bus 传递。主链路通过直接函数调用，Bus 仅广播旁路事件（见 §12）。  
+> Schema 的价值在于统一 DTO 结构，而非决定传输方式。
 
 所有 Inbound/Outbound DTO 的基础字段至少包含：
 
@@ -394,7 +400,49 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ## 12. 执行链路（MVP）
 
-`TelegramDriver -> Gateway -> Bus(Command) -> Core -> Runtime/Memory -> Bus(Event: ReplyReady) -> Gateway -> TelegramDriver`
+### 12.1 主链路（同步直接调用）
+
+```
+TelegramBot
+  │  teloxide long polling 收到消息
+  │  构造 InboundMessage
+  │
+  ▼  Arc<Gateway>.handle_inbound()     ← 进程内函数调用
+Gateway
+  │  限流(TokenBucket) + resolve_agent
+  │
+  ▼  Arc<Orchestrator>.handle_inbound() ← 进程内函数调用
+Orchestrator
+  │  Session 管理 → Persona + Skill 组装
+  │  → Memory 召回 → 构造 messages
+  │
+  ▼  HTTP POST → Anthropic API         ← 唯一的外部网络调用
+  │  ← LLM 回复
+  │
+  │  记录 episodes → 构造 OutboundMessage
+  ▼  return Ok(OutboundMessage)         ← 函数返回值
+Gateway
+  ▼  return Ok(outbound)                ← 函数返回值
+TelegramBot
+  ▼  bot.send_message() → Telegram API  ← HTTP 发送回复
+```
+
+设计原则：主链路是同步因果关系（用户发消息 → 必须等 LLM 回复 → 发回去），保持直接调用最简单可靠。
+
+### 12.2 旁路事件（Bus 广播）
+
+主链路执行过程中，通过 Bus 广播非阻塞事件：
+
+```
+主链路节点          ──publish──▶  Bus  ──▶  消费者
+Gateway            MessageAccepted       TUI 面板、审计日志、metrics
+Orchestrator       ReplyReady            TUI 面板、审计日志
+Orchestrator       TaskFailed            TUI 面板、告警系统
+Orchestrator       ToolExecuted (vNext)  审计日志、TUI
+Memory             EpisodeWritten(vNext) TUI、统计
+```
+
+旁路事件 fire-and-forget，消费者失败不影响主链路。
 
 ---
 
