@@ -1,2 +1,5 @@
 /target
+**/target
 **/.DS_Store
+/data
+*.db
