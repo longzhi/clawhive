@@ -124,7 +124,29 @@ vNext 重点是：
 
 ---
 
-## 8. 建议落地节奏
+## 8. 存储与向量检索
+
+### 8.1 SQLite + sqlite-vec
+
+推荐使用 **SQLite** 作为 nanocrab 的本地持久化方案，搭配 **[sqlite-vec](https://github.com/asg017/sqlite-vec)** 扩展实现向量检索能力。
+
+**选型理由：**
+
+- **零依赖部署**：SQLite 嵌入式、单文件，无需额外数据库服务
+- **统一存储**：审计日志、任务状态、向量索引共用同一数据库
+- **向量检索**：sqlite-vec 提供原生向量相似度搜索（cosine/L2/inner product），支持 ANN 索引
+- **轻量适配**：适合 nanocrab 单机/边缘部署场景，不引入 Postgres/Qdrant 等重依赖
+
+**应用场景：**
+
+- 审计日志结构化存储与查询（trace/run/step）
+- 工具描述 & capability 的语义检索（embedding → sqlite-vec）
+- 上下文记忆与对话历史的向量召回
+- 任务/步骤状态持久化
+
+---
+
+## 9. 建议落地节奏
 
 1. 在 `docs/` 保持本文件为 vNext 设计基线
 2. MVP 完成后，先实现 `CapabilityGrant` 数据结构 + 审计日志
@@ -133,7 +155,7 @@ vNext 重点是：
 
 ---
 
-## 9. 结论
+## 10. 结论
 
 nanocrab 在 vNext 采用“Capability-based, per-task least-privilege”模型，将显著提升：
 
