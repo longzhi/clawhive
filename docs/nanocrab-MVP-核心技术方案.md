@@ -389,12 +389,82 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ### 9.2 TUI（必须，开发者向）
 
-用于实时观察与快速干预：
+TUI 有两个职责：**实时观测面板** + **本地 Chat 入口**。
+
+#### 观测面板
 
 - Active Sessions 面板
 - Event Bus 队列面板（inbound/outbound/backlog）
 - Runs/Sub-Agent 面板（状态、耗时、失败重试）
 - Logs/Trace 面板（按 trace_id 过滤）
+
+#### 本地 Chat 入口（类 Claude Code 交互体验）
+
+TUI 作为本地交互通道，直接调用 Orchestrator（不经过 Gateway），提供流式对话体验：
+
+```
+┌─ nanocrab TUI ──────────────────────────────┐
+│                                              │
+│  You: 分析一下项目架构                      │
+│                                              │
+│  nanocrab-main: 我来看看项目结构...█        │  ← 流式逐字输出
+│                                              │
+│  [tool: shell_exec("find crates -name...")] │  ← tool_use 实时展示
+│  [result: 10 crates found]                   │
+│                                              │
+│  项目采用 Rust workspace，包含 10 个 crate：│  ← 继续流式输出
+│                                              │
+├──────────────────────────────────────────────┤
+│ > _                                          │
+└──────────────────────────────────────────────┘
+```
+
+**架构位置：** TUI 与 TelegramBot 并列，是另一个通道入口，但走进程内直接调用：
+
+```
+nanocrab 进程
+  ├── TelegramBot ──▶ Gateway ──▶ Orchestrator  （远程通道，走完整链路）
+  └── TUI ──▶ Orchestrator（流式接口）           （本地通道，直接调用）
+```
+
+TUI 不需要经过 Gateway（本地使用无需限流/路由/鉴权）。
+
+**流式 + 工具调用交替执行循环：**
+
+```
+loop {
+    // 1. 流式调 LLM
+    let stream = orchestrator.handle_inbound_stream(messages).await;
+    
+    // 2. 逐 chunk 实时渲染到终端
+    for chunk in stream {
+        tui.render_delta(chunk.delta);
+    }
+    
+    // 3. 检查是否有 tool_use
+    if has_tool_use(&response) {
+        let tool_results = execute_tools(tool_calls).await;
+        tui.render_tool_results(&tool_results);
+        
+        // 把 tool_result 加入 messages，继续下一轮（还是流式）
+        messages.extend(tool_use_and_result_messages);
+        continue;
+    }
+    
+    break;  // 没有 tool_use，结束
+}
+```
+
+**需要打通的流式链路：**
+
+| 层 | 当前状态 | 需要补的 |
+|---|---|---|
+| Provider `stream()` | ✅ 已实现（Anthropic SSE 解析完整） | — |
+| LlmRouter `stream()` | ❌ 只有 `chat()` | 加 `stream()` 方法，路由到 provider.stream() |
+| Orchestrator | ❌ 只有同步 `handle_inbound()` | 加 `handle_inbound_stream()` 返回 `Stream<StreamChunk>` |
+| TUI Chat 面板 | ❌ 未实现 | 消费 stream，逐 chunk 渲染 + tool use 交替展示 |
+
+> **注意**：Telegram 等远程通道的流式（send_message + edit_message）属于体验优化，不在 MVP 范围。MVP 流式输出聚焦 TUI 本地 Chat 场景。
 
 建议实现：`ratatui + crossterm`。
 

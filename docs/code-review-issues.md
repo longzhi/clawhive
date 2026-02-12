@@ -120,6 +120,25 @@ Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，
 
 ---
 
+## Issue #9: 流式输出链路未打通（Provider 已实现，上层未接入）
+
+**状态：** 🔴 待修复  
+**模块：** `nanocrab-core/router.rs`, `nanocrab-core/orchestrator.rs`, `nanocrab-tui`  
+**描述：**  
+`AnthropicProvider::stream()` 和 `StreamChunk` 类型已完整实现（SSE 解析、三种事件类型），但上层链路完全未接入：
+- `LlmRouter` 只有 `chat()` 没有 `stream()`
+- `Orchestrator` 只有同步 `handle_inbound()` 没有流式接口
+- TUI 没有 Chat 面板消费 stream
+
+**影响：** TUI 作为本地 Chat 入口无法提供流式交互体验，与 Claude Code 类似的逐字输出无法实现。  
+**建议：**  
+1. `LlmRouter` 加 `stream()` 方法（路由到 provider.stream()，支持 fallback）
+2. `Orchestrator` 加 `handle_inbound_stream()` 返回 `Stream<StreamChunk>`
+3. TUI Chat 面板消费 stream + tool use 交替执行循环
+4. Telegram 等远程通道的流式回复（send + edit）留作后续优化
+
+---
+
 ## 后续 Review 计划
 
 - [ ] 记忆系统存取细节（MemoryStore / retrieve_context / consolidation）
