@@ -310,7 +310,35 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 - 预留 registry 与 provider trait
 - 代码结构独立为 `nanocrab-provider` crate
 
-## 9. 项目结构（面向后续开源拆分）
+## 9. Skill 系统（MVP）
+
+### 9.1 目标
+
+- 在 MVP 阶段提供可扩展能力描述层（不是硬编码在 Core）
+- 兼容后续插件化演进
+
+### 9.2 技术方案（轻量版）
+
+- Skill 目录结构：`skills/<skill_name>/SKILL.md`
+- `SKILL.md` 采用 frontmatter（`name/description/metadata`）
+- Skill Loader 负责：
+  - 加载与合并（优先级：workspace > user > builtin）
+  - requirements 门控（`requires.bins` / `requires.env`）
+  - 生成 Skills 索引摘要（供模型低成本感知）
+
+### 9.3 Prompt 注入策略
+
+- 默认只注入 Skills 摘要（name/description/location）
+- 需要时由 agent 按需读取对应 `SKILL.md` 正文
+- 避免全量注入导致上下文膨胀
+
+### 9.4 与 Tool Schema 关系
+
+- Tool Schema：定义“如何调用工具”（参数契约）
+- Skill：定义“何时调用工具/怎么完成任务”（策略与经验）
+- MVP 同时保留二者，职责分离
+
+## 10. 项目结构（面向后续开源拆分）
 
 建议使用 Rust workspace（monorepo）：
 
@@ -332,7 +360,7 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ---
 
-## 10. CLI / TUI 支持（MVP）
+## 11. CLI / TUI 支持（MVP）
 
 ### 9.1 CLI（必须）
 
@@ -354,13 +382,13 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 建议实现：`ratatui + crossterm`。
 
-## 11. 执行链路（MVP）
+## 12. 执行链路（MVP）
 
 `TelegramDriver -> Gateway -> Bus(Command) -> Core -> Runtime/Memory -> Bus(Event: ReplyReady) -> Gateway -> TelegramDriver`
 
 ---
 
-## 12. 第一版里程碑（建议）
+## 13. 第一版里程碑（建议）
 
 ### M1（可跑通）
 
@@ -382,7 +410,7 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ---
 
-## 13. 结论
+## 14. 结论
 
 nanocrab MVP 推荐采用：
 
