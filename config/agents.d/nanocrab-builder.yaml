@@ -1,0 +1,20 @@
+agent_id: nanocrab-builder
+enabled: true
+
+identity:
+  name: nanocrab-builder
+  emoji: "🛠️"
+
+model_policy:
+  primary: gpt
+  fallbacks: [sonnet]
+
+tool_policy:
+  allow: [read, write, edit, exec]
+
+memory_policy:
+  mode: hippocampus_cortex
+  write_scope: conservative
+
+sub_agent:
+  allow_spawn: false

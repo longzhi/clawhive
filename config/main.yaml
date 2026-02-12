@@ -1,0 +1,19 @@
+app:
+  name: nanocrab
+  env: dev
+
+runtime:
+  max_concurrent: 4
+
+features:
+  multi_agent: true
+  sub_agent: true
+  tui: true
+  cli: true
+
+channels:
+  telegram:
+    enabled: true
+    connectors:
+      - connector_id: tg_main
+        token: ${TELEGRAM_BOT_TOKEN}

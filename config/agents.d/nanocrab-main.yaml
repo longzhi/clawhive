@@ -1,0 +1,17 @@
+agent_id: nanocrab-main
+enabled: true
+
+identity:
+  name: nanocrab
+  emoji: "🦀"
+
+model_policy:
+  primary: gpt
+  fallbacks: [sonnet]
+
+tool_policy:
+  allow: [read, write, edit, exec]
+
+memory_policy:
+  mode: hippocampus_cortex
+  write_scope: conservative

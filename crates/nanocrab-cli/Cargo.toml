@@ -1,0 +1,17 @@
+[package]
+name = "nanocrab-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+nanocrab-core = { path = "../nanocrab-core" }
+
+[[bin]]
+name = "nanocrab"
+path = "src/main.rs"

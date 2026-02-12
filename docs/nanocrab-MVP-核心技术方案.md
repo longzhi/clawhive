@@ -1,0 +1,353 @@
+# nanocrab MVP 核心技术方案（v0.1）
+
+> 目标：在不牺牲可扩展性的前提下，尽快交付可运行的第一版。  
+> 核心原则：**Pi 的极简内核 + Nanobot 的清晰分层 + nanocrab 的 WASM 与双层记忆设计**。
+
+---
+
+## 1. MVP 范围与边界
+
+### 0.1 本轮已确认的关键结论（冻结）
+
+1. **多 Agent：MVP 必做**
+2. **Sub-Agent：MVP 必做（最小可用）**
+3. **人设（Persona）归 Core/Agent 管理，不归 Gateway**
+4. **MVP 不引入 workspace 概念**（后续可作为可选能力）
+5. **配置采用 YAML**（不使用数据库作为配置源）
+6. **支持多 Bot / 多账号 / 多会话空间**（`channel_type + connector_id + conversation_scope`）
+
+
+### 1.1 本期要做（Must Have）
+
+1. 单通道接入（Telegram）
+2. Gateway 边界层（接入/鉴权/限流/协议转换）
+3. Core/Orchestrator（会话路由、策略决策、执行编排）
+4. 轻量消息总线（进程内 Event Bus）
+5. Runtime 执行层（预留 WASM 执行接口，先可用基础执行器）
+6. 记忆系统 MVP（海马体 episodes + 皮质 concepts）
+7. 基础定时巩固（Cron 每日低峰执行）
+8. CLI 支持（命令式管理与一次性操作）
+9. TUI 支持（开发者实时观测与调试）
+
+### 1.2 本期不做（Not in MVP）
+
+1. 多节点/分布式总线
+2. 复杂知识图谱引擎
+3. 外部向量数据库
+4. 多通道同时生产化
+5. Agent 自主找任务
+
+---
+
+## 2. 总体架构（职责切分）
+
+### 2.0 多 Bot / 多账号 / 多会话空间（MVP 必须支持）
+
+从 v0.1 开始即支持“同一通道类型的多实例 Bot”，避免后续 session、memory 与路由规则重构。
+
+统一标识三元组：
+
+- `channel_type`：telegram / discord / ...
+- `connector_id`：同类型通道下的具体 Bot 实例（如 `tg_main` / `tg_ops` / `dc_dev`）
+- `conversation_scope`：具体会话空间
+  - Telegram：`chat_id (+ topic_id)`
+  - Discord：`guild_id + channel_id (+ thread_id)`
+
+MVP 强约束：
+
+1. 入站/出站 schema 必带 `connector_id`
+2. Gateway 按 `connector_id` 做鉴权与路由
+3. Session key 必须包含 `connector_id + conversation_scope`
+4. Memory 分区键必须包含 `connector_id`
+
+
+### 2.1 模块角色
+
+- **Gateway（边界层）**
+  - 只负责：接入、验签、限流、协议转换、投递
+  - 不负责：会话语义、记忆决策、工具编排、人设组装
+
+- **Core / Orchestrator（中枢）**
+  - 负责：Session 路由、上下文组装、策略选择、执行编排、记忆控制、人设装配
+  - 是全系统唯一“认知决策入口”
+
+- **Bus（事件层）**
+  - 负责模块解耦：Command/Event 传递
+  - MVP 使用 in-memory async queue
+
+- **Runtime（执行层）**
+  - 接收 Core 下发任务并执行
+  - MVP 预留 WASM 接口，后续平滑切换为 WASM 运行时
+
+- **Memory（记忆层）**
+  - 负责存储与检索
+  - 策略在 Core，存储在 Memory 模块
+
+### 2.2 为什么 Gateway 不控制 Memory
+
+Memory 属于“认知层”能力（什么时候读、写什么、冲突如何处理），必须由 Core 决定。  
+Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
+
+---
+
+## 3. Command / Event Schema（MVP 最小集）
+
+> 先冻结语义协议，再选择传输实现。
+
+所有 Inbound/Outbound DTO 的基础字段至少包含：
+
+- `channel_type`
+- `connector_id`
+- `conversation_scope`
+- `user_scope`
+- `trace_id`
+
+### 3.1 Gateway -> Core Commands
+
+1. `HandleIncomingMessage`
+2. `CancelTask`
+3. `RunScheduledConsolidation`
+
+### 3.2 Core -> Gateway Events
+
+1. `MessageAccepted`
+2. `ReplyReady`
+3. `TaskFailed`
+4. `NeedHumanApproval`（可预留）
+
+### 3.3 Core 内部事件（可选）
+
+1. `MemoryReadRequested`
+2. `MemoryWriteRequested`
+3. `ConsolidationCompleted`
+
+---
+
+## 4. Session 路由规则（MVP）
+
+`session_key` 生成优先级：
+
+1. 显式 thread/session id（若通道提供）
+2. 私聊：`channel_type + connector_id + chat_id + user_id`
+3. 群聊：`channel_type + connector_id + group_id + user_id (+ thread_id/topic_id)`
+
+建议附加：
+
+- Session TTL（例如 30 分钟冷却）
+- 手动 reset
+- trace_id 全链路透传
+
+---
+
+## 5. 记忆系统 MVP（海马体 + 皮质）
+
+## 5.1 设计目标
+
+借鉴“海马体快编码 + 皮质慢整合”：
+
+- **海马体（Hippocampus）**：快速记录近期经历，保细节
+- **皮质（Cortex）**：沉淀稳定知识，保低噪声高置信
+
+### 5.2 数据模型（SQLite）
+
+#### 表 1：`episodes`（海马体）
+
+- `id`
+- `ts`
+- `session_id`
+- `speaker`
+- `text`
+- `tags`（JSON）
+- `importance`（0-1）
+- `context_hash`
+- `source_ref`
+
+#### 表 2：`concepts`（皮质）
+
+- `id`
+- `type`（fact/preference/rule/entity/task_state）
+- `key`
+- `value`
+- `confidence`
+- `evidence`
+- `first_seen`
+- `last_verified`
+- `status`（active/stale/conflicted）
+
+#### 表 3：`links`（证据链，简化版）
+
+- `id`
+- `episode_id`
+- `concept_id`
+- `relation`（supports/contradicts/updates）
+- `created_at`
+
+### 5.3 写入策略（MVP 保守）
+
+长期记忆（concepts）仅在以下场景写入：
+
+1. 用户明确“记住这个”
+2. 稳定偏好（语言、输出风格、工具偏好）
+3. 稳定事实（路径、命名约定、架构决策）
+4. 任务状态（todo / blocked / done）
+
+其余内容只写 `episodes`。
+
+### 5.4 检索策略（MVP）
+
+1. 先查海马体近期窗口（如 7 天）
+2. 再查皮质概念层
+3. 融合重排（相关度 + 置信度 + 新近性）
+
+### 5.5 巩固流程（每日低峰 Cron）
+
+1. 读取近 24h 高价值 episodes
+2. 去重聚类（规则优先）
+3. 生成 concept 候选
+4. 与已有 concept 比对并更新 confidence/status
+5. 建立 episode->concept links
+6. 执行遗忘策略（episodes TTL，concept stale 标注）
+
+---
+
+## 6. 多 Agent / Sub-Agent 设计（MVP）
+
+### 6.1 多 Agent（必须）
+
+- `agent_id` 为一等字段，必须进入：
+  - Command/Event schema
+  - session_key 生成
+  - memory 分区键
+- Core 内提供 `AgentRegistry`：
+  - 解析可用 agent 列表
+  - 基于 routing 规则选择目标 agent
+  - 加载该 agent 的 model/tools/memory/persona 策略
+
+### 6.2 Sub-Agent（必须，最小可用）
+
+MVP 支持：
+
+- `spawn(task, agent_id?)`
+- `cancel(run_id)`
+- `timeout(run_id, ttl)`
+- `result_merge(parent_session)`
+
+约束：
+
+- 默认禁止子代理递归再 spawn（避免失控）
+- 子代理工具集默认比主代理更收敛（最小权限）
+- 子代理必须带 `parent_run_id` 与 `trace_id`，便于审计
+
+### 6.3 Persona（参考 OpenClaw 但做无 workspace 版）
+
+OpenClaw 的实践是“结构化 identity + 文本化行为规则”。  
+nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
+
+- **IdentityProfile（结构化）**：`name/emoji/avatar/public_label`
+- **BehaviorProfile（文本化）**：`system/style/safety` 提示模板
+
+人设加载与组装在 Core 内完成，Gateway 不参与。
+
+## 7. 配置管理（YAML，非数据库）
+
+### 7.1 选择结论
+
+- MVP 配置格式：**YAML**
+- 不使用数据库作为配置源
+- 运行时解析后映射为强类型结构体
+
+### 7.2 建议目录结构
+
+- `config/main.yaml`（全局）
+- `config/agents.d/*.yaml`（每个 Agent 一份）
+- `config/routing.yaml`（channel/connector -> agent 绑定）
+- `prompts/<agent_id>/system.md`
+- `prompts/<agent_id>/style.md`
+- `prompts/<agent_id>/safety.md`
+
+### 7.3 配置校验
+
+- 启动时做 schema 校验（必填字段、引用存在、重复 id）
+- 校验失败即阻止启动（fail fast）
+
+## 8. 项目结构（面向后续开源拆分）
+
+建议使用 Rust workspace（monorepo）：
+
+- `crab-gateway`：接入层
+- `crab-core`：orchestrator + session + policy
+- `crab-schema`：command/event DTO（稳定边界）
+- `crab-bus`：总线抽象与 in-memory 实现
+- `crab-memory`：episodes/concepts/links 存取
+- `crab-runtime`：执行器接口（WASM adapter 预留）
+- `crab-channels-telegram`：首个通道驱动
+- `crab-sdk`：后续插件/第三方接入
+
+### 6.1 依赖规则（必须遵守）
+
+1. 跨模块通信只走 `crab-schema`
+2. `gateway` 不能直接依赖 `memory` 存储实现
+3. `core` 依赖 trait，不依赖具体基础设施实现
+4. 通道模块不包含业务决策代码
+
+---
+
+## 9. CLI / TUI 支持（MVP）
+
+### 9.1 CLI（必须）
+
+用于一次性命令操作：
+
+- 启停服务（gateway start/stop/restart）
+- 配置校验与加载
+- agent 管理（list/add/enable/disable）
+- 任务触发与排障命令
+
+### 9.2 TUI（必须，开发者向）
+
+用于实时观察与快速干预：
+
+- Active Sessions 面板
+- Event Bus 队列面板（inbound/outbound/backlog）
+- Runs/Sub-Agent 面板（状态、耗时、失败重试）
+- Logs/Trace 面板（按 trace_id 过滤）
+
+建议实现：`ratatui + crossterm`。
+
+## 10. 执行链路（MVP）
+
+`TelegramDriver -> Gateway -> Bus(Command) -> Core -> Runtime/Memory -> Bus(Event: ReplyReady) -> Gateway -> TelegramDriver`
+
+---
+
+## 11. 第一版里程碑（建议）
+
+### M1（可跑通）
+
+- Telegram 入站/出站
+- Core 基础路由
+- Session 持久化
+
+### M2（可用）
+
+- episodes 写入 + 检索
+- concepts 手动/规则写入
+- 回答前记忆注入
+
+### M3（可演进）
+
+- 每日巩固任务
+- 冲突标注与简单遗忘
+- runtime wasm adapter 骨架
+
+---
+
+## 12. 结论
+
+nanocrab MVP 推荐采用：
+
+- **架构层面**：Gateway + Core/Orchestrator + Bus + Memory + Runtime
+- **记忆层面**：海马体（快写入）+ 皮质（慢整合）
+- **工程策略**：先轻实现，先稳协议，先保边界
+
+这套方案既能快速落地第一版，也保证后续模块可独立开源与扩展。

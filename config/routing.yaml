@@ -1,0 +1,15 @@
+default_agent_id: nanocrab-main
+
+bindings:
+  - channel_type: telegram
+    connector_id: tg_main
+    match:
+      kind: dm
+    agent_id: nanocrab-main
+
+  - channel_type: telegram
+    connector_id: tg_main
+    match:
+      kind: mention
+      pattern: "@builder"
+    agent_id: nanocrab-builder
