@@ -70,3 +70,26 @@ impl LlmProvider for AnthropicProvider {
 pub fn register_builtin_providers(registry: &mut ProviderRegistry) {
     registry.register("anthropic", || Box::new(AnthropicProvider));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn registry_builds_anthropic_and_returns_stub() {
+        let mut registry = ProviderRegistry::new();
+        register_builtin_providers(&mut registry);
+
+        let provider = registry.build("anthropic").unwrap();
+        let out = provider
+            .chat(LlmRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                system: None,
+                user: "hello".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
+    }
+}

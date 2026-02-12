@@ -244,6 +244,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nanocrab-core",
+ "nanocrab-provider",
  "serde",
  "serde_yaml",
  "tokio",
@@ -255,8 +256,11 @@ name = "nanocrab-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
+ "nanocrab-provider",
  "serde",
+ "tokio",
  "tracing",
  "uuid",
 ]

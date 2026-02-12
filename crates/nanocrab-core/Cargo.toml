@@ -10,3 +10,6 @@ serde.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+nanocrab-provider = { path = "../nanocrab-provider" }

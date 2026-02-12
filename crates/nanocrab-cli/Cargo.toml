@@ -11,6 +11,7 @@ serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 nanocrab-core = { path = "../nanocrab-core" }
+nanocrab-provider = { path = "../nanocrab-provider" }
 
 [[bin]]
 name = "nanocrab"
