@@ -140,16 +140,230 @@ vNext 重点是：
 
 ---
 
-## 9. 建议落地节奏
+## 9. 工具调用系统（Tool Calling）
 
-1. 在 `docs/` 保持本文件为 vNext 设计基线
-2. MVP 完成后，先实现 `CapabilityGrant` 数据结构 + 审计日志
-3. 再引入 Policy Engine（Safe/Guarded/Unsafe）
-4. 最后接 Planner 与高级执行策略
+### 9.1 设计目标
+
+在 MVP 的基础工具调用之上，构建完整的、多 provider 兼容的原生工具调用系统。
+
+核心原则：
+
+1. **走 Provider 原生 Tool Use 协议**（非文本解析），结构化、类型安全
+2. **统一抽象层**：Core/Orchestrator 只操作统一类型，不感知 provider 协议差异
+3. **Skill 指导 + Tool 执行**：Skill 提供策略知识（何时用、怎么用），Tool 提供执行能力（参数契约 + 实际调用）
+4. **与 Capability 模型集成**：工具调用受权限策略约束（§3）
+
+### 9.2 统一 Tool 类型
+
+放置于 `nanocrab-schema` 或 `nanocrab-provider/types.rs`：
+
+```rust
+/// 工具定义：注册到 ToolRegistry，传递给 LLM Provider
+struct ToolDef {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,  // JSON Schema
+}
+
+/// 工具调用：LLM 返回的结构化调用请求
+struct ToolCall {
+    id: String,           // provider 生成的调用 ID
+    name: String,         // 工具名
+    input: serde_json::Value,  // 参数
+}
+
+/// 工具结果：执行后回传给 LLM
+struct ToolResult {
+    tool_call_id: String, // 对应 ToolCall.id
+    output: String,       // 执行输出
+    is_error: bool,       // 是否执行失败
+}
+```
+
+### 9.3 消息模型扩展
+
+现有 `LlmMessage.content` 从纯 `String` 扩展为 `Vec<ContentBlock>`：
+
+```rust
+enum ContentBlock {
+    Text(String),
+    ToolUse(ToolCall),
+    ToolResult(ToolResult),
+}
+
+struct LlmMessage {
+    role: String,
+    content: Vec<ContentBlock>,
+}
+
+struct LlmRequest {
+    model: String,
+    system: Option<String>,
+    messages: Vec<LlmMessage>,
+    tools: Vec<ToolDef>,       // 新增：可用工具列表
+    max_tokens: u32,
+}
+
+struct LlmResponse {
+    content: Vec<ContentBlock>, // 扩展：可能包含 text + tool_use 混合
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+    stop_reason: Option<String>,
+}
+```
+
+> **Breaking Change 注意**：`content: String` → `Vec<ContentBlock>` 需要适配所有现有代码。建议提供 `LlmMessage::text(role, content)` 便捷构造器保持向后兼容。
+
+### 9.4 多 Provider 协议适配
+
+各 provider 的 tool use 协议格式不同，但语义一致：
+
+| Provider | 请求格式 | 响应格式 | tool_result 传递方式 |
+|----------|----------|----------|---------------------|
+| **Anthropic** | `tools` 数组 | `tool_use` content block | `tool_result` content block（同一 message） |
+| **OpenAI / 兼容** | `tools` 数组 | `tool_calls` in assistant message | `role: "tool"` 独立 message |
+| **Google Gemini** | `tools` + `functionDeclarations` | `functionCall` in parts | `functionResponse` in parts |
+| **本地推理** | 多数兼容 OpenAI 格式 | 同 OpenAI | 同 OpenAI |
+
+适配策略：
+
+```
+nanocrab-core（统一抽象）          nanocrab-provider（各 Adapter）
+┌───────────────────────┐         ┌──────────────────────────┐
+│ ToolDef               │         │ AnthropicAdapter         │
+│ ToolCall              │────────▶│  → tools content blocks  │
+│ ToolResult            │         ├──────────────────────────┤
+│ ContentBlock          │◀────────│ OpenAIAdapter            │
+│                       │         │  → tools + tool_calls    │
+│                       │         ├──────────────────────────┤
+│                       │         │ GeminiAdapter            │
+│                       │         │  → functionDeclarations  │
+│                       │         └──────────────────────────┘
+└───────────────────────┘
+```
+
+每个 Adapter 实现两个转换：
+1. **请求转换**：统一 `ToolDef` + `ContentBlock` → provider 特定 API 格式
+2. **响应转换**：provider 特定响应 → 统一 `ContentBlock`
+
+LlmProvider trait 扩展：
+
+```rust
+#[async_trait]
+trait LlmProvider: Send + Sync {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse>;
+    fn supports_tools(&self) -> bool { false }  // 新增：能力声明
+    // ...
+}
+```
+
+### 9.5 工具注册与管理
+
+```rust
+struct ToolRegistry {
+    tools: HashMap<String, RegisteredTool>,
+}
+
+struct RegisteredTool {
+    def: ToolDef,                    // 工具定义（传给 LLM）
+    executor: Arc<dyn ToolExecutor>, // 工具执行器
+    risk_level: RiskLevel,           // Safe / Guarded / Unsafe（对接 §3 权限模型）
+}
+
+#[async_trait]
+trait ToolExecutor: Send + Sync {
+    async fn execute(&self, input: serde_json::Value) -> Result<String>;
+}
+```
+
+工具来源：
+- **内置工具**：`shell_exec`、`file_read`、`file_write`、`web_fetch` 等
+- **Skill 声明的工具**：Skill 的 frontmatter 中可声明 `requires.tools`
+- **动态注册**：通过配置或 API 动态添加（vNext 后期）
+
+按 agent 过滤：
+- `ToolPolicyConfig.allow` 白名单控制每个 agent 可见的工具集
+- 未在白名单中的工具不传给 LLM
+
+### 9.6 工具调用执行循环
+
+替代现有的 `weak_react_loop`，实现完整的 tool use 循环：
+
+```
+1. 组装 messages + tools → 调 LLM
+2. 解析 LlmResponse.content:
+   ├── 只有 Text → 直接返回（无工具调用）
+   └── 包含 ToolUse →
+       a. 对每个 ToolCall:
+          ├── 权限检查（Capability Policy）
+          ├── Safe → 直接执行
+          ├── Guarded → 检查是否已审批
+          └── Unsafe → 触发 NeedHumanApproval，等待确认
+       b. 执行工具，收集 ToolResult
+       c. 将 assistant message (含 ToolUse) + ToolResult 追加到 messages
+       d. 回到步骤 1（继续调 LLM）
+3. 循环上限：max_tool_rounds（防止无限循环）
+4. 重复检测：连续相同工具调用 → 中断
+```
+
+### 9.7 Tool 与 Skill 的协作关系
+
+```
+Skill（知识层）              Tool（执行层）
+┌─────────────────┐         ┌─────────────────┐
+│ SKILL.md        │         │ ToolDef          │
+│ - 何时使用      │         │ - name           │
+│ - 操作步骤      │  指导   │ - parameters     │
+│ - 注意事项      │────────▶│ - executor       │
+│ - requires.tools│         │                  │
+└─────────────────┘         └─────────────────┘
+       │                           │
+       ▼                           ▼
+  注入 system prompt          传入 LLM tools 参数
+  （LLM 读取理解）            （LLM 结构化调用）
+```
+
+- **Skill 不执行任何操作**：只作为 prompt 知识注入，帮助 LLM 理解何时/如何使用工具
+- **Tool 不包含策略**：只定义参数契约和执行逻辑
+- **LLM 是决策者**：根据 Skill 知识 + Tool 定义，自主决定调用时机和参数
+
+### 9.8 与 Capability 模型的集成
+
+工具调用是 Capability 权限模型（§3）最直接的应用场景：
+
+- 每个 `RegisteredTool` 带 `risk_level`
+- 工具执行前经过 Policy Engine 检查
+- `CapabilityGrant` 记录授权详情，写入审计日志（§6）
+- 高风险工具（如 `shell_exec`）默认 Unsafe，每次需确认
+
+### 9.9 MVP vs vNext 边界
+
+| 能力 | MVP | vNext |
+|------|-----|-------|
+| Provider 原生 tool_use（Anthropic） | ✅ 首先实现 | — |
+| 统一 ToolDef / ToolCall / ToolResult 类型 | ✅ | — |
+| ContentBlock 消息模型 | ✅ | — |
+| 基础内置工具（shell_exec, file_read） | ✅ | — |
+| 工具执行循环（替代 weak_react_loop） | ✅ | — |
+| 多 Provider 适配（OpenAI/Gemini） | — | ✅ |
+| ToolRegistry 动态注册 | — | ✅ |
+| Capability 权限集成 | — | ✅ |
+| 工具语义检索（sqlite-vec） | — | ✅ |
+| Skill.requires.tools 自动关联 | — | ✅ |
 
 ---
 
-## 10. 结论
+## 10. 建议落地节奏
+
+1. 在 `docs/` 保持本文件为 vNext 设计基线
+2. MVP 完成后，先实现 `CapabilityGrant` 数据结构 + 审计日志
+3. 多 Provider 工具调用适配（OpenAI/Gemini）+ ToolRegistry 动态注册
+4. 引入 Policy Engine（Safe/Guarded/Unsafe）+ 工具权限集成
+5. 最后接 Planner 与高级执行策略
+
+---
+
+## 11. 结论
 
 nanocrab 在 vNext 采用“Capability-based, per-task least-privilege”模型，将显著提升：
 
