@@ -87,9 +87,25 @@ fn parse_provider_model(input: &str) -> Result<(String, String)> {
     Ok((provider.to_string(), model.to_string()))
 }
 
+#[derive(Debug, Clone)]
+pub struct WeakReActConfig {
+    pub max_steps: usize,
+    pub repeat_guard: usize,
+}
+
+impl Default for WeakReActConfig {
+    fn default() -> Self {
+        Self {
+            max_steps: 4,
+            repeat_guard: 2,
+        }
+    }
+}
+
 pub struct Orchestrator {
     router: LlmRouter,
     agents: HashMap<String, AgentConfig>,
+    react: WeakReActConfig,
 }
 
 impl Orchestrator {
@@ -98,7 +114,16 @@ impl Orchestrator {
         for a in agents {
             map.insert(a.agent_id.clone(), a);
         }
-        Self { router, agents: map }
+        Self {
+            router,
+            agents: map,
+            react: WeakReActConfig::default(),
+        }
+    }
+
+    pub fn with_react_config(mut self, react: WeakReActConfig) -> Self {
+        self.react = react;
+        self
     }
 
     pub async fn handle_inbound(&self, inbound: InboundMessage, agent_id: &str) -> Result<OutboundMessage> {
@@ -106,14 +131,35 @@ impl Orchestrator {
             .agents
             .get(agent_id)
             .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
-        let text = self.router.reply(agent, &inbound.text).await?;
+
+        let mut current = inbound.text.clone();
+        let mut repeated = 0usize;
+
+        for _step in 0..self.react.max_steps {
+            let reply = self.router.reply(agent, &current).await?;
+            if reply == current {
+                repeated += 1;
+                if repeated >= self.react.repeat_guard {
+                    current = format!("{}\n[weak-react] stop: repeated", reply);
+                    break;
+                }
+            } else {
+                repeated = 0;
+                current = reply;
+            }
+
+            if current.contains("[finish]") {
+                current = current.replace("[finish]", "").trim().to_string();
+                break;
+            }
+        }
 
         Ok(OutboundMessage {
             trace_id: inbound.trace_id,
             channel_type: inbound.channel_type,
             connector_id: inbound.connector_id,
             conversation_scope: inbound.conversation_scope,
-            text,
+            text: current,
             at: chrono::Utc::now(),
         })
     }
@@ -129,11 +175,19 @@ mod tests {
     use uuid::Uuid;
 
     struct FailProvider;
+    struct EchoProvider;
 
     #[async_trait]
     impl LlmProvider for FailProvider {
         async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse> {
             Err(anyhow!("forced failure"))
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for EchoProvider {
+        async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+            Ok(LlmResponse { text: request.user })
         }
     }
 
@@ -219,5 +273,32 @@ mod tests {
 
         let out = orch.handle_inbound(inbound, "nanocrab-main").await.unwrap();
         assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
+    }
+
+    #[tokio::test]
+    async fn weak_react_stops_on_repeat_guard() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("echo", || Box::new(EchoProvider));
+
+        let aliases = HashMap::from([("echo".to_string(), "echo/model".to_string())]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+        let orch = Orchestrator::new(router, vec![test_agent("echo", vec![])])
+            .with_react_config(WeakReActConfig {
+                max_steps: 4,
+                repeat_guard: 1,
+            });
+
+        let inbound = InboundMessage {
+            trace_id: Uuid::new_v4(),
+            channel_type: "telegram".to_string(),
+            connector_id: "tg_main".to_string(),
+            conversation_scope: "chat:1".to_string(),
+            user_scope: "user:1".to_string(),
+            text: "loop".to_string(),
+            at: chrono::Utc::now(),
+        };
+
+        let out = orch.handle_inbound(inbound, "nanocrab-main").await.unwrap();
+        assert!(out.text.contains("weak-react"));
     }
 }
