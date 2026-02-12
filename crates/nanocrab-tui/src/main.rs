@@ -16,22 +16,96 @@ use ratatui::{
     Frame, Terminal,
 };
 
+const MAX_ITEMS: usize = 200;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Panel {
+    BusEvents,
+    Sessions,
+    AgentRuns,
+    Logs,
+}
+
+impl Panel {
+    fn next(self) -> Self {
+        match self {
+            Panel::BusEvents => Panel::Sessions,
+            Panel::Sessions => Panel::AgentRuns,
+            Panel::AgentRuns => Panel::Logs,
+            Panel::Logs => Panel::BusEvents,
+        }
+    }
+}
+
 struct App {
     events: Vec<String>,
+    sessions: Vec<String>,
+    agent_runs: Vec<String>,
+    logs: Vec<String>,
+    focus: Panel,
+    scroll_offset: [usize; 4],
     should_quit: bool,
 }
 
 impl App {
     fn new() -> Self {
         Self {
-            events: Vec::new(),
+            events: vec![format!(
+                "[{}] TUI started",
+                chrono::Local::now().format("%H:%M:%S")
+            )],
+            sessions: vec!["No active sessions".into()],
+            agent_runs: vec!["No running agents".into()],
+            logs: vec!["Waiting for trace events...".into()],
+            focus: Panel::BusEvents,
+            scroll_offset: [0; 4],
             should_quit: false,
         }
     }
 
     fn on_key(&mut self, key: KeyCode) {
-        if let KeyCode::Char('q') = key {
-            self.should_quit = true;
+        match key {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Tab => {
+                self.focus = self.focus.next();
+            }
+            KeyCode::Up => {
+                let idx = self.focus as usize;
+                if self.scroll_offset[idx] > 0 {
+                    self.scroll_offset[idx] -= 1;
+                }
+            }
+            KeyCode::Down => {
+                let idx = self.focus as usize;
+                let max = match self.focus {
+                    Panel::BusEvents => self.events.len(),
+                    Panel::Sessions => self.sessions.len(),
+                    Panel::AgentRuns => self.agent_runs.len(),
+                    Panel::Logs => self.logs.len(),
+                };
+                if self.scroll_offset[idx] < max.saturating_sub(1) {
+                    self.scroll_offset[idx] += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Push a bus event into the panel (used when real EventBus is wired).
+    #[allow(dead_code)]
+    fn push_event(&mut self, event: String) {
+        self.events.push(event);
+        if self.events.len() > MAX_ITEMS {
+            self.events.remove(0);
+        }
+    }
+
+    /// Push a log/trace entry into the panel (used when real EventBus is wired).
+    #[allow(dead_code)]
+    fn push_log(&mut self, log: String) {
+        self.logs.push(log);
+        if self.logs.len() > MAX_ITEMS {
+            self.logs.remove(0);
         }
     }
 }
@@ -79,52 +153,125 @@ fn ui(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
-    let panels = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(main_layout[0]);
 
-    let events = if app.events.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "No events yet...",
-            Style::default().fg(Color::DarkGray),
-        )))]
-    } else {
-        app.events
-            .iter()
-            .rev()
-            .map(|item| ListItem::new(Line::from(item.as_str())))
-            .collect()
-    };
+    let top_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(rows[0]);
 
-    let events_list = List::new(events).block(
-        Block::default()
-            .title(" Bus Events ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-    frame.render_widget(events_list, panels[0]);
+    let bottom_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(rows[1]);
 
-    let sessions = Paragraph::new("No active sessions").block(
-        Block::default()
-            .title(" Sessions ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow)),
+    render_list_panel(
+        frame,
+        top_cols[0],
+        " Bus Events ",
+        &app.events,
+        app.scroll_offset[0],
+        app.focus == Panel::BusEvents,
+        Color::Cyan,
     );
-    frame.render_widget(sessions, panels[1]);
+
+    render_list_panel(
+        frame,
+        top_cols[1],
+        " Sessions ",
+        &app.sessions,
+        app.scroll_offset[1],
+        app.focus == Panel::Sessions,
+        Color::Yellow,
+    );
+
+    render_list_panel(
+        frame,
+        bottom_cols[0],
+        " Agent Runs ",
+        &app.agent_runs,
+        app.scroll_offset[2],
+        app.focus == Panel::AgentRuns,
+        Color::Green,
+    );
+
+    render_list_panel(
+        frame,
+        bottom_cols[1],
+        " Logs / Trace ",
+        &app.logs,
+        app.scroll_offset[3],
+        app.focus == Panel::Logs,
+        Color::Magenta,
+    );
 
     let status = Paragraph::new(Line::from(vec![
-        Span::styled(" Press ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            "'q'",
+            " [q]",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" quit ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            " to quit | nanocrab TUI v0.1.0 ",
+            "[Tab]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" focus ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "[↑↓]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" scroll ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "| nanocrab TUI v0.2.0 ",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
     frame.render_widget(status, main_layout[1]);
+}
+
+fn render_list_panel(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    title: &str,
+    items: &[String],
+    scroll_offset: usize,
+    focused: bool,
+    color: Color,
+) {
+    let border_style = if focused {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let visible: Vec<ListItem> = items
+        .iter()
+        .skip(scroll_offset)
+        .map(|item| {
+            let style = if focused {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            ListItem::new(Line::from(Span::styled(item.as_str(), style)))
+        })
+        .collect();
+
+    let list = List::new(visible).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style),
+    );
+
+    frame.render_widget(list, area);
 }

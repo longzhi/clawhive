@@ -10,8 +10,13 @@ tokio.workspace = true
 tracing.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+chrono.workspace = true
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-schema = { path = "../nanocrab-schema" }
+nanocrab-core = { path = "../nanocrab-core" }
+nanocrab-memory = { path = "../nanocrab-memory" }
+nanocrab-provider = { path = "../nanocrab-provider" }
+nanocrab-gateway = { path = "../nanocrab-gateway" }
 
 [[bin]]
 name = "nanocrab-tui"

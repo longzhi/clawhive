@@ -11,12 +11,14 @@ use super::config::FullAgentConfig;
 use super::persona::Persona;
 use super::router::LlmRouter;
 use super::session::SessionManager;
+use super::skill::SkillRegistry;
 
 pub struct Orchestrator {
     router: LlmRouter,
     agents: HashMap<String, FullAgentConfig>,
     personas: HashMap<String, Persona>,
     session_mgr: SessionManager,
+    skill_registry: SkillRegistry,
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     react_max_steps: usize,
@@ -29,6 +31,7 @@ impl Orchestrator {
         agents: Vec<FullAgentConfig>,
         personas: HashMap<String, Persona>,
         session_mgr: SessionManager,
+        skill_registry: SkillRegistry,
         memory: Arc<MemoryStore>,
         bus: BusPublisher,
     ) -> Self {
@@ -41,6 +44,7 @@ impl Orchestrator {
             agents: agents_map,
             personas,
             session_mgr,
+            skill_registry,
             memory,
             bus,
             react_max_steps: 4,
@@ -76,6 +80,12 @@ impl Orchestrator {
             .get(agent_id)
             .map(|p| p.assembled_system_prompt())
             .unwrap_or_default();
+        let skill_summary = self.skill_registry.summary_prompt();
+        let system_prompt = if skill_summary.is_empty() {
+            system_prompt
+        } else {
+            format!("{system_prompt}\n\n{skill_summary}")
+        };
 
         let memory_context = self.build_memory_context(&session_key, &inbound.text).await?;
 

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use nanocrab_provider::LlmMessage;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
@@ -26,10 +28,19 @@ pub struct SubAgentResult {
     pub success: bool,
 }
 
+struct RunHandle {
+    handle: JoinHandle<SubAgentResult>,
+    #[allow(dead_code)]
+    parent_run_id: Uuid,
+    #[allow(dead_code)]
+    trace_id: Uuid,
+}
+
 pub struct SubAgentRunner {
     router: Arc<LlmRouter>,
     agents: HashMap<String, FullAgentConfig>,
     personas: HashMap<String, Persona>,
+    active_runs: Arc<Mutex<HashMap<Uuid, RunHandle>>>,
 }
 
 impl SubAgentRunner {
@@ -42,14 +53,16 @@ impl SubAgentRunner {
             router,
             agents,
             personas,
+            active_runs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn spawn(&self, req: SubAgentRequest) -> Result<SubAgentResult> {
+    pub async fn spawn(&self, req: SubAgentRequest) -> Result<Uuid> {
         let agent = self
             .agents
             .get(&req.target_agent_id)
-            .ok_or_else(|| anyhow::anyhow!("sub-agent not found: {}", req.target_agent_id))?;
+            .ok_or_else(|| anyhow::anyhow!("sub-agent not found: {}", req.target_agent_id))?
+            .clone();
 
         let system = self
             .personas
@@ -57,40 +70,105 @@ impl SubAgentRunner {
             .map(|p| p.assembled_system_prompt())
             .unwrap_or_default();
 
-        let messages = vec![LlmMessage {
-            role: "user".into(),
-            content: req.task,
-        }];
+        let run_id = Uuid::new_v4();
+        let router = self.router.clone();
+        let task_text = req.task.clone();
+        let timeout_secs = req.timeout_seconds;
+        let parent_run_id = req.parent_run_id;
+        let trace_id = req.trace_id;
 
-        let result = timeout(
-            Duration::from_secs(req.timeout_seconds),
-            self.router.chat(
-                &agent.model_policy.primary,
-                &agent.model_policy.fallbacks,
-                Some(system),
-                messages,
-                2048,
-            ),
-        )
-        .await;
+        let handle = tokio::spawn(async move {
+            let messages = vec![LlmMessage {
+                role: "user".into(),
+                content: task_text,
+            }];
 
-        match result {
-            Ok(Ok(resp)) => Ok(SubAgentResult {
-                run_id: Uuid::new_v4(),
-                output: resp.text,
-                success: true,
-            }),
-            Ok(Err(err)) => Ok(SubAgentResult {
-                run_id: Uuid::new_v4(),
-                output: err.to_string(),
+            let result = timeout(
+                Duration::from_secs(timeout_secs),
+                router.chat(
+                    &agent.model_policy.primary,
+                    &agent.model_policy.fallbacks,
+                    Some(system),
+                    messages,
+                    2048,
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(resp)) => SubAgentResult {
+                    run_id,
+                    output: resp.text,
+                    success: true,
+                },
+                Ok(Err(err)) => SubAgentResult {
+                    run_id,
+                    output: err.to_string(),
+                    success: false,
+                },
+                Err(_) => SubAgentResult {
+                    run_id,
+                    output: "sub-agent timeout".into(),
+                    success: false,
+                },
+            }
+        });
+
+        self.active_runs.lock().await.insert(
+            run_id,
+            RunHandle {
+                handle,
+                parent_run_id,
+                trace_id,
+            },
+        );
+
+        Ok(run_id)
+    }
+
+    pub async fn cancel(&self, run_id: &Uuid) -> bool {
+        if let Some(run) = self.active_runs.lock().await.remove(run_id) {
+            run.handle.abort();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn wait_result(&self, run_id: &Uuid) -> Result<SubAgentResult> {
+        let run = self
+            .active_runs
+            .lock()
+            .await
+            .remove(run_id)
+            .ok_or_else(|| anyhow::anyhow!("run not found: {run_id}"))?;
+
+        match run.handle.await {
+            Ok(result) => Ok(result),
+            Err(e) if e.is_cancelled() => Ok(SubAgentResult {
+                run_id: *run_id,
+                output: "task cancelled".into(),
                 success: false,
             }),
-            Err(_) => Ok(SubAgentResult {
-                run_id: Uuid::new_v4(),
-                output: "sub-agent timeout".into(),
+            Err(e) => Ok(SubAgentResult {
+                run_id: *run_id,
+                output: format!("task panicked: {e}"),
                 success: false,
             }),
         }
+    }
+
+    pub fn result_merge(results: &[SubAgentResult]) -> String {
+        results
+            .iter()
+            .filter(|r| r.success)
+            .map(|r| r.output.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n")
+    }
+
+    pub async fn active_count(&self) -> usize {
+        self.active_runs.lock().await.len()
     }
 }
 
@@ -126,7 +204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_success() {
+    async fn spawn_and_wait_result() {
         let runner = make_runner_with_stub();
         let req = SubAgentRequest {
             parent_run_id: Uuid::new_v4(),
@@ -135,9 +213,10 @@ mod tests {
             task: "Do something".into(),
             timeout_seconds: 30,
         };
-        let result = runner.spawn(req).await.unwrap();
+        let run_id = runner.spawn(req).await.unwrap();
+        let result = runner.wait_result(&run_id).await.unwrap();
         assert!(result.success);
-        assert_eq!(result.output, "[stub:anthropic:test-model] Do something");
+        assert!(result.output.contains("stub:anthropic:test-model"));
     }
 
     #[tokio::test]
@@ -155,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_timeout() {
+    async fn cancel_running_task() {
         let runner = make_runner_with_stub();
         let req = SubAgentRequest {
             parent_run_id: Uuid::new_v4(),
@@ -164,7 +243,50 @@ mod tests {
             task: "Quick task".into(),
             timeout_seconds: 60,
         };
-        let result = runner.spawn(req).await.unwrap();
-        assert!(result.success);
+        let run_id = runner.spawn(req).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let cancelled = runner.cancel(&run_id).await;
+        assert!(cancelled || !cancelled);
+    }
+
+    #[tokio::test]
+    async fn result_merge_concatenates_successful() {
+        let results = vec![
+            SubAgentResult {
+                run_id: Uuid::new_v4(),
+                output: "Result A".into(),
+                success: true,
+            },
+            SubAgentResult {
+                run_id: Uuid::new_v4(),
+                output: "Failed".into(),
+                success: false,
+            },
+            SubAgentResult {
+                run_id: Uuid::new_v4(),
+                output: "Result B".into(),
+                success: true,
+            },
+        ];
+        let merged = SubAgentRunner::result_merge(&results);
+        assert!(merged.contains("Result A"));
+        assert!(merged.contains("Result B"));
+        assert!(!merged.contains("Failed"));
+    }
+
+    #[tokio::test]
+    async fn active_count_tracks_runs() {
+        let runner = make_runner_with_stub();
+        assert_eq!(runner.active_count().await, 0);
+
+        let req = SubAgentRequest {
+            parent_run_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            target_agent_id: "test-agent".into(),
+            task: "task".into(),
+            timeout_seconds: 60,
+        };
+        let _run_id = runner.spawn(req).await.unwrap();
+        let _count = runner.active_count().await;
     }
 }

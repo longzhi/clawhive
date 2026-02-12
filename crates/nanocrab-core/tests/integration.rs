@@ -90,7 +90,15 @@ fn make_orchestrator(
     let publisher = bus.publisher();
     let session_mgr = SessionManager::new(memory.clone(), 1800);
 
-    Orchestrator::new(router, agents, HashMap::new(), session_mgr, memory, publisher)
+    Orchestrator::new(
+        router,
+        agents,
+        HashMap::new(),
+        session_mgr,
+        SkillRegistry::new(),
+        memory,
+        publisher,
+    )
 }
 
 #[tokio::test]
@@ -215,6 +223,7 @@ async fn orchestrator_creates_session() {
         agents,
         HashMap::new(),
         session_mgr,
+        SkillRegistry::new(),
         memory.clone(),
         bus.publisher(),
     );
@@ -241,7 +250,15 @@ async fn orchestrator_publishes_reply_ready() {
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
     let router = LlmRouter::new(registry, aliases, vec![]);
-    let orch = Orchestrator::new(router, agents, HashMap::new(), session_mgr, memory, bus.publisher());
+    let orch = Orchestrator::new(
+        router,
+        agents,
+        HashMap::new(),
+        session_mgr,
+        SkillRegistry::new(),
+        memory,
+        bus.publisher(),
+    );
 
     let _ = orch
         .handle_inbound(test_inbound("hello"), "nanocrab-main")

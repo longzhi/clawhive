@@ -18,3 +18,6 @@ nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-bus = { path = "../nanocrab-bus" }
+
+[dev-dependencies]
+tempfile.workspace = true

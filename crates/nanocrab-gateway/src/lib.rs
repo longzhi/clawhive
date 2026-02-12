@@ -1,22 +1,99 @@
 use std::sync::Arc;
+use std::collections::HashMap as StdHashMap;
 
 use anyhow::Result;
 use nanocrab_bus::BusPublisher;
 use nanocrab_core::{Orchestrator, RoutingConfig};
 use nanocrab_schema::*;
+use tokio::sync::Mutex as TokioMutex;
+
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub requests_per_minute: u32,
+    pub burst: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 30,
+            burst: 10,
+        }
+    }
+}
+
+struct TokenBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_refill: chrono::DateTime<chrono::Utc>,
+}
+
+impl TokenBucket {
+    fn new(config: &RateLimitConfig) -> Self {
+        Self {
+            tokens: config.burst as f64,
+            max_tokens: config.burst as f64,
+            refill_rate: config.requests_per_minute as f64 / 60.0,
+            last_refill: chrono::Utc::now(),
+        }
+    }
+
+    fn try_consume(&mut self) -> bool {
+        let now = chrono::Utc::now();
+        let elapsed = (now - self.last_refill).num_milliseconds() as f64 / 1000.0;
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub struct RateLimiter {
+    buckets: Arc<TokioMutex<StdHashMap<String, TokenBucket>>>,
+    config: RateLimitConfig,
+}
+
+impl RateLimiter {
+    pub fn new(config: RateLimitConfig) -> Self {
+        Self {
+            buckets: Arc::new(TokioMutex::new(StdHashMap::new())),
+            config,
+        }
+    }
+
+    pub async fn check(&self, key: &str) -> bool {
+        let mut buckets = self.buckets.lock().await;
+        let bucket = buckets
+            .entry(key.to_string())
+            .or_insert_with(|| TokenBucket::new(&self.config));
+        bucket.try_consume()
+    }
+}
 
 pub struct Gateway {
     orchestrator: Arc<Orchestrator>,
     routing: RoutingConfig,
     bus: BusPublisher,
+    rate_limiter: RateLimiter,
 }
 
 impl Gateway {
-    pub fn new(orchestrator: Arc<Orchestrator>, routing: RoutingConfig, bus: BusPublisher) -> Self {
+    pub fn new(
+        orchestrator: Arc<Orchestrator>,
+        routing: RoutingConfig,
+        bus: BusPublisher,
+        rate_limiter: RateLimiter,
+    ) -> Self {
         Self {
             orchestrator,
             routing,
             bus,
+            rate_limiter,
         }
     }
 
@@ -47,6 +124,10 @@ impl Gateway {
     }
 
     pub async fn handle_inbound(&self, inbound: InboundMessage) -> Result<OutboundMessage> {
+        if !self.rate_limiter.check(&inbound.user_scope).await {
+            return Err(anyhow::anyhow!("rate limited: too many requests"));
+        }
+
         let agent_id = self.resolve_agent(&inbound);
         let trace_id = inbound.trace_id;
 
@@ -113,6 +194,7 @@ mod tests {
             agents,
             HashMap::new(),
             session_mgr,
+            SkillRegistry::new(),
             memory,
             publisher.clone(),
         ));
@@ -120,7 +202,8 @@ mod tests {
             default_agent_id: "nanocrab-main".into(),
             bindings: vec![],
         };
-        Gateway::new(orch, routing, publisher)
+        let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+        Gateway::new(orch, routing, publisher, rate_limiter)
     }
 
     #[tokio::test]
@@ -185,5 +268,38 @@ mod tests {
             mention_target: Some("@mybot".into()),
         };
         assert_eq!(gw.resolve_agent(&inbound), "nanocrab-builder");
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_allows_within_limit() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_minute: 60,
+            burst: 5,
+        });
+        for _ in 0..5 {
+            assert!(limiter.check("user:1").await);
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_blocks_after_burst() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_minute: 60,
+            burst: 2,
+        });
+        assert!(limiter.check("user:1").await);
+        assert!(limiter.check("user:1").await);
+        assert!(!limiter.check("user:1").await);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_different_users_independent() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_minute: 60,
+            burst: 1,
+        });
+        assert!(limiter.check("user:1").await);
+        assert!(limiter.check("user:2").await);
+        assert!(!limiter.check("user:1").await);
     }
 }

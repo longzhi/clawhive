@@ -5,6 +5,7 @@ pub mod persona;
 pub mod router;
 pub mod session;
 pub mod subagent;
+pub mod skill;
 
 pub use config::*;
 pub use consolidation::*;
@@ -13,6 +14,7 @@ pub use persona::*;
 pub use router::*;
 pub use session::*;
 pub use subagent::*;
+pub use skill::*;
 
 use serde::{Deserialize, Serialize};
 

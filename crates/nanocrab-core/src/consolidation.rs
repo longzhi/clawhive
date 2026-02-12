@@ -175,6 +175,52 @@ fn parse_concept_candidates(llm_output: &str, episodes: &[Episode]) -> Result<Ve
     Ok(results)
 }
 
+pub struct ConsolidationScheduler {
+    consolidator: Arc<Consolidator>,
+    interval_hours: u64,
+}
+
+impl ConsolidationScheduler {
+    pub fn new(consolidator: Arc<Consolidator>, interval_hours: u64) -> Self {
+        Self {
+            consolidator,
+            interval_hours,
+        }
+    }
+
+    pub fn start(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                self.interval_hours * 3600,
+            ));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                tracing::info!("Running scheduled consolidation...");
+                match self.consolidator.run_daily().await {
+                    Ok(report) => {
+                        tracing::info!(
+                            "Consolidation complete: {} created, {} updated, {} processed, {} staled, {} purged",
+                            report.concepts_created,
+                            report.concepts_updated,
+                            report.episodes_processed,
+                            report.concepts_staled,
+                            report.episodes_purged
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Consolidation failed: {e}");
+                    }
+                }
+            }
+        })
+    }
+
+    pub async fn run_once(&self) -> Result<ConsolidationReport> {
+        self.consolidator.run_daily().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

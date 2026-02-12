@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use nanocrab_bus::EventBus;
 use nanocrab_channels_telegram::TelegramBot;
 use nanocrab_core::*;
-use nanocrab_gateway::Gateway;
+use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
 use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{register_builtin_providers, AnthropicProvider, ProviderRegistry};
 use nanocrab_schema::InboundMessage;
@@ -35,6 +35,34 @@ enum Commands {
     },
     #[command(about = "Validate config files")]
     Validate,
+    #[command(about = "Run memory consolidation manually")]
+    Consolidate,
+    #[command(subcommand, about = "Agent management")]
+    Agent(AgentCommands),
+    #[command(subcommand, about = "Skill management")]
+    Skill(SkillCommands),
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    #[command(about = "List all configured agents")]
+    List,
+    #[command(about = "Show agent details")]
+    Show {
+        #[arg(help = "Agent ID")]
+        agent_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCommands {
+    #[command(about = "List available skills")]
+    List,
+    #[command(about = "Show skill details")]
+    Show {
+        #[arg(help = "Skill name")]
+        skill_name: String,
+    },
 }
 
 #[tokio::main]
@@ -58,6 +86,110 @@ async fn main() -> Result<()> {
         Commands::Chat { agent } => {
             run_repl(&cli.config_root, &agent).await?;
         }
+        Commands::Consolidate => {
+            run_consolidate(&cli.config_root).await?;
+        }
+        Commands::Agent(cmd) => {
+            let config = load_config(&cli.config_root.join("config"))?;
+            match cmd {
+                AgentCommands::List => {
+                    println!(
+                        "{:<20} {:<10} {:<30} {:<20}",
+                        "AGENT ID", "ENABLED", "PRIMARY MODEL", "IDENTITY"
+                    );
+                    println!("{}", "-".repeat(80));
+                    for agent in &config.agents {
+                        let name = agent
+                            .identity
+                            .as_ref()
+                            .map(|i| format!("{} {}", i.emoji.as_deref().unwrap_or(""), i.name))
+                            .unwrap_or_else(|| "-".to_string());
+                        println!(
+                            "{:<20} {:<10} {:<30} {:<20}",
+                            agent.agent_id,
+                            if agent.enabled { "yes" } else { "no" },
+                            agent.model_policy.primary,
+                            name.trim(),
+                        );
+                    }
+                }
+                AgentCommands::Show { agent_id } => {
+                    let agent = config
+                        .agents
+                        .iter()
+                        .find(|a| a.agent_id == agent_id)
+                        .ok_or_else(|| anyhow::anyhow!("agent not found: {agent_id}"))?;
+                    println!("Agent: {}", agent.agent_id);
+                    println!("Enabled: {}", agent.enabled);
+                    if let Some(identity) = &agent.identity {
+                        println!("Name: {}", identity.name);
+                        if let Some(emoji) = &identity.emoji {
+                            println!("Emoji: {emoji}");
+                        }
+                    }
+                    println!("Primary model: {}", agent.model_policy.primary);
+                    if !agent.model_policy.fallbacks.is_empty() {
+                        println!("Fallbacks: {}", agent.model_policy.fallbacks.join(", "));
+                    }
+                    if let Some(tp) = &agent.tool_policy {
+                        println!("Tools: {}", tp.allow.join(", "));
+                    }
+                    if let Some(mp) = &agent.memory_policy {
+                        println!("Memory: mode={}, write_scope={}", mp.mode, mp.write_scope);
+                    }
+                    if let Some(sa) = &agent.sub_agent {
+                        println!("Sub-agent: allow_spawn={}", sa.allow_spawn);
+                    }
+                }
+            }
+        }
+        Commands::Skill(cmd) => {
+            let skill_registry = SkillRegistry::load_from_dir(&cli.config_root.join("skills"))
+                .unwrap_or_else(|_| SkillRegistry::new());
+            match cmd {
+                SkillCommands::List => {
+                    let skills = skill_registry.list();
+                    if skills.is_empty() {
+                        println!("No skills found in skills/ directory.");
+                    } else {
+                        println!("{:<20} {:<50} {:<10}", "NAME", "DESCRIPTION", "AVAILABLE");
+                        println!("{}", "-".repeat(80));
+                        for skill in &skills {
+                            println!(
+                                "{:<20} {:<50} {:<10}",
+                                skill.name,
+                                if skill.description.len() > 48 {
+                                    format!("{}...", &skill.description[..45])
+                                } else {
+                                    skill.description.clone()
+                                },
+                                if skill.requirements_met() { "yes" } else { "no" },
+                            );
+                        }
+                    }
+                }
+                SkillCommands::Show { skill_name } => match skill_registry.get(&skill_name) {
+                    Some(skill) => {
+                        println!("Skill: {}", skill.name);
+                        println!("Description: {}", skill.description);
+                        println!(
+                            "Available: {}",
+                            if skill.requirements_met() { "yes" } else { "no" }
+                        );
+                        if !skill.requires.bins.is_empty() {
+                            println!("Required bins: {}", skill.requires.bins.join(", "));
+                        }
+                        if !skill.requires.env.is_empty() {
+                            println!("Required env: {}", skill.requires.env.join(", "));
+                        }
+                        println!("\n--- Content ---\n{}", skill.content);
+                    }
+                    None => {
+                        anyhow::bail!("skill not found: {skill_name}");
+                    }
+                },
+            }
+        }
     }
 
     Ok(())
@@ -72,6 +204,56 @@ fn bootstrap(root: &PathBuf) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>
     }
     let memory = Arc::new(MemoryStore::open(db_path.to_str().unwrap_or("data/nanocrab.db"))?);
 
+    let router = build_router_from_config(&config);
+
+    let prompts_root = root.join("prompts");
+    let mut personas = HashMap::new();
+    for agent_config in &config.agents {
+        let identity = agent_config.identity.as_ref();
+        let name = identity
+            .map(|i| i.name.as_str())
+            .unwrap_or(&agent_config.agent_id);
+        let emoji = identity.and_then(|i| i.emoji.as_deref());
+        match load_persona(&prompts_root, &agent_config.agent_id, name, emoji) {
+            Ok(persona) => {
+                personas.insert(agent_config.agent_id.clone(), persona);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load persona for {}: {e}", agent_config.agent_id);
+            }
+        }
+    }
+
+    let bus = EventBus::new(256);
+    let publisher = bus.publisher();
+    let session_mgr = SessionManager::new(memory.clone(), 1800);
+    let skill_registry = SkillRegistry::load_from_dir(&root.join("skills")).unwrap_or_else(|e| {
+        tracing::warn!("Failed to load skills: {e}");
+        SkillRegistry::new()
+    });
+
+    let orchestrator = Arc::new(Orchestrator::new(
+        router,
+        config.agents.clone(),
+        personas,
+        session_mgr,
+        skill_registry,
+        memory.clone(),
+        publisher.clone(),
+    ));
+
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let gateway = Arc::new(Gateway::new(
+        orchestrator,
+        config.routing.clone(),
+        publisher,
+        rate_limiter,
+    ));
+
+    Ok((bus, memory, gateway, config))
+}
+
+fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     let mut registry = ProviderRegistry::new();
     for provider_config in &config.providers {
         if !provider_config.enabled {
@@ -111,46 +293,21 @@ fn bootstrap(root: &PathBuf) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>
         "anthropic/claude-3-5-haiku-latest".to_string(),
     );
 
-    let router = LlmRouter::new(registry, aliases, vec![]);
-
-    let prompts_root = root.join("prompts");
-    let mut personas = HashMap::new();
-    for agent_config in &config.agents {
-        let identity = agent_config.identity.as_ref();
-        let name = identity
-            .map(|i| i.name.as_str())
-            .unwrap_or(&agent_config.agent_id);
-        let emoji = identity.and_then(|i| i.emoji.as_deref());
-        match load_persona(&prompts_root, &agent_config.agent_id, name, emoji) {
-            Ok(persona) => {
-                personas.insert(agent_config.agent_id.clone(), persona);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load persona for {}: {e}", agent_config.agent_id);
-            }
-        }
-    }
-
-    let bus = EventBus::new(256);
-    let publisher = bus.publisher();
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
-
-    let orchestrator = Arc::new(Orchestrator::new(
-        router,
-        config.agents.clone(),
-        personas,
-        session_mgr,
-        memory.clone(),
-        publisher.clone(),
-    ));
-
-    let gateway = Arc::new(Gateway::new(orchestrator, config.routing.clone(), publisher));
-
-    Ok((bus, memory, gateway, config))
+    LlmRouter::new(registry, aliases, vec![])
 }
 
 async fn start_bot(root: &PathBuf) -> Result<()> {
-    let (_bus, _memory, gateway, config) = bootstrap(root)?;
+    let (_bus, memory, gateway, config) = bootstrap(root)?;
+
+    let consolidator = Arc::new(Consolidator::new(
+        memory,
+        Arc::new(build_router_from_config(&config)),
+        "sonnet".to_string(),
+        vec!["haiku".to_string()],
+    ));
+    let scheduler = ConsolidationScheduler::new(consolidator, 24);
+    let _consolidation_handle = scheduler.start();
+    tracing::info!("Consolidation scheduler started (every 24h)");
 
     let tg_config = config
         .main
@@ -182,6 +339,28 @@ async fn start_bot(root: &PathBuf) -> Result<()> {
         break;
     }
 
+    Ok(())
+}
+
+async fn run_consolidate(root: &PathBuf) -> Result<()> {
+    let (_bus, memory, _gateway, config) = bootstrap(root)?;
+
+    let consolidator = Arc::new(Consolidator::new(
+        memory,
+        Arc::new(build_router_from_config(&config)),
+        "sonnet".to_string(),
+        vec!["haiku".to_string()],
+    ));
+
+    let scheduler = ConsolidationScheduler::new(consolidator, 24);
+    println!("Running consolidation...");
+    let report = scheduler.run_once().await?;
+    println!("Consolidation complete:");
+    println!("  Concepts created: {}", report.concepts_created);
+    println!("  Concepts updated: {}", report.concepts_updated);
+    println!("  Episodes processed: {}", report.episodes_processed);
+    println!("  Concepts staled: {}", report.concepts_staled);
+    println!("  Episodes purged: {}", report.episodes_purged);
     Ok(())
 }
 
@@ -225,4 +404,28 @@ async fn run_repl(root: &PathBuf, _agent_id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_consolidate_subcommand() {
+        let cli = Cli::parse_from(["nanocrab", "consolidate"]);
+        assert!(matches!(cli.command, Commands::Consolidate));
+    }
+
+    #[test]
+    fn parses_agent_list_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "agent", "list"]).unwrap();
+        assert!(matches!(cli.command, Commands::Agent(AgentCommands::List)));
+    }
+
+    #[test]
+    fn parses_skill_list_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "skill", "list"]).unwrap();
+        assert!(matches!(cli.command, Commands::Skill(SkillCommands::List)));
+    }
 }

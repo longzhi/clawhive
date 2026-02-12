@@ -1296,6 +1296,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
@@ -1376,8 +1377,13 @@ name = "nanocrab-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm",
  "nanocrab-bus",
+ "nanocrab-core",
+ "nanocrab-gateway",
+ "nanocrab-memory",
+ "nanocrab-provider",
  "nanocrab-schema",
  "ratatui",
  "tokio",
