@@ -206,6 +206,11 @@ impl Orchestrator {
                 return Ok(reply.replace("[finish]", "").trim().to_string());
             }
 
+            let has_continuation = reply.contains("[think]") || reply.contains("[action]");
+            if !has_continuation {
+                return Ok(reply);
+            }
+
             last_reply = reply.clone();
             messages.push(LlmMessage {
                 role: "assistant".into(),

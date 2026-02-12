@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 struct FailProvider;
 struct EchoProvider;
+struct ThinkingEchoProvider;
 
 #[async_trait]
 impl LlmProvider for FailProvider {
@@ -32,6 +33,18 @@ impl LlmProvider for EchoProvider {
                 .last()
                 .map(|m| m.content.clone())
                 .unwrap_or_default(),
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: Some("end_turn".into()),
+        })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ThinkingEchoProvider {
+    async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Ok(LlmResponse {
+            text: "[think] still processing".to_string(),
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),
@@ -172,7 +185,7 @@ async fn orchestrator_handles_inbound_to_outbound() {
 #[tokio::test]
 async fn weak_react_stops_on_repeat_guard() {
     let mut registry = ProviderRegistry::new();
-    registry.register("echo", Arc::new(EchoProvider));
+    registry.register("echo", Arc::new(ThinkingEchoProvider));
 
     let aliases = HashMap::from([("echo".to_string(), "echo/model".to_string())]);
     let agents = vec![test_full_agent("nanocrab-main", "echo", vec![])];
