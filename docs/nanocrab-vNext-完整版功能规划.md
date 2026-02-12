@@ -353,17 +353,108 @@ Skill（知识层）              Tool（执行层）
 
 ---
 
-## 10. 建议落地节奏
+## 10. Sub-Agent 演进设计
+
+### 10.1 三阶段演进路线
+
+#### 阶段 1：独立 LLM 调用（MVP — 当前骨架已有）
+
+Sub-Agent 本质是一次独立的 LLM 调用，有自己的 agent 配置（模型、persona），但只做单轮对话。
+
+```
+Parent Agent
+  │  spawn(task, agent_id)
+  ▼
+SubAgentRunner → tokio::spawn
+  │  独立 messages + system prompt
+  │  router.chat() → 单轮 LLM 调用
+  ▼
+SubAgentResult { output: String }
+  ▼  合并回 parent 上下文
+```
+
+**当前状态：** `SubAgentRunner` 骨架已实现（spawn/cancel/wait_result/result_merge），但未接入 Orchestrator，缺少触发机制。
+
+**MVP 补全项：**
+- 将 SubAgentRunner 集成到 Orchestrator
+- 定义触发条件（LLM 显式请求 or 规则触发）
+- 适合场景：简单子任务（翻译、摘要、格式转换）
+
+#### 阶段 2：完整 Agent 实例（vNext 第一步）
+
+Sub-Agent 是具备完整能力的 agent 实例，能调工具、多轮推理、访问记忆。
+
+```
+Parent Agent (Orchestrator)
+  │  spawn(task, agent_id)
+  ▼
+Sub-Agent（独立完整 Agent）
+  ├── 自己的 session
+  ├── 自己的记忆（可读 parent episodes，写入独立分区）
+  ├── 自己的工具集（parent 的子集，最小权限）
+  ├── 自己的 tool use / ReAct 循环
+  └── 可再 spawn sub-sub-agent（受 max_depth 限制）
+  ▼
+最终结果返回 Parent
+```
+
+**关键设计：**
+- `spawn()` 创建迷你 Orchestrator 实例，复用核心逻辑（tool use 循环、记忆访问）
+- 记忆隔离策略：sub-agent 可读 parent 的 episodes，但写入独立分区（`session_id` 区分）
+- 工具集默认比 parent 更收敛（`sub_agent.allowed_tools` 白名单）
+- 必须带 `parent_run_id` + `trace_id`，便于审计链路追踪
+- 适合场景：复杂独立任务（代码分析、研究报告、多步骤排障）
+
+#### 阶段 3：Agent-as-Tool（vNext 第二步）
+
+Sub-Agent 被包装为 Tool，Parent Agent 通过正常 tool_use 机制自主触发，无需显式编排。
+
+```
+Parent Agent
+  │  LLM 返回 tool_use: { name: "research_agent", input: { topic: "..." } }
+  ▼
+ToolExecutor 识别 agent-type tool
+  │  创建 Sub-Agent（阶段 2 的完整实例）
+  │  独立运行直到完成
+  ▼
+tool_result: { output: "研究报告..." }
+  ▼  回传 LLM 继续生成
+```
+
+**关键设计：**
+- 在 ToolRegistry 注册 agent-type tools（`RegisteredTool` 的 executor 是 `AgentToolExecutor`）
+- ToolDef 中描述 agent 的能力，让 parent LLM 理解何时应委托
+- 对 parent agent 完全透明——它只是调用了一个 tool，不知道背后是另一个 agent
+- 与 Capability 模型集成：spawn sub-agent 本身视为一个需要权限的操作
+- 适合场景：LLM 自主决定何时委托，无需外部编排逻辑
+
+### 10.2 三阶段对比
+
+| | 阶段 1：独立 LLM 调用 | 阶段 2：完整 Agent 实例 | 阶段 3：Agent-as-Tool |
+|---|---|---|---|
+| 时间线 | MVP | vNext 第一步 | vNext 第二步 |
+| 能力 | 单轮问答 | 多轮 + 工具 + 记忆 | 多轮 + 工具 + 记忆 |
+| 触发方式 | 代码显式 spawn | 代码显式 spawn | LLM 自主调用 tool |
+| 工具访问 | ❌ | ✅（parent 子集） | ✅（parent 子集） |
+| 记忆访问 | ❌ | ✅（读共享/写隔离） | ✅（读共享/写隔离） |
+| 递归 spawn | ❌ | ✅（受 max_depth 限制） | ✅ |
+| 对 parent 透明 | ❌（需显式编排） | ❌（需显式编排） | ✅（就是一个 tool） |
+
+---
+
+## 11. 建议落地节奏
 
 1. 在 `docs/` 保持本文件为 vNext 设计基线
 2. MVP 完成后，先实现 `CapabilityGrant` 数据结构 + 审计日志
 3. 多 Provider 工具调用适配（OpenAI/Gemini）+ ToolRegistry 动态注册
-4. 引入 Policy Engine（Safe/Guarded/Unsafe）+ 工具权限集成
-5. 最后接 Planner 与高级执行策略
+4. Sub-Agent 阶段 2（完整 Agent 实例）+ 记忆隔离
+5. 引入 Policy Engine（Safe/Guarded/Unsafe）+ 工具权限集成
+6. Sub-Agent 阶段 3（Agent-as-Tool）
+7. 最后接 Planner 与高级执行策略
 
 ---
 
-## 11. 结论
+## 12. 结论
 
 nanocrab 在 vNext 采用“Capability-based, per-task least-privilege”模型，将显著提升：
 

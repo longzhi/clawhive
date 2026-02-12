@@ -106,6 +106,20 @@ Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，
 
 ---
 
+## Issue #8: SubAgentRunner 未接入 Orchestrator
+
+**状态：** 🔴 待修复  
+**模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-core/subagent.rs`  
+**描述：**  
+`SubAgentRunner` 骨架已实现（spawn/cancel/wait_result/result_merge），但 Orchestrator 中没有任何代码使用它。Sub-Agent 能力处于"写了但没接上"的状态。  
+**影响：** MVP 文档 §6 明确要求 Sub-Agent 为必做项，当前无法使用。  
+**建议：**  
+1. 在 Orchestrator 中持有 `SubAgentRunner` 实例
+2. 定义触发条件：可先通过 LLM 文本标记（如 `[delegate: agent_id] task`）或未来通过 tool_use 触发
+3. spawn 结果合并回 parent 上下文后继续生成
+
+---
+
 ## 后续 Review 计划
 
 - [ ] 记忆系统存取细节（MemoryStore / retrieve_context / consolidation）
