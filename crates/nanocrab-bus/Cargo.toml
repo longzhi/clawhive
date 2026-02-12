@@ -11,4 +11,5 @@ uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 nanocrab-schema = { path = "../nanocrab-schema" }

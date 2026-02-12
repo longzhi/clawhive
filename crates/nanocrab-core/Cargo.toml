@@ -7,10 +7,14 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_yaml.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+serde_json.workspace = true
 nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-schema = { path = "../nanocrab-schema" }
+nanocrab-memory = { path = "../nanocrab-memory" }
+nanocrab-bus = { path = "../nanocrab-bus" }

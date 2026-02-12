@@ -10,3 +10,5 @@ serde.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
+tokio.workspace = true

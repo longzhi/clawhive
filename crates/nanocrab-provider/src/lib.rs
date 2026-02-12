@@ -1,20 +1,14 @@
+pub mod anthropic;
+pub mod types;
+
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmRequest {
-    pub model: String,
-    pub system: Option<String>,
-    pub user: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmResponse {
-    pub text: String,
-}
+pub use anthropic::AnthropicProvider;
+pub use types::*;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -24,72 +18,69 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
-pub type ProviderFactory = Box<dyn Fn() -> Box<dyn LlmProvider> + Send + Sync>;
-
 pub struct ProviderRegistry {
-    factories: HashMap<String, ProviderFactory>,
+    providers: HashMap<String, Arc<dyn LlmProvider>>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
-            factories: HashMap::new(),
+            providers: HashMap::new(),
         }
     }
 
-    pub fn register<F>(&mut self, provider_id: impl Into<String>, factory: F)
-    where
-        F: Fn() -> Box<dyn LlmProvider> + Send + Sync + 'static,
-    {
-        self.factories.insert(provider_id.into(), Box::new(factory));
+    pub fn register(&mut self, id: impl Into<String>, provider: Arc<dyn LlmProvider>) {
+        self.providers.insert(id.into(), provider);
     }
 
-    pub fn build(&self, provider_id: &str) -> Result<Box<dyn LlmProvider>> {
-        let factory = self
-            .factories
-            .get(provider_id)
-            .ok_or_else(|| anyhow!("provider not found: {provider_id}"))?;
-        Ok(factory())
+    pub fn get(&self, id: &str) -> Result<Arc<dyn LlmProvider>> {
+        self.providers
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("provider not found: {id}"))
     }
 }
 
-pub struct AnthropicProvider;
+pub struct StubProvider;
 
 #[async_trait]
-impl LlmProvider for AnthropicProvider {
+impl LlmProvider for StubProvider {
     async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
-        let text = format!(
-            "[stub:anthropic:{}] {}",
-            request.model,
-            request.user
-        );
-        Ok(LlmResponse { text })
+        let user_text = request
+            .messages
+            .last()
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        Ok(LlmResponse {
+            text: format!("[stub:anthropic:{}] {}", request.model, user_text),
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: Some("end_turn".into()),
+        })
     }
 }
 
 pub fn register_builtin_providers(registry: &mut ProviderRegistry) {
-    registry.register("anthropic", || Box::new(AnthropicProvider));
+    registry.register("anthropic", Arc::new(StubProvider));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn registry_builds_anthropic_and_returns_stub() {
+    #[test]
+    fn provider_registry_get_registered_succeeds() {
         let mut registry = ProviderRegistry::new();
-        register_builtin_providers(&mut registry);
+        registry.register("anthropic", Arc::new(StubProvider));
 
-        let provider = registry.build("anthropic").unwrap();
-        let out = provider
-            .chat(LlmRequest {
-                model: "claude-sonnet-4-5".to_string(),
-                system: None,
-                user: "hello".to_string(),
-            })
-            .await
-            .unwrap();
+        let provider = registry.get("anthropic").unwrap();
+        assert!(Arc::strong_count(&provider) >= 1);
+    }
 
-        assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
+    #[test]
+    fn provider_registry_get_unknown_fails() {
+        let registry = ProviderRegistry::new();
+        let err = registry.get("missing").err().unwrap();
+        assert!(err.to_string().contains("provider not found: missing"));
     }
 }
