@@ -124,25 +124,19 @@ vNext 重点是：
 
 ---
 
-## 8. 存储与向量检索
+## 8. 存储与向量检索（扩展）
 
-### 8.1 SQLite + sqlite-vec
+> 基础的 SQLite + sqlite-vec 方案已纳入 MVP（用于 episodes 向量检索与结构化存储）。  
+> vNext 在此基础上扩展更多应用场景。
 
-推荐使用 **SQLite** 作为 nanocrab 的本地持久化方案，搭配 **[sqlite-vec](https://github.com/asg017/sqlite-vec)** 扩展实现向量检索能力。
+### 8.1 vNext 扩展应用
 
-**选型理由：**
+在 MVP 已有的 episodes 语义召回基础上，vNext 进一步利用 sqlite-vec：
 
-- **零依赖部署**：SQLite 嵌入式、单文件，无需额外数据库服务
-- **统一存储**：审计日志、任务状态、向量索引共用同一数据库
-- **向量检索**：sqlite-vec 提供原生向量相似度搜索（cosine/L2/inner product），支持 ANN 索引
-- **轻量适配**：适合 nanocrab 单机/边缘部署场景，不引入 Postgres/Qdrant 等重依赖
-
-**应用场景：**
-
-- 审计日志结构化存储与查询（trace/run/step）
-- 工具描述 & capability 的语义检索（embedding → sqlite-vec）
-- 上下文记忆与对话历史的向量召回
-- 任务/步骤状态持久化
+- **审计日志结构化存储与查询**（trace/run/step，配合 §6 审计需求）
+- **工具描述 & capability 的语义检索**（embedding → sqlite-vec，支持动态工具发现）
+- **跨 agent 知识共享**（共享 concepts 表的向量索引）
+- **任务/步骤状态持久化与相似任务召回**
 
 ---
 

@@ -33,7 +33,7 @@
 
 1. 多节点/分布式总线
 2. 复杂知识图谱引擎
-3. 外部向量数据库
+3. 外部向量数据库（使用 SQLite + sqlite-vec 替代）
 4. 多通道同时生产化
 5. Agent 自主找任务
 
@@ -74,6 +74,7 @@ MVP 强约束：
 - **Bus（事件层）**
   - 负责模块解耦：Command/Event 传递
   - MVP 使用 in-memory async queue
+  - 接口设计预留 backpressure 语义，方便后续切换 NATS/Redis Stream
 
 - **Runtime（执行层）**
   - 接收 Core 下发任务并执行
@@ -148,7 +149,13 @@ Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
 - **海马体（Hippocampus）**：快速记录近期经历，保细节
 - **皮质（Cortex）**：沉淀稳定知识，保低噪声高置信
 
-### 5.2 数据模型（SQLite）
+### 5.2 数据模型（SQLite + sqlite-vec）
+
+MVP 存储层采用 SQLite 搭配 [sqlite-vec](https://github.com/asg017/sqlite-vec) 扩展：
+
+- SQLite 负责结构化数据存储（episodes/concepts/links/session 状态）
+- sqlite-vec 提供向量相似度检索能力（cosine/L2/inner product），用于 episodes 语义召回
+- 零额外依赖，单文件部署，不引入外部向量数据库
 
 #### 表 1：`episodes`（海马体）
 
@@ -157,6 +164,7 @@ Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
 - `session_id`
 - `speaker`
 - `text`
+- `embedding`（向量，通过 sqlite-vec 索引，用于语义检索）
 - `tags`（JSON）
 - `importance`（0-1）
 - `context_hash`
@@ -195,9 +203,11 @@ Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
 
 ### 5.4 检索策略（MVP）
 
-1. 先查海马体近期窗口（如 7 天）
+1. 先查海马体：近期窗口（如 7 天）+ sqlite-vec 向量语义检索（基于 query embedding 召回相关 episodes）
 2. 再查皮质概念层
-3. 融合重排（相关度 + 置信度 + 新近性）
+3. 融合重排（语义相关度 + 置信度 + 新近性 + importance）
+
+> 向量检索相比纯时间窗口，能在 episodes 量大时精准召回语义相关内容，显著提升记忆注入质量。
 
 ### 5.5 巩固流程（每日低峰 Cron）
 
