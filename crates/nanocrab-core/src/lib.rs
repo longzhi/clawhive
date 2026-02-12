@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use nanocrab_provider::{LlmRequest, ProviderRegistry};
+use nanocrab_schema::{InboundMessage, OutboundMessage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,12 +87,46 @@ fn parse_provider_model(input: &str) -> Result<(String, String)> {
     Ok((provider.to_string(), model.to_string()))
 }
 
+pub struct Orchestrator {
+    router: LlmRouter,
+    agents: HashMap<String, AgentConfig>,
+}
+
+impl Orchestrator {
+    pub fn new(router: LlmRouter, agents: Vec<AgentConfig>) -> Self {
+        let mut map = HashMap::new();
+        for a in agents {
+            map.insert(a.agent_id.clone(), a);
+        }
+        Self { router, agents: map }
+    }
+
+    pub async fn handle_inbound(&self, inbound: InboundMessage, agent_id: &str) -> Result<OutboundMessage> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
+        let text = self.router.reply(agent, &inbound.text).await?;
+
+        Ok(OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text,
+            at: chrono::Utc::now(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::anyhow;
     use async_trait::async_trait;
     use nanocrab_provider::{register_builtin_providers, LlmProvider, LlmResponse};
+    use nanocrab_schema::InboundMessage;
+    use uuid::Uuid;
 
     struct FailProvider;
 
@@ -159,5 +194,30 @@ mod tests {
 
         let err = router.reply(&agent, "x").await.err().unwrap();
         assert!(err.to_string().contains("unknown model alias"));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_handles_inbound_to_outbound() {
+        let mut registry = ProviderRegistry::new();
+        register_builtin_providers(&mut registry);
+        let aliases = HashMap::from([(
+            "sonnet".to_string(),
+            "anthropic/claude-sonnet-4-5".to_string(),
+        )]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+        let orch = Orchestrator::new(router, vec![test_agent("sonnet", vec![])]);
+
+        let inbound = InboundMessage {
+            trace_id: Uuid::new_v4(),
+            channel_type: "telegram".to_string(),
+            connector_id: "tg_main".to_string(),
+            conversation_scope: "chat:1".to_string(),
+            user_scope: "user:1".to_string(),
+            text: "hello".to_string(),
+            at: chrono::Utc::now(),
+        };
+
+        let out = orch.handle_inbound(inbound, "nanocrab-main").await.unwrap();
+        assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
     }
 }

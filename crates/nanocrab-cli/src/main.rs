@@ -1,7 +1,9 @@
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::Result;
-use nanocrab_core::{AgentConfig, LlmRouter};
+use nanocrab_channels_telegram::TelegramAdapter;
+use nanocrab_core::{AgentConfig, LlmRouter, Orchestrator};
+use nanocrab_gateway::Gateway;
 use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
 
 #[tokio::main]
@@ -21,8 +23,13 @@ async fn main() -> Result<()> {
     ]);
 
     let router = LlmRouter::new(registry, aliases, vec!["anthropic/claude-sonnet-4-5".to_string()]);
-    let out = router.reply(&agent, "nanocrab bootstrap check").await?;
+    let orchestrator = Orchestrator::new(router, vec![agent]);
+    let gateway = Gateway::new(orchestrator, "nanocrab-main");
 
-    println!("nanocrab CLI reply: {out}");
+    let telegram = TelegramAdapter::new("tg_main");
+    let inbound = telegram.to_inbound(10001, 42, "nanocrab bootstrap check");
+    let outbound = gateway.handle_inbound(inbound).await?;
+
+    println!("nanocrab CLI reply: {}", telegram.render_outbound(&outbound));
     Ok(())
 }

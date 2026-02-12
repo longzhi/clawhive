@@ -12,6 +12,8 @@ tokio.workspace = true
 tracing.workspace = true
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-provider = { path = "../nanocrab-provider" }
+nanocrab-gateway = { path = "../nanocrab-gateway" }
+nanocrab-channels-telegram = { path = "../nanocrab-channels-telegram" }
 
 [[bin]]
 name = "nanocrab"

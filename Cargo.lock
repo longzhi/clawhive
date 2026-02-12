@@ -222,7 +222,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "nanocrab-schema",
  "serde",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -233,6 +235,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "nanocrab-schema",
  "serde",
  "tracing",
  "uuid",
@@ -243,7 +246,9 @@ name = "nanocrab-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "nanocrab-channels-telegram",
  "nanocrab-core",
+ "nanocrab-gateway",
  "nanocrab-provider",
  "serde",
  "serde_yaml",
@@ -259,6 +264,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "nanocrab-provider",
+ "nanocrab-schema",
  "serde",
  "tokio",
  "tracing",
@@ -271,7 +277,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "nanocrab-core",
+ "nanocrab-provider",
+ "nanocrab-schema",
  "serde",
+ "tokio",
  "tracing",
  "uuid",
 ]
