@@ -61,7 +61,7 @@ impl LlmProvider for StubProvider {
             .map(|m| m.content.clone())
             .unwrap_or_default();
         Ok(LlmResponse {
-            text: format!("[stub:anthropic:{}] {}", request.model, user_text),
+            text: format!("[stub:anthropic:{}] {} [finish]", request.model, user_text),
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),

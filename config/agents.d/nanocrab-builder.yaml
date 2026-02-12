@@ -6,8 +6,8 @@ identity:
   emoji: "🛠️"
 
 model_policy:
-  primary: gpt
-  fallbacks: [sonnet]
+  primary: sonnet
+  fallbacks: [haiku]
 
 tool_policy:
   allow: [read, write, edit, exec]

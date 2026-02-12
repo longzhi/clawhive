@@ -381,7 +381,7 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
         }
         match provider_config.provider_id.as_str() {
             "anthropic" => {
-                let api_key = resolve_env_var(&provider_config.api_key_env);
+                let api_key = std::env::var(&provider_config.api_key_env).unwrap_or_default();
                 if !api_key.is_empty() {
                     let provider = Arc::new(AnthropicProvider::new(
                         api_key,
@@ -404,14 +404,26 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     }
 
     let mut aliases = HashMap::new();
-    aliases.insert(
-        "sonnet".to_string(),
-        "anthropic/claude-sonnet-4-5".to_string(),
-    );
-    aliases.insert(
-        "haiku".to_string(),
-        "anthropic/claude-3-5-haiku-latest".to_string(),
-    );
+    for provider_config in &config.providers {
+        if !provider_config.enabled {
+            continue;
+        }
+        for model in &provider_config.models {
+            aliases.insert(
+                model.clone(),
+                format!("{}/{}", provider_config.provider_id, model),
+            );
+        }
+    }
+    aliases
+        .entry("sonnet".to_string())
+        .or_insert_with(|| "anthropic/claude-sonnet-4-5".to_string());
+    aliases
+        .entry("haiku".to_string())
+        .or_insert_with(|| "anthropic/claude-3-5-haiku-latest".to_string());
+    aliases
+        .entry("opus".to_string())
+        .or_insert_with(|| "anthropic/claude-opus-4-6".to_string());
 
     LlmRouter::new(registry, aliases, vec![])
 }
