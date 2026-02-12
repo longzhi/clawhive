@@ -270,7 +270,47 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 - 启动时做 schema 校验（必填字段、引用存在、重复 id）
 - 校验失败即阻止启动（fail fast）
 
-## 8. 项目结构（面向后续开源拆分）
+## 8. LLM Provider 设计（MVP）
+
+### 8.1 目标
+
+- MVP 首发支持 **Anthropic**
+- 架构上从第一天支持可扩展（OpenAI/OpenRouter/本地推理后续可插）
+
+### 8.2 核心抽象
+
+采用 `Provider Registry + Adapter`：
+
+- `LlmProvider`（统一 trait）
+  - `chat(request) -> response`
+  - `stream(request) -> stream`（可选，MVP 可先占位）
+  - `health()`（可选）
+- `ProviderRegistry`
+  - 根据 `provider_id` 注册/构造具体 provider
+  - Core 只依赖 trait，不依赖具体 SDK
+
+### 8.3 模型解析与回退
+
+- `agent.model_policy.primary` 指定主模型
+- `agent.model_policy.fallbacks` 指定回退模型链
+- 回退触发建议：429 / timeout / transient 5xx
+
+### 8.4 配置策略（YAML）
+
+建议目录：
+
+- `config/providers.d/anthropic.yaml`
+- `config/providers.d/*.yaml`
+
+密钥不落 agent 配置文件，优先从环境变量/secret 注入。
+
+### 8.5 MVP 范围
+
+- 实现 `anthropic` adapter（可先 stub）
+- 预留 registry 与 provider trait
+- 代码结构独立为 `nanocrab-provider` crate
+
+## 9. 项目结构（面向后续开源拆分）
 
 建议使用 Rust workspace（monorepo）：
 
@@ -292,7 +332,7 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ---
 
-## 9. CLI / TUI 支持（MVP）
+## 10. CLI / TUI 支持（MVP）
 
 ### 9.1 CLI（必须）
 
@@ -314,13 +354,13 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 建议实现：`ratatui + crossterm`。
 
-## 10. 执行链路（MVP）
+## 11. 执行链路（MVP）
 
 `TelegramDriver -> Gateway -> Bus(Command) -> Core -> Runtime/Memory -> Bus(Event: ReplyReady) -> Gateway -> TelegramDriver`
 
 ---
 
-## 11. 第一版里程碑（建议）
+## 12. 第一版里程碑（建议）
 
 ### M1（可跑通）
 
@@ -342,7 +382,7 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ---
 
-## 12. 结论
+## 13. 结论
 
 nanocrab MVP 推荐采用：
 
