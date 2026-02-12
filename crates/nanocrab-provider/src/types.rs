@@ -41,3 +41,12 @@ pub struct LlmResponse {
     pub output_tokens: Option<u32>,
     pub stop_reason: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamChunk {
+    pub delta: String,
+    pub is_final: bool,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub stop_reason: Option<String>,
+}

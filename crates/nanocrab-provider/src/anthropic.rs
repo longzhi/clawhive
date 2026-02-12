@@ -1,9 +1,12 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use futures_core::Stream;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+use tokio_stream::StreamExt;
 
-use crate::{LlmProvider, LlmRequest, LlmResponse};
+use crate::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 #[derive(Debug, Clone)]
 pub struct AnthropicProvider {
@@ -69,6 +72,7 @@ impl AnthropicProvider {
                     content: m.content,
                 })
                 .collect(),
+            stream: false,
         }
     }
 }
@@ -125,6 +129,152 @@ impl LlmProvider for AnthropicProvider {
             stop_reason: body.stop_reason,
         })
     }
+
+    async fn stream(
+        &self,
+        request: LlmRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        let url = format!("{}/v1/messages", self.api_base);
+        let mut payload = Self::to_api_request(request);
+        payload.stream = true;
+
+        let resp = match self
+            .client
+            .post(url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => {
+                return Err(anyhow::anyhow!(
+                    "anthropic api error (timeout) [retryable]: request timed out after 60s"
+                ));
+            }
+            Err(e) if e.is_connect() => {
+                return Err(anyhow::anyhow!(
+                    "anthropic api error (connect) [retryable]: {e}"
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let status = resp.status();
+        if status != StatusCode::OK {
+            let text = resp.text().await?;
+            let parsed = serde_json::from_str::<ApiError>(&text).ok();
+            return Err(format_api_error(status, parsed));
+        }
+
+        let sse_stream = parse_sse_stream(resp.bytes_stream());
+        Ok(Box::pin(sse_stream))
+    }
+}
+
+fn parse_sse_stream(
+    byte_stream: impl Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl Stream<Item = Result<StreamChunk>> + Send {
+    async_stream::stream! {
+        tokio::pin!(byte_stream);
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                    while let Some(pos) = buffer.find("\n\n") {
+                        let event_text = buffer[..pos].to_string();
+                        buffer = buffer[pos + 2..].to_string();
+
+                        for line in event_text.lines() {
+                            let Some(data) = line.strip_prefix("data: ") else {
+                                continue;
+                            };
+
+                            if data == "[DONE]" {
+                                continue;
+                            }
+
+                            match serde_json::from_str::<serde_json::Value>(data) {
+                                Ok(event) => {
+                                    if let Some(chunk) = parse_sse_event(&event) {
+                                        yield Ok(chunk);
+                                    }
+                                }
+                                Err(e) => {
+                                    yield Err(anyhow!("invalid sse event payload: {e}"));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    yield Err(anyhow!("stream error: {e}"));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
+    let event_type = event.get("type")?.as_str()?;
+
+    match event_type {
+        "content_block_delta" => {
+            let delta = event.get("delta")?;
+            let text = delta.get("text")?.as_str()?.to_string();
+            Some(StreamChunk {
+                delta: text,
+                is_final: false,
+                input_tokens: None,
+                output_tokens: None,
+                stop_reason: None,
+            })
+        }
+        "message_delta" => {
+            let delta = event.get("delta")?;
+            let stop_reason = delta
+                .get("stop_reason")
+                .and_then(|value| value.as_str())
+                .map(std::string::ToString::to_string);
+            let usage = event.get("usage");
+            let output_tokens = usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok());
+
+            Some(StreamChunk {
+                delta: String::new(),
+                is_final: true,
+                input_tokens: None,
+                output_tokens,
+                stop_reason,
+            })
+        }
+        "message_start" => {
+            let message = event.get("message")?;
+            let usage = message.get("usage")?;
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok());
+
+            Some(StreamChunk {
+                delta: String::new(),
+                is_final: false,
+                input_tokens,
+                output_tokens: None,
+                stop_reason: None,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn format_api_error(status: StatusCode, parsed: Option<ApiError>) -> anyhow::Error {
@@ -153,6 +303,8 @@ pub(crate) struct ApiRequest {
     pub system: Option<String>,
     pub max_tokens: u32,
     pub messages: Vec<ApiMessage>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +417,67 @@ mod tests {
         let parsed: ApiError = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.error.r#type, "invalid_request_error");
         assert_eq!(parsed.error.message, "messages: field required");
+    }
+
+    #[test]
+    fn parse_sse_event_content_block_delta() {
+        let event = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"}
+        });
+        let chunk = parse_sse_event(&event).unwrap();
+        assert_eq!(chunk.delta, "Hello");
+        assert!(!chunk.is_final);
+    }
+
+    #[test]
+    fn parse_sse_event_message_delta() {
+        let event = serde_json::json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 42}
+        });
+        let chunk = parse_sse_event(&event).unwrap();
+        assert!(chunk.is_final);
+        assert_eq!(chunk.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(chunk.output_tokens, Some(42));
+    }
+
+    #[test]
+    fn parse_sse_event_message_start() {
+        let event = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "usage": {"input_tokens": 15}
+            }
+        });
+        let chunk = parse_sse_event(&event).unwrap();
+        assert_eq!(chunk.input_tokens, Some(15));
+        assert!(!chunk.is_final);
+    }
+
+    #[test]
+    fn api_request_stream_field_serialization() {
+        let req = ApiRequest {
+            model: "claude-sonnet-4-5".into(),
+            system: None,
+            max_tokens: 1024,
+            messages: vec![],
+            stream: false,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("stream").is_none());
+
+        let req_stream = ApiRequest {
+            model: "claude-sonnet-4-5".into(),
+            system: None,
+            max_tokens: 1024,
+            messages: vec![],
+            stream: true,
+        };
+        let json_stream = serde_json::to_value(&req_stream).unwrap();
+        assert_eq!(json_stream.get("stream").unwrap(), true);
     }
 
     #[test]
