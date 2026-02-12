@@ -176,11 +176,10 @@ async fn weak_react_stops_on_repeat_guard() {
 
     let aliases = HashMap::from([("echo".to_string(), "echo/model".to_string())]);
     let agents = vec![test_full_agent("nanocrab-main", "echo", vec![])];
-    let orch = make_orchestrator(registry, aliases, agents)
-        .with_react_config(WeakReActConfig {
-            max_steps: 4,
-            repeat_guard: 1,
-        });
+    let orch = make_orchestrator(registry, aliases, agents).with_react_config(WeakReActConfig {
+        max_steps: 4,
+        repeat_guard: 1,
+    });
 
     let out = orch
         .handle_inbound(test_inbound("loop"), "nanocrab-main")

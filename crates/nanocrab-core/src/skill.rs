@@ -55,16 +55,14 @@ fn bin_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
 }
 
 impl SkillRegistry {
     pub fn new() -> Self {
-        Self {
-            skills: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn load_from_dir(dir: &Path) -> Result<Self> {

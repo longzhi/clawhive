@@ -274,7 +274,7 @@ mod tests {
         let run_id = runner.spawn(req).await.unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;
         let cancelled = runner.cancel(&run_id).await;
-        assert!(cancelled || !cancelled);
+        let _ = cancelled;
     }
 
     #[tokio::test]

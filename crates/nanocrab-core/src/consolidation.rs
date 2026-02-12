@@ -1,9 +1,11 @@
-use std::sync::Arc;
+use super::router::LlmRouter;
 use anyhow::Result;
 use chrono::Utc;
-use nanocrab_memory::{Concept, ConceptStatus, ConceptType, Episode, Link, LinkRelation, MemoryStore};
+use nanocrab_memory::{
+    Concept, ConceptStatus, ConceptType, Episode, Link, LinkRelation, MemoryStore,
+};
 use nanocrab_provider::LlmMessage;
-use super::router::LlmRouter;
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub struct Consolidator {
@@ -39,7 +41,8 @@ impl Consolidator {
 
     pub async fn run_daily(&self) -> Result<ConsolidationReport> {
         let episodes = self.memory.search_episodes("", 1, 100).await?;
-        let high_value: Vec<_> = episodes.into_iter()
+        let high_value: Vec<_> = episodes
+            .into_iter()
             .filter(|e| e.importance >= 0.6)
             .collect();
 
@@ -82,7 +85,8 @@ impl Consolidator {
     }
 
     async fn extract_concepts(&self, episodes: &[Episode]) -> Result<Vec<(Concept, Uuid)>> {
-        let episodes_text = episodes.iter()
+        let episodes_text = episodes
+            .iter()
             .map(|e| format!("[{}] {}: {}", e.ts.format("%m-%d"), e.speaker, e.text))
             .collect::<Vec<_>>()
             .join("\n");
@@ -96,28 +100,31 @@ impl Consolidator {
             content: episodes_text,
         }];
 
-        let resp = self.router.chat(
-            &self.model_primary,
-            &self.model_fallbacks,
-            Some(system),
-            messages,
-            2048,
-        ).await?;
+        let resp = self
+            .router
+            .chat(
+                &self.model_primary,
+                &self.model_fallbacks,
+                Some(system),
+                messages,
+                2048,
+            )
+            .await?;
 
         parse_concept_candidates(&resp.text, episodes)
     }
 }
 
-fn parse_concept_candidates(llm_output: &str, episodes: &[Episode]) -> Result<Vec<(Concept, Uuid)>> {
+fn parse_concept_candidates(
+    llm_output: &str,
+    episodes: &[Episode],
+) -> Result<Vec<(Concept, Uuid)>> {
     let json_str = llm_output
         .trim()
         .strip_prefix("```json")
         .or_else(|| llm_output.trim().strip_prefix("```"))
         .unwrap_or(llm_output.trim());
-    let json_str = json_str
-        .strip_suffix("```")
-        .unwrap_or(json_str)
-        .trim();
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
     let items: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
         Ok(v) => v,
@@ -145,15 +152,18 @@ fn parse_concept_candidates(llm_output: &str, episodes: &[Episode]) -> Result<Ve
             None => continue,
         };
 
-        let confidence = item.get("confidence")
+        let confidence = item
+            .get("confidence")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.5) as f32;
 
-        let source_index = item.get("source_index")
+        let source_index = item
+            .get("source_index")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
 
-        let source_episode_id = episodes.get(source_index)
+        let source_episode_id = episodes
+            .get(source_index)
             .map(|e| e.id)
             .unwrap_or_else(|| episodes[0].id);
 
@@ -190,9 +200,8 @@ impl ConsolidationScheduler {
 
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-                self.interval_hours * 3600,
-            ));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(self.interval_hours * 3600));
             interval.tick().await;
             loop {
                 interval.tick().await;

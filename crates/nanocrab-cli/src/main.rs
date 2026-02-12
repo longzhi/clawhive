@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,7 +18,11 @@ use nanocrab_schema::InboundMessage;
 #[derive(Parser)]
 #[command(name = "nanocrab", version, about = "nanocrab AI agent framework")]
 struct Cli {
-    #[arg(long, default_value = ".", help = "Config root directory (contains config/ and prompts/)")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Config root directory (contains config/ and prompts/)"
+    )]
     config_root: PathBuf,
 
     #[command(subcommand)]
@@ -211,7 +215,11 @@ async fn main() -> Result<()> {
                                 } else {
                                     skill.description.clone()
                                 },
-                                if skill.requirements_met() { "yes" } else { "no" },
+                                if skill.requirements_met() {
+                                    "yes"
+                                } else {
+                                    "no"
+                                },
                             );
                         }
                     }
@@ -222,7 +230,11 @@ async fn main() -> Result<()> {
                         println!("Description: {}", skill.description);
                         println!(
                             "Available: {}",
-                            if skill.requirements_met() { "yes" } else { "no" }
+                            if skill.requirements_met() {
+                                "yes"
+                            } else {
+                                "no"
+                            }
                         );
                         if !skill.requires.bins.is_empty() {
                             println!("Required bins: {}", skill.requires.bins.join(", "));
@@ -254,7 +266,10 @@ async fn main() -> Result<()> {
         Commands::Task(cmd) => {
             let (_bus, _memory, gateway, _config) = bootstrap(&cli.config_root)?;
             match cmd {
-                TaskCommands::Trigger { agent: _agent, task } => {
+                TaskCommands::Trigger {
+                    agent: _agent,
+                    task,
+                } => {
                     let inbound = InboundMessage {
                         trace_id: uuid::Uuid::new_v4(),
                         channel_type: "cli".into(),
@@ -297,14 +312,16 @@ fn toggle_agent(agents_dir: &std::path::Path, agent_id: &str, enabled: bool) -> 
     Ok(())
 }
 
-fn bootstrap(root: &PathBuf) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, NanocrabConfig)> {
+fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, NanocrabConfig)> {
     let config = load_config(&root.join("config"))?;
 
     let db_path = root.join("data/nanocrab.db");
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let memory = Arc::new(MemoryStore::open(db_path.to_str().unwrap_or("data/nanocrab.db"))?);
+    let memory = Arc::new(MemoryStore::open(
+        db_path.to_str().unwrap_or("data/nanocrab.db"),
+    )?);
 
     let router = build_router_from_config(&config);
 
@@ -399,7 +416,7 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     LlmRouter::new(registry, aliases, vec![])
 }
 
-async fn start_bot(root: &PathBuf, with_tui: bool) -> Result<()> {
+async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
     let (bus, memory, gateway, config) = bootstrap(root)?;
 
     let consolidator = Arc::new(Consolidator::new(
@@ -434,29 +451,27 @@ async fn start_bot(root: &PathBuf, with_tui: bool) -> Result<()> {
         anyhow::bail!("telegram channel is disabled");
     }
 
-    for connector in &tg_config.connectors {
-        let token = resolve_env_var(&connector.token);
-        if token.is_empty() {
-            anyhow::bail!(
-                "Telegram token is empty for connector {}",
-                connector.connector_id
-            );
-        }
+    let connector = tg_config
+        .connectors
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no connectors configured for telegram"))?;
 
-        tracing::info!("Starting Telegram bot: {}", connector.connector_id);
-        let bot = TelegramBot::new(
-            token,
-            connector.connector_id.clone(),
-            gateway.clone(),
+    let token = resolve_env_var(&connector.token);
+    if token.is_empty() {
+        anyhow::bail!(
+            "Telegram token is empty for connector {}",
+            connector.connector_id
         );
-        bot.run().await?;
-        break;
     }
+
+    tracing::info!("Starting Telegram bot: {}", connector.connector_id);
+    let bot = TelegramBot::new(token, connector.connector_id.clone(), gateway.clone());
+    bot.run().await?;
 
     Ok(())
 }
 
-async fn run_consolidate(root: &PathBuf) -> Result<()> {
+async fn run_consolidate(root: &Path) -> Result<()> {
     let (_bus, memory, _gateway, config) = bootstrap(root)?;
 
     let consolidator = Arc::new(Consolidator::new(
@@ -478,7 +493,7 @@ async fn run_consolidate(root: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run_repl(root: &PathBuf, _agent_id: &str) -> Result<()> {
+async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
     let (_bus, _memory, gateway, _config) = bootstrap(root)?;
 
     println!("nanocrab REPL. Type 'quit' to exit.");

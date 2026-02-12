@@ -184,7 +184,10 @@ mod tests {
         let publisher = bus.publisher();
         let publisher_clone = publisher.clone();
 
-        publisher_clone.publish(reply_ready_message()).await.unwrap();
+        publisher_clone
+            .publish(reply_ready_message())
+            .await
+            .unwrap();
 
         let received = timeout(Duration::from_millis(100), rx.recv())
             .await

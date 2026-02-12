@@ -96,7 +96,9 @@ impl LlmProvider for AnthropicProvider {
                 ));
             }
             Err(e) if e.is_connect() => {
-                return Err(anyhow::anyhow!("anthropic api error (connect) [retryable]: {e}"));
+                return Err(anyhow::anyhow!(
+                    "anthropic api error (connect) [retryable]: {e}"
+                ));
             }
             Err(e) => return Err(e.into()),
         };
@@ -127,7 +129,11 @@ impl LlmProvider for AnthropicProvider {
 
 fn format_api_error(status: StatusCode, parsed: Option<ApiError>) -> anyhow::Error {
     let kind = ProviderErrorKind::from_status(status);
-    let retryable = if kind.is_retryable() { " [retryable]" } else { "" };
+    let retryable = if kind.is_retryable() {
+        " [retryable]"
+    } else {
+        ""
+    };
     if let Some(api_error) = parsed {
         let detail = api_error.error;
         anyhow!(

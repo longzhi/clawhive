@@ -18,12 +18,7 @@ impl TelegramAdapter {
         }
     }
 
-    pub fn to_inbound(
-        &self,
-        chat_id: i64,
-        user_id: i64,
-        text: &str,
-    ) -> InboundMessage {
+    pub fn to_inbound(&self, chat_id: i64, user_id: i64, text: &str) -> InboundMessage {
         InboundMessage {
             trace_id: Uuid::new_v4(),
             channel_type: "telegram".to_string(),
@@ -123,8 +118,7 @@ pub fn detect_mention(msg: &Message) -> (bool, Option<String>) {
             continue;
         }
 
-        if let Some((start, end)) = utf16_range_to_byte_range(text, entity.offset, entity.length)
-        {
+        if let Some((start, end)) = utf16_range_to_byte_range(text, entity.offset, entity.length) {
             return (true, Some(text[start..end].to_string()));
         }
     }

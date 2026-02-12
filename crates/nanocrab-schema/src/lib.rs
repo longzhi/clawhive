@@ -195,7 +195,7 @@ mod tests {
 
         let msg: InboundMessage = serde_json::from_str(old_json).unwrap();
         assert_eq!(msg.thread_id, None);
-        assert_eq!(msg.is_mention, false);
+        assert!(!msg.is_mention);
         assert_eq!(msg.mention_target, None);
         assert_eq!(msg.text, "hello");
     }

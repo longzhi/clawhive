@@ -31,14 +31,22 @@ impl MemoryContext {
         if !self.recent_episodes.is_empty() {
             parts.push("## Recent Conversation".to_string());
             for ep in &self.recent_episodes {
-                parts.push(format!("[{}] {}: {}", ep.ts.format("%m-%d %H:%M"), ep.speaker, ep.text));
+                parts.push(format!(
+                    "[{}] {}: {}",
+                    ep.ts.format("%m-%d %H:%M"),
+                    ep.speaker,
+                    ep.text
+                ));
             }
         }
 
         if !self.active_concepts.is_empty() {
             parts.push("\n## Known Facts".to_string());
             for c in &self.active_concepts {
-                parts.push(format!("- [{:?}] {}: {} (confidence: {:.1})", c.concept_type, c.key, c.value, c.confidence));
+                parts.push(format!(
+                    "- [{:?}] {}: {} (confidence: {:.1})",
+                    c.concept_type, c.key, c.value, c.confidence
+                ));
             }
         }
 
@@ -129,10 +137,16 @@ impl MemoryStore {
         .await?
     }
 
-    pub async fn search_episodes(&self, query: &str, days: i64, limit: usize) -> Result<Vec<Episode>> {
+    pub async fn search_episodes(
+        &self,
+        query: &str,
+        days: i64,
+        limit: usize,
+    ) -> Result<Vec<Episode>> {
         let db = Arc::clone(&self.db);
         let query_like = format!("%{query}%");
-        let delta = TimeDelta::try_days(days).ok_or_else(|| anyhow!("invalid days value: {days}"))?;
+        let delta =
+            TimeDelta::try_days(days).ok_or_else(|| anyhow!("invalid days value: {days}"))?;
         let cutoff = (Utc::now() - delta).to_rfc3339();
 
         task::spawn_blocking(move || {
@@ -368,7 +382,8 @@ impl MemoryStore {
             let conn = db
                 .lock()
                 .map_err(|e| anyhow!("failed to lock sqlite connection: {e}"))?;
-            let deleted = conn.execute("DELETE FROM sessions WHERE session_key = ?1", params![key])?;
+            let deleted =
+                conn.execute("DELETE FROM sessions WHERE session_key = ?1", params![key])?;
             Ok::<bool, anyhow::Error>(deleted > 0)
         })
         .await?
@@ -398,7 +413,8 @@ impl MemoryStore {
 
     pub async fn mark_stale_concepts(&self, days_inactive: i64) -> Result<usize> {
         let db = Arc::clone(&self.db);
-        let delta = TimeDelta::try_days(days_inactive).ok_or_else(|| anyhow!("invalid days value: {days_inactive}"))?;
+        let delta = TimeDelta::try_days(days_inactive)
+            .ok_or_else(|| anyhow!("invalid days value: {days_inactive}"))?;
         let cutoff = (Utc::now() - delta).to_rfc3339();
         task::spawn_blocking(move || {
             let conn = db
@@ -415,7 +431,8 @@ impl MemoryStore {
 
     pub async fn purge_old_episodes(&self, days: i64) -> Result<usize> {
         let db = Arc::clone(&self.db);
-        let delta = TimeDelta::try_days(days).ok_or_else(|| anyhow!("invalid days value: {days}"))?;
+        let delta =
+            TimeDelta::try_days(days).ok_or_else(|| anyhow!("invalid days value: {days}"))?;
         let cutoff = (Utc::now() - delta).to_rfc3339();
         task::spawn_blocking(move || {
             let conn = db
@@ -480,12 +497,15 @@ fn parse_concept_status(s: &str) -> ConceptStatus {
 fn parse_datetime_sql(raw: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn parse_uuid_sql(raw: &str) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(raw)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+    Uuid::parse_str(raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
 }
 
 fn row_to_episode(row: &Row<'_>) -> rusqlite::Result<Episode> {
@@ -641,7 +661,10 @@ mod tests {
     async fn upsert_concept_update() {
         let store = MemoryStore::open_in_memory().expect("store");
         let mut concept = make_concept("user.locale", "en-US", ConceptStatus::Active);
-        store.upsert_concept(concept.clone()).await.expect("upsert first");
+        store
+            .upsert_concept(concept.clone())
+            .await
+            .expect("upsert first");
 
         concept.value = "zh-CN".to_owned();
         concept.status = ConceptStatus::Stale;
@@ -743,7 +766,10 @@ mod tests {
         store.upsert_session(rec).await.expect("upsert session");
         let deleted = store.delete_session("abc").await.expect("delete session");
         assert!(deleted);
-        let loaded = store.get_session("abc").await.expect("get session after delete");
+        let loaded = store
+            .get_session("abc")
+            .await
+            .expect("get session after delete");
         assert!(loaded.is_none());
     }
 
@@ -798,7 +824,10 @@ mod tests {
         let purged = store.purge_old_episodes(90).await.expect("purge old");
         assert_eq!(purged, 1);
 
-        let remained = store.search_episodes("old low", 365, 10).await.expect("search");
+        let remained = store
+            .search_episodes("old low", 365, 10)
+            .await
+            .expect("search");
         assert!(remained.is_empty());
     }
 
@@ -809,19 +838,28 @@ mod tests {
         old_high.ts = Utc::now() - TimeDelta::days(120);
         old_high.importance = 0.95;
 
-        store.insert_episode(old_high).await.expect("insert old high");
+        store
+            .insert_episode(old_high)
+            .await
+            .expect("insert old high");
 
         let purged = store.purge_old_episodes(90).await.expect("purge old");
         assert_eq!(purged, 0);
 
-        let remained = store.search_episodes("old high", 365, 10).await.expect("search");
+        let remained = store
+            .search_episodes("old high", 365, 10)
+            .await
+            .expect("search");
         assert_eq!(remained.len(), 1);
     }
 
     #[tokio::test]
     async fn retrieve_context_empty_db() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let ctx = store.retrieve_context("session:1", "", 10, 20).await.unwrap();
+        let ctx = store
+            .retrieve_context("session:1", "", 10, 20)
+            .await
+            .unwrap();
         assert!(ctx.recent_episodes.is_empty());
         assert!(ctx.relevant_episodes.is_empty());
         assert!(ctx.active_concepts.is_empty());
@@ -842,7 +880,10 @@ mod tests {
             source_ref: None,
         };
         store.insert_episode(ep).await.unwrap();
-        let ctx = store.retrieve_context("session:1", "", 10, 20).await.unwrap();
+        let ctx = store
+            .retrieve_context("session:1", "", 10, 20)
+            .await
+            .unwrap();
         assert_eq!(ctx.recent_episodes.len(), 1);
     }
 

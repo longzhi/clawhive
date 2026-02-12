@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::collections::HashMap as StdHashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use nanocrab_bus::BusPublisher;

@@ -21,15 +21,14 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
+#[derive(Default)]
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
-        Self {
-            providers: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn register(&mut self, id: impl Into<String>, provider: Arc<dyn LlmProvider>) {

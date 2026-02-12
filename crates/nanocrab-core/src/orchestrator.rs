@@ -28,6 +28,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         router: LlmRouter,
         agents: Vec<FullAgentConfig>,
@@ -73,7 +74,10 @@ impl Orchestrator {
             .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
 
         let session_key = SessionKey::from_inbound(&inbound);
-        let _session = self.session_mgr.get_or_create(&session_key, agent_id).await?;
+        let _session = self
+            .session_mgr
+            .get_or_create(&session_key, agent_id)
+            .await?;
 
         // Save inbound data before it's moved
         let inbound_at = inbound.at;
@@ -91,7 +95,9 @@ impl Orchestrator {
             format!("{system_prompt}\n\n{skill_summary}")
         };
 
-        let memory_context = self.build_memory_context(&session_key, &inbound.text).await?;
+        let memory_context = self
+            .build_memory_context(&session_key, &inbound.text)
+            .await?;
 
         let mut messages = Vec::new();
         if !memory_context.is_empty() {
@@ -211,7 +217,10 @@ impl Orchestrator {
     }
 
     async fn build_memory_context(&self, session_key: &SessionKey, query: &str) -> Result<String> {
-        let context = self.memory.retrieve_context(&session_key.0, query, 10, 20).await?;
+        let context = self
+            .memory
+            .retrieve_context(&session_key.0, query, 10, 20)
+            .await?;
         Ok(context.to_prompt_text())
     }
 }
