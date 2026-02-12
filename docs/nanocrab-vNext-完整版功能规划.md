@@ -1,4 +1,4 @@
-# nanocrab vNext：能力权限模型与执行术语（非 MVP）
+# nanocrab vNext：完整版功能规划（非 MVP）
 
 > 目的：沉淀 nanocrab 下一阶段（vNext/完整版）设计，不挤占 MVP 开发节奏。
 
