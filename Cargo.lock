@@ -1276,6 +1276,7 @@ dependencies = [
  "nanocrab-provider",
  "nanocrab-runtime",
  "nanocrab-schema",
+ "nanocrab-tui",
  "serde_yaml",
  "tokio",
  "tracing",

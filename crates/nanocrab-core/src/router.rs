@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use nanocrab_provider::{LlmMessage, LlmRequest, LlmResponse, ProviderRegistry};
+use tokio::time;
+
+const MAX_RETRIES: usize = 2;
+const BASE_BACKOFF_MS: u64 = 1000;
 
 pub struct LlmRouter {
     registry: ProviderRegistry,
@@ -41,18 +45,37 @@ impl LlmRouter {
             let (provider_id, model_id) = parse_provider_model(&resolved)?;
             let provider = self.registry.get(&provider_id)?;
 
-            let req = LlmRequest {
-                model: model_id,
-                system: system.clone(),
-                messages: messages.clone(),
-                max_tokens,
-            };
+            let mut attempts = 0;
+            loop {
+                let req = LlmRequest {
+                    model: model_id.clone(),
+                    system: system.clone(),
+                    messages: messages.clone(),
+                    max_tokens,
+                };
 
-            match provider.chat(req).await {
-                Ok(resp) => return Ok(resp),
-                Err(err) => {
-                    tracing::warn!("provider {provider_id} failed: {err}");
-                    last_err = Some(err);
+                match provider.chat(req).await {
+                    Ok(resp) => return Ok(resp),
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        let is_retryable = err_str.contains("[retryable]");
+
+                        if is_retryable && attempts < MAX_RETRIES {
+                            attempts += 1;
+                            let backoff = BASE_BACKOFF_MS * (1 << (attempts - 1));
+                            tracing::warn!(
+                                "provider {provider_id} retryable error (attempt {attempts}/{MAX_RETRIES}), backing off {backoff}ms: {err_str}"
+                            );
+                            time::sleep(time::Duration::from_millis(backoff)).await;
+                            continue;
+                        }
+
+                        tracing::warn!(
+                            "provider {provider_id} failed (retryable={is_retryable}, attempts={attempts}): {err_str}"
+                        );
+                        last_err = Some(err);
+                        break;
+                    }
                 }
             }
         }
@@ -97,4 +120,97 @@ fn parse_provider_model(input: &str) -> Result<(String, String)> {
         .next()
         .ok_or_else(|| anyhow!("invalid model format: {input}"))?;
     Ok((provider.to_string(), model.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use nanocrab_provider::{LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry};
+
+    use super::LlmRouter;
+
+    struct RetryableFailProvider {
+        call_count: AtomicUsize,
+        fail_times: usize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RetryableFailProvider {
+        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count < self.fail_times {
+                anyhow::bail!("anthropic api error (429) [retryable]: rate limited")
+            }
+            Ok(LlmResponse {
+                text: format!("ok after {} retries", count),
+                input_tokens: None,
+                output_tokens: None,
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    struct PermanentFailProvider;
+
+    #[async_trait]
+    impl LlmProvider for PermanentFailProvider {
+        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+            anyhow::bail!("anthropic api error (401): unauthorized")
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_on_retryable_error() {
+        let provider = Arc::new(RetryableFailProvider {
+            call_count: AtomicUsize::new(0),
+            fail_times: 2,
+        });
+        let mut registry = ProviderRegistry::new();
+        registry.register("test", provider.clone());
+        let aliases = HashMap::from([("model".to_string(), "test/model".to_string())]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+
+        let resp = router
+            .chat(
+                "model",
+                &[],
+                None,
+                vec![LlmMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(resp.text.contains("ok after 2 retries"));
+        assert_eq!(provider.call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn no_retry_on_non_retryable_error() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("test", Arc::new(PermanentFailProvider));
+        let aliases = HashMap::from([("model".to_string(), "test/model".to_string())]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+
+        let result = router
+            .chat(
+                "model",
+                &[],
+                None,
+                vec![LlmMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                100,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("401"));
+    }
 }

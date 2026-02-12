@@ -21,6 +21,7 @@ nanocrab-gateway = { path = "../nanocrab-gateway" }
 nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-channels-telegram = { path = "../nanocrab-channels-telegram" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
+nanocrab-tui = { path = "../nanocrab-tui" }
 
 [[bin]]
 name = "nanocrab"

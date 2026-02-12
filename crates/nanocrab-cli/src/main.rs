@@ -28,7 +28,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     #[command(about = "Start the Telegram bot")]
-    Start,
+    Start {
+        #[arg(long, help = "Run TUI dashboard in the same process")]
+        tui: bool,
+    },
     #[command(about = "Local REPL for testing (no Telegram needed)")]
     Chat {
         #[arg(long, default_value = "nanocrab-main", help = "Agent ID to use")]
@@ -115,8 +118,8 @@ async fn main() -> Result<()> {
                 config.routing.bindings.len()
             );
         }
-        Commands::Start => {
-            start_bot(&cli.config_root).await?;
+        Commands::Start { tui } => {
+            start_bot(&cli.config_root, tui).await?;
         }
         Commands::Chat { agent } => {
             run_repl(&cli.config_root, &agent).await?;
@@ -396,8 +399,8 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     LlmRouter::new(registry, aliases, vec![])
 }
 
-async fn start_bot(root: &PathBuf) -> Result<()> {
-    let (_bus, memory, gateway, config) = bootstrap(root)?;
+async fn start_bot(root: &PathBuf, with_tui: bool) -> Result<()> {
+    let (bus, memory, gateway, config) = bootstrap(root)?;
 
     let consolidator = Arc::new(Consolidator::new(
         memory,
@@ -408,6 +411,17 @@ async fn start_bot(root: &PathBuf) -> Result<()> {
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
     let _consolidation_handle = scheduler.start();
     tracing::info!("Consolidation scheduler started (every 24h)");
+
+    let _tui_handle = if with_tui {
+        let receivers = nanocrab_tui::subscribe_all(&bus).await;
+        Some(tokio::spawn(async move {
+            if let Err(err) = nanocrab_tui::run_tui_from_receivers(receivers).await {
+                tracing::error!("TUI exited with error: {err}");
+            }
+        }))
+    } else {
+        None
+    };
 
     let tg_config = config
         .main
@@ -515,6 +529,12 @@ mod tests {
     fn parses_consolidate_subcommand() {
         let cli = Cli::parse_from(["nanocrab", "consolidate"]);
         assert!(matches!(cli.command, Commands::Consolidate));
+    }
+
+    #[test]
+    fn parses_start_tui_flag() {
+        let cli = Cli::try_parse_from(["nanocrab", "start", "--tui"]).unwrap();
+        assert!(matches!(cli.command, Commands::Start { tui: true }));
     }
 
     #[test]

@@ -18,6 +18,10 @@ nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-gateway = { path = "../nanocrab-gateway" }
 
+[lib]
+name = "nanocrab_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nanocrab-tui"
 path = "src/main.rs"

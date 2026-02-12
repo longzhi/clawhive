@@ -12,10 +12,39 @@ pub struct AnthropicProvider {
     api_base: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderErrorKind {
+    RateLimit,
+    ServerError,
+    Timeout,
+    AuthError,
+    InvalidRequest,
+    Unknown,
+}
+
+impl ProviderErrorKind {
+    pub fn from_status(status: reqwest::StatusCode) -> Self {
+        match status.as_u16() {
+            429 => Self::RateLimit,
+            401 | 403 => Self::AuthError,
+            400 | 422 => Self::InvalidRequest,
+            500..=599 => Self::ServerError,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RateLimit | Self::ServerError | Self::Timeout)
+    }
+}
+
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>, api_base: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
             api_key: api_key.into(),
             api_base: api_base.into().trim_end_matches('/').to_string(),
         }
@@ -50,7 +79,7 @@ impl LlmProvider for AnthropicProvider {
         let url = format!("{}/v1/messages", self.api_base);
         let payload = Self::to_api_request(request);
 
-        let resp = self
+        let resp = match self
             .client
             .post(url)
             .header("x-api-key", &self.api_key)
@@ -58,7 +87,19 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&payload)
             .send()
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => {
+                return Err(anyhow::anyhow!(
+                    "anthropic api error (timeout) [retryable]: request timed out after 60s"
+                ));
+            }
+            Err(e) if e.is_connect() => {
+                return Err(anyhow::anyhow!("anthropic api error (connect) [retryable]: {e}"));
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let status = resp.status();
         if status != StatusCode::OK {
@@ -85,15 +126,17 @@ impl LlmProvider for AnthropicProvider {
 }
 
 fn format_api_error(status: StatusCode, parsed: Option<ApiError>) -> anyhow::Error {
+    let kind = ProviderErrorKind::from_status(status);
+    let retryable = if kind.is_retryable() { " [retryable]" } else { "" };
     if let Some(api_error) = parsed {
         let detail = api_error.error;
         anyhow!(
-            "anthropic api error ({status}): {} ({})",
+            "anthropic api error ({status}){retryable}: {} ({})",
             detail.message,
             detail.r#type
         )
     } else {
-        anyhow!("anthropic api error ({status})")
+        anyhow!("anthropic api error ({status}){retryable}")
     }
 }
 
@@ -216,6 +259,31 @@ mod tests {
         let parsed: ApiError = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.error.r#type, "invalid_request_error");
         assert_eq!(parsed.error.message, "messages: field required");
+    }
+
+    #[test]
+    fn provider_error_kind_classification() {
+        assert_eq!(
+            ProviderErrorKind::from_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            ProviderErrorKind::RateLimit
+        );
+        assert_eq!(
+            ProviderErrorKind::from_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            ProviderErrorKind::ServerError
+        );
+        assert_eq!(
+            ProviderErrorKind::from_status(reqwest::StatusCode::UNAUTHORIZED),
+            ProviderErrorKind::AuthError
+        );
+        assert_eq!(
+            ProviderErrorKind::from_status(reqwest::StatusCode::BAD_REQUEST),
+            ProviderErrorKind::InvalidRequest
+        );
+        assert!(ProviderErrorKind::RateLimit.is_retryable());
+        assert!(ProviderErrorKind::ServerError.is_retryable());
+        assert!(ProviderErrorKind::Timeout.is_retryable());
+        assert!(!ProviderErrorKind::AuthError.is_retryable());
+        assert!(!ProviderErrorKind::InvalidRequest.is_retryable());
     }
 
     #[tokio::test]
