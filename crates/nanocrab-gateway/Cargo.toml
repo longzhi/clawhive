@@ -16,3 +16,6 @@ nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 tokio.workspace = true
+
+[dev-dependencies]
+nanocrab-runtime = { path = "../nanocrab-runtime" }

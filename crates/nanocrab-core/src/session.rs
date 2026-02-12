@@ -61,6 +61,10 @@ impl SessionManager {
         }
     }
 
+    pub async fn reset(&self, key: &SessionKey) -> Result<bool> {
+        self.store.delete_session(&key.0).await
+    }
+
     fn create_new(&self, key: &SessionKey, agent_id: &str) -> Session {
         let now = Utc::now();
         Session {
@@ -133,6 +137,27 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(s1.created_at, s2.created_at);
+    }
+
+    #[tokio::test]
+    async fn reset_deletes_existing_session() {
+        let store = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let mgr = SessionManager::new(store.clone(), 1800);
+        let key = test_key();
+
+        mgr.get_or_create(&key, "nanocrab-main").await.unwrap();
+        let deleted = mgr.reset(&key).await.unwrap();
+        assert!(deleted);
+        let loaded = store.get_session(&key.0).await.unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_returns_false_for_missing_session() {
+        let store = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let mgr = SessionManager::new(store, 1800);
+        let deleted = mgr.reset(&test_key()).await.unwrap();
+        assert!(!deleted);
     }
 
     #[test]

@@ -161,6 +161,7 @@ mod tests {
     use nanocrab_core::*;
     use nanocrab_memory::MemoryStore;
     use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
+    use nanocrab_runtime::NativeExecutor;
     use nanocrab_schema::InboundMessage;
 
     use super::*;
@@ -197,6 +198,7 @@ mod tests {
             SkillRegistry::new(),
             memory,
             publisher.clone(),
+            Arc::new(NativeExecutor),
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),

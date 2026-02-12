@@ -361,6 +361,19 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub async fn delete_session(&self, session_key: &str) -> Result<bool> {
+        let db = Arc::clone(&self.db);
+        let key = session_key.to_string();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|e| anyhow!("failed to lock sqlite connection: {e}"))?;
+            let deleted = conn.execute("DELETE FROM sessions WHERE session_key = ?1", params![key])?;
+            Ok::<bool, anyhow::Error>(deleted > 0)
+        })
+        .await?
+    }
+
     pub async fn retrieve_context(
         &self,
         session_id: &str,
@@ -713,6 +726,35 @@ mod tests {
         assert_eq!(loaded.session_key, "abc");
         assert_eq!(loaded.agent_id, "agent-1");
         assert_eq!(loaded.ttl_seconds, 3600);
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_existing_record() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let now = Utc::now();
+        let rec = SessionRecord {
+            session_key: "abc".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            created_at: now,
+            last_active: now,
+            ttl_seconds: 3600,
+        };
+
+        store.upsert_session(rec).await.expect("upsert session");
+        let deleted = store.delete_session("abc").await.expect("delete session");
+        assert!(deleted);
+        let loaded = store.get_session("abc").await.expect("get session after delete");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_session_returns_false_when_missing() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let deleted = store
+            .delete_session("does-not-exist")
+            .await
+            .expect("delete missing session");
+        assert!(!deleted);
     }
 
     #[tokio::test]

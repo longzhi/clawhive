@@ -12,6 +12,7 @@ use nanocrab_core::*;
 use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
 use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{register_builtin_providers, AnthropicProvider, ProviderRegistry};
+use nanocrab_runtime::NativeExecutor;
 use nanocrab_schema::InboundMessage;
 
 #[derive(Parser)]
@@ -41,6 +42,10 @@ enum Commands {
     Agent(AgentCommands),
     #[command(subcommand, about = "Skill management")]
     Skill(SkillCommands),
+    #[command(subcommand, about = "Session management")]
+    Session(SessionCommands),
+    #[command(subcommand, about = "Task management")]
+    Task(TaskCommands),
 }
 
 #[derive(Subcommand)]
@@ -49,6 +54,16 @@ enum AgentCommands {
     List,
     #[command(about = "Show agent details")]
     Show {
+        #[arg(help = "Agent ID")]
+        agent_id: String,
+    },
+    #[command(about = "Enable an agent")]
+    Enable {
+        #[arg(help = "Agent ID")]
+        agent_id: String,
+    },
+    #[command(about = "Disable an agent")]
+    Disable {
         #[arg(help = "Agent ID")]
         agent_id: String,
     },
@@ -62,6 +77,26 @@ enum SkillCommands {
     Show {
         #[arg(help = "Skill name")]
         skill_name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    #[command(about = "Reset a session by key")]
+    Reset {
+        #[arg(help = "Session key")]
+        session_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskCommands {
+    #[command(about = "Trigger a one-off task")]
+    Trigger {
+        #[arg(help = "Agent ID")]
+        agent: String,
+        #[arg(help = "Task description")]
+        task: String,
     },
 }
 
@@ -141,6 +176,16 @@ async fn main() -> Result<()> {
                         println!("Sub-agent: allow_spawn={}", sa.allow_spawn);
                     }
                 }
+                AgentCommands::Enable { agent_id } => {
+                    let config_dir = cli.config_root.join("config/agents.d");
+                    toggle_agent(&config_dir, &agent_id, true)?;
+                    println!("Agent '{agent_id}' enabled.");
+                }
+                AgentCommands::Disable { agent_id } => {
+                    let config_dir = cli.config_root.join("config/agents.d");
+                    toggle_agent(&config_dir, &agent_id, false)?;
+                    println!("Agent '{agent_id}' disabled.");
+                }
             }
         }
         Commands::Skill(cmd) => {
@@ -190,8 +235,62 @@ async fn main() -> Result<()> {
                 },
             }
         }
+        Commands::Session(cmd) => {
+            let (_bus, memory, _gateway, _config) = bootstrap(&cli.config_root)?;
+            let session_mgr = SessionManager::new(memory, 1800);
+            match cmd {
+                SessionCommands::Reset { session_key } => {
+                    let key = nanocrab_schema::SessionKey(session_key.clone());
+                    match session_mgr.reset(&key).await? {
+                        true => println!("Session '{session_key}' reset successfully."),
+                        false => println!("Session '{session_key}' not found."),
+                    }
+                }
+            }
+        }
+        Commands::Task(cmd) => {
+            let (_bus, _memory, gateway, _config) = bootstrap(&cli.config_root)?;
+            match cmd {
+                TaskCommands::Trigger { agent: _agent, task } => {
+                    let inbound = InboundMessage {
+                        trace_id: uuid::Uuid::new_v4(),
+                        channel_type: "cli".into(),
+                        connector_id: "cli".into(),
+                        conversation_scope: "task:cli".into(),
+                        user_scope: "user:cli".into(),
+                        text: task,
+                        at: chrono::Utc::now(),
+                        thread_id: None,
+                        is_mention: false,
+                        mention_target: None,
+                    };
+                    match gateway.handle_inbound(inbound).await {
+                        Ok(out) => println!("{}", out.text),
+                        Err(err) => eprintln!("Task failed: {err}"),
+                    }
+                }
+            }
+        }
     }
 
+    Ok(())
+}
+
+fn toggle_agent(agents_dir: &std::path::Path, agent_id: &str, enabled: bool) -> Result<()> {
+    let path = agents_dir.join(format!("{agent_id}.yaml"));
+    if !path.exists() {
+        anyhow::bail!("agent config not found: {}", path.display());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
+    if let serde_yaml::Value::Mapping(ref mut map) = doc {
+        map.insert(
+            serde_yaml::Value::String("enabled".into()),
+            serde_yaml::Value::Bool(enabled),
+        );
+    }
+    let output = serde_yaml::to_string(&doc)?;
+    std::fs::write(&path, output)?;
     Ok(())
 }
 
@@ -240,6 +339,7 @@ fn bootstrap(root: &PathBuf) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>
         skill_registry,
         memory.clone(),
         publisher.clone(),
+        Arc::new(NativeExecutor),
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());
@@ -427,5 +527,32 @@ mod tests {
     fn parses_skill_list_subcommand() {
         let cli = Cli::try_parse_from(["nanocrab", "skill", "list"]).unwrap();
         assert!(matches!(cli.command, Commands::Skill(SkillCommands::List)));
+    }
+
+    #[test]
+    fn parses_session_reset_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "session", "reset", "my-session"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Session(SessionCommands::Reset { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_task_trigger_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "task", "trigger", "main", "do stuff"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Task(TaskCommands::Trigger { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_agent_enable_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "agent", "enable", "my-agent"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Agent(AgentCommands::Enable { .. })
+        ));
     }
 }

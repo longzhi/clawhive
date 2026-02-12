@@ -7,6 +7,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use nanocrab_bus::{EventBus, Topic};
+use nanocrab_schema::BusMessage;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -15,6 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
+use tokio::sync::mpsc;
 
 const MAX_ITEMS: usize = 200;
 
@@ -45,27 +48,62 @@ struct App {
     focus: Panel,
     scroll_offset: [usize; 4],
     should_quit: bool,
+    trace_filter: Option<String>,
+    filter_input: String,
+    filter_mode: bool,
 }
 
 impl App {
     fn new() -> Self {
         Self {
             events: vec![format!(
-                "[{}] TUI started",
+                "[{}] TUI started — listening on EventBus",
                 chrono::Local::now().format("%H:%M:%S")
             )],
             sessions: vec!["No active sessions".into()],
             agent_runs: vec!["No running agents".into()],
-            logs: vec!["Waiting for trace events...".into()],
+            logs: vec!["Waiting for bus events...".into()],
             focus: Panel::BusEvents,
             scroll_offset: [0; 4],
             should_quit: false,
+            trace_filter: None,
+            filter_input: String::new(),
+            filter_mode: false,
         }
     }
 
     fn on_key(&mut self, key: KeyCode) {
+        if self.filter_mode {
+            match key {
+                KeyCode::Enter => {
+                    self.trace_filter = if self.filter_input.is_empty() {
+                        None
+                    } else {
+                        Some(self.filter_input.clone())
+                    };
+                    self.filter_mode = false;
+                }
+                KeyCode::Esc => {
+                    self.filter_mode = false;
+                    self.filter_input.clear();
+                }
+                KeyCode::Backspace => {
+                    self.filter_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.filter_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('/') => {
+                self.filter_mode = true;
+                self.filter_input.clear();
+            }
             KeyCode::Tab => {
                 self.focus = self.focus.next();
             }
@@ -78,7 +116,7 @@ impl App {
             KeyCode::Down => {
                 let idx = self.focus as usize;
                 let max = match self.focus {
-                    Panel::BusEvents => self.events.len(),
+                    Panel::BusEvents => self.filtered_events().len(),
                     Panel::Sessions => self.sessions.len(),
                     Panel::AgentRuns => self.agent_runs.len(),
                     Panel::Logs => self.logs.len(),
@@ -91,26 +129,213 @@ impl App {
         }
     }
 
-    /// Push a bus event into the panel (used when real EventBus is wired).
-    #[allow(dead_code)]
-    fn push_event(&mut self, event: String) {
-        self.events.push(event);
+    fn filtered_events(&self) -> Vec<&String> {
+        match &self.trace_filter {
+            Some(filter) => self.events.iter().filter(|e| e.contains(filter)).collect(),
+            None => self.events.iter().collect(),
+        }
+    }
+
+    fn push_event(&mut self, line: String) {
+        self.events.push(line);
         if self.events.len() > MAX_ITEMS {
             self.events.remove(0);
         }
     }
 
-    /// Push a log/trace entry into the panel (used when real EventBus is wired).
-    #[allow(dead_code)]
-    fn push_log(&mut self, log: String) {
-        self.logs.push(log);
+    fn push_session(&mut self, line: String) {
+        if self.sessions.first().map(|s| s.as_str()) == Some("No active sessions") {
+            self.sessions.clear();
+        }
+        self.sessions.push(line);
+        if self.sessions.len() > MAX_ITEMS {
+            self.sessions.remove(0);
+        }
+    }
+
+    fn push_agent_run(&mut self, line: String) {
+        if self.agent_runs.first().map(|s| s.as_str()) == Some("No running agents") {
+            self.agent_runs.clear();
+        }
+        self.agent_runs.push(line);
+        if self.agent_runs.len() > MAX_ITEMS {
+            self.agent_runs.remove(0);
+        }
+    }
+
+    fn push_log(&mut self, line: String) {
+        if self.logs.first().map(|s| s.as_str()) == Some("Waiting for bus events...") {
+            self.logs.clear();
+        }
+        self.logs.push(line);
         if self.logs.len() > MAX_ITEMS {
             self.logs.remove(0);
         }
     }
+
+    fn handle_bus_message(&mut self, msg: BusMessage) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        match msg {
+            BusMessage::HandleIncomingMessage {
+                ref inbound,
+                ref resolved_agent_id,
+            } => {
+                self.push_event(format!(
+                    "[{ts}] HandleIncoming trace={} agent={resolved_agent_id}",
+                    &inbound.trace_id.to_string()[..8]
+                ));
+                self.push_session(format!(
+                    "[{ts}] {} → {} ({})",
+                    inbound.user_scope, inbound.conversation_scope, inbound.channel_type
+                ));
+            }
+            BusMessage::MessageAccepted { trace_id } => {
+                self.push_event(format!(
+                    "[{ts}] MessageAccepted trace={}",
+                    &trace_id.to_string()[..8]
+                ));
+            }
+            BusMessage::ReplyReady { ref outbound } => {
+                let preview: String = outbound.text.chars().take(60).collect();
+                self.push_event(format!(
+                    "[{ts}] ReplyReady trace={}",
+                    &outbound.trace_id.to_string()[..8]
+                ));
+                self.push_log(format!("[{ts}] Reply: {preview}"));
+            }
+            BusMessage::TaskFailed {
+                trace_id,
+                ref error,
+            } => {
+                self.push_event(format!(
+                    "[{ts}] TaskFailed trace={}",
+                    &trace_id.to_string()[..8]
+                ));
+                self.push_log(format!("[{ts}] ERROR: {error}"));
+            }
+            BusMessage::CancelTask { trace_id } => {
+                self.push_event(format!(
+                    "[{ts}] CancelTask trace={}",
+                    &trace_id.to_string()[..8]
+                ));
+                self.push_agent_run(format!(
+                    "[{ts}] Cancelled trace={}",
+                    &trace_id.to_string()[..8]
+                ));
+            }
+            BusMessage::RunScheduledConsolidation => {
+                self.push_event(format!("[{ts}] RunScheduledConsolidation"));
+                self.push_agent_run(format!("[{ts}] Consolidation triggered"));
+            }
+            BusMessage::MemoryWriteRequested {
+                ref session_key,
+                ref speaker,
+                ref text,
+                importance,
+            } => {
+                let preview: String = text.chars().take(40).collect();
+                self.push_event(format!(
+                    "[{ts}] MemoryWrite session={session_key} speaker={speaker}"
+                ));
+                self.push_log(format!("[{ts}] Mem[{importance:.1}]: {preview}"));
+            }
+            BusMessage::NeedHumanApproval {
+                trace_id,
+                ref reason,
+            } => {
+                self.push_event(format!(
+                    "[{ts}] NeedHumanApproval trace={}",
+                    &trace_id.to_string()[..8]
+                ));
+                self.push_log(format!("[{ts}] APPROVAL: {reason}"));
+            }
+            BusMessage::MemoryReadRequested {
+                ref session_key,
+                ref query,
+            } => {
+                let preview: String = query.chars().take(40).collect();
+                self.push_event(format!("[{ts}] MemoryRead session={session_key}"));
+                self.push_log(format!("[{ts}] Query: {preview}"));
+            }
+            BusMessage::ConsolidationCompleted {
+                concepts_created,
+                concepts_updated,
+                episodes_processed,
+            } => {
+                self.push_event(format!("[{ts}] ConsolidationCompleted"));
+                self.push_agent_run(format!(
+                    "[{ts}] Consolidation done: +{concepts_created} concepts, ~{concepts_updated} updated, {episodes_processed} eps"
+                ));
+            }
+        }
+    }
 }
 
-fn main() -> Result<()> {
+struct BusReceivers {
+    handle_incoming: mpsc::Receiver<BusMessage>,
+    cancel_task: mpsc::Receiver<BusMessage>,
+    consolidation: mpsc::Receiver<BusMessage>,
+    message_accepted: mpsc::Receiver<BusMessage>,
+    reply_ready: mpsc::Receiver<BusMessage>,
+    task_failed: mpsc::Receiver<BusMessage>,
+    memory_write: mpsc::Receiver<BusMessage>,
+    need_human_approval: mpsc::Receiver<BusMessage>,
+    memory_read: mpsc::Receiver<BusMessage>,
+    consolidation_completed: mpsc::Receiver<BusMessage>,
+}
+
+impl BusReceivers {
+    fn drain_all(&mut self, app: &mut App) {
+        while let Ok(msg) = self.handle_incoming.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.cancel_task.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.consolidation.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.message_accepted.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.reply_ready.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.task_failed.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.memory_write.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.need_human_approval.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.memory_read.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.consolidation_completed.try_recv() {
+            app.handle_bus_message(msg);
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let bus = EventBus::new(256);
+
+    let receivers = BusReceivers {
+        handle_incoming: bus.subscribe(Topic::HandleIncomingMessage).await,
+        cancel_task: bus.subscribe(Topic::CancelTask).await,
+        consolidation: bus.subscribe(Topic::RunScheduledConsolidation).await,
+        message_accepted: bus.subscribe(Topic::MessageAccepted).await,
+        reply_ready: bus.subscribe(Topic::ReplyReady).await,
+        task_failed: bus.subscribe(Topic::TaskFailed).await,
+        memory_write: bus.subscribe(Topic::MemoryWriteRequested).await,
+        need_human_approval: bus.subscribe(Topic::NeedHumanApproval).await,
+        memory_read: bus.subscribe(Topic::MemoryReadRequested).await,
+        consolidation_completed: bus.subscribe(Topic::ConsolidationCompleted).await,
+    };
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -118,7 +343,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    let run_result = run_app(&mut terminal, &mut app);
+    let run_result = run_app(&mut terminal, &mut app, receivers);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -127,11 +352,17 @@ fn main() -> Result<()> {
     run_result
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    mut receivers: BusReceivers,
+) -> Result<()> {
     loop {
+        receivers.drain_all(app);
+
         terminal.draw(|frame| ui(frame, app))?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     app.on_key(key.code);
@@ -168,11 +399,17 @@ fn ui(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(rows[1]);
 
+    let filtered: Vec<String> = app
+        .filtered_events()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
     render_list_panel(
         frame,
         top_cols[0],
         " Bus Events ",
-        &app.events,
+        &filtered,
         app.scroll_offset[0],
         app.focus == Panel::BusEvents,
         Color::Cyan,
@@ -208,7 +445,7 @@ fn ui(frame: &mut Frame, app: &App) {
         Color::Magenta,
     );
 
-    let status = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             " [q]",
             Style::default()
@@ -230,11 +467,28 @@ fn ui(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" scroll ", Style::default().fg(Color::DarkGray)),
+    ];
+
+    let filter_span = if let Some(ref filter) = app.trace_filter {
         Span::styled(
-            "| nanocrab TUI v0.2.0 ",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+            format!("[/] filter: {filter} "),
+            Style::default().fg(Color::Yellow),
+        )
+    } else if app.filter_mode {
+        Span::styled(
+            format!("[/] typing: {}_ ", app.filter_input),
+            Style::default().fg(Color::Yellow),
+        )
+    } else {
+        Span::styled("[/] filter ", Style::default().fg(Color::DarkGray))
+    };
+    spans.push(filter_span);
+    spans.push(Span::styled(
+        "| nanocrab TUI v0.3.0 ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let status = Paragraph::new(Line::from(spans));
     frame.render_widget(status, main_layout[1]);
 }
 

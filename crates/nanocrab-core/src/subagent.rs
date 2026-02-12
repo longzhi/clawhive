@@ -19,6 +19,7 @@ pub struct SubAgentRequest {
     pub target_agent_id: String,
     pub task: String,
     pub timeout_seconds: u64,
+    pub depth: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,8 @@ pub struct SubAgentRunner {
     agents: HashMap<String, FullAgentConfig>,
     personas: HashMap<String, Persona>,
     active_runs: Arc<Mutex<HashMap<Uuid, RunHandle>>>,
+    max_depth: u32,
+    allowed_tools: Vec<String>,
 }
 
 impl SubAgentRunner {
@@ -48,16 +51,28 @@ impl SubAgentRunner {
         router: Arc<LlmRouter>,
         agents: HashMap<String, FullAgentConfig>,
         personas: HashMap<String, Persona>,
+        max_depth: u32,
+        allowed_tools: Vec<String>,
     ) -> Self {
         Self {
             router,
             agents,
             personas,
             active_runs: Arc::new(Mutex::new(HashMap::new())),
+            max_depth,
+            allowed_tools,
         }
     }
 
     pub async fn spawn(&self, req: SubAgentRequest) -> Result<Uuid> {
+        if req.depth >= self.max_depth {
+            return Err(anyhow::anyhow!(
+                "sub-agent recursion depth {} exceeds maximum {}",
+                req.depth,
+                self.max_depth
+            ));
+        }
+
         let agent = self
             .agents
             .get(&req.target_agent_id)
@@ -170,6 +185,10 @@ impl SubAgentRunner {
     pub async fn active_count(&self) -> usize {
         self.active_runs.lock().await.len()
     }
+
+    pub fn allowed_tools(&self) -> &[String] {
+        &self.allowed_tools
+    }
 }
 
 #[cfg(test)]
@@ -200,7 +219,13 @@ mod tests {
         let mut agents = HashMap::new();
         agents.insert("test-agent".into(), agent);
 
-        SubAgentRunner::new(Arc::new(router), agents, HashMap::new())
+        SubAgentRunner::new(
+            Arc::new(router),
+            agents,
+            HashMap::new(),
+            3,
+            vec!["read".into(), "write".into()],
+        )
     }
 
     #[tokio::test]
@@ -212,6 +237,7 @@ mod tests {
             target_agent_id: "test-agent".into(),
             task: "Do something".into(),
             timeout_seconds: 30,
+            depth: 0,
         };
         let run_id = runner.spawn(req).await.unwrap();
         let result = runner.wait_result(&run_id).await.unwrap();
@@ -228,6 +254,7 @@ mod tests {
             target_agent_id: "nonexistent-agent".into(),
             task: "Do something".into(),
             timeout_seconds: 30,
+            depth: 0,
         };
         let result = runner.spawn(req).await;
         assert!(result.is_err());
@@ -242,6 +269,7 @@ mod tests {
             target_agent_id: "test-agent".into(),
             task: "Quick task".into(),
             timeout_seconds: 60,
+            depth: 0,
         };
         let run_id = runner.spawn(req).await.unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -285,8 +313,25 @@ mod tests {
             target_agent_id: "test-agent".into(),
             task: "task".into(),
             timeout_seconds: 60,
+            depth: 0,
         };
         let _run_id = runner.spawn(req).await.unwrap();
         let _count = runner.active_count().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_excessive_depth() {
+        let runner = make_runner_with_stub();
+        let req = SubAgentRequest {
+            parent_run_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            target_agent_id: "test-agent".into(),
+            task: "deep task".into(),
+            timeout_seconds: 30,
+            depth: 5,
+        };
+        let result = runner.spawn(req).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("recursion depth"));
     }
 }

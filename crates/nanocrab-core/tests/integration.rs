@@ -9,6 +9,7 @@ use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{
     register_builtin_providers, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry,
 };
+use nanocrab_runtime::NativeExecutor;
 use nanocrab_schema::{BusMessage, InboundMessage, SessionKey};
 use uuid::Uuid;
 
@@ -98,6 +99,7 @@ fn make_orchestrator(
         SkillRegistry::new(),
         memory,
         publisher,
+        Arc::new(NativeExecutor),
     )
 }
 
@@ -226,6 +228,7 @@ async fn orchestrator_creates_session() {
         SkillRegistry::new(),
         memory.clone(),
         bus.publisher(),
+        Arc::new(NativeExecutor),
     );
 
     let inbound = test_inbound("hello");
@@ -258,6 +261,7 @@ async fn orchestrator_publishes_reply_ready() {
         SkillRegistry::new(),
         memory,
         bus.publisher(),
+        Arc::new(NativeExecutor),
     );
 
     let _ = orch

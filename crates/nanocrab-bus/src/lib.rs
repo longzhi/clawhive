@@ -14,6 +14,9 @@ pub enum Topic {
     ReplyReady,
     TaskFailed,
     MemoryWriteRequested,
+    NeedHumanApproval,
+    MemoryReadRequested,
+    ConsolidationCompleted,
 }
 
 impl Topic {
@@ -26,6 +29,9 @@ impl Topic {
             BusMessage::ReplyReady { .. } => Topic::ReplyReady,
             BusMessage::TaskFailed { .. } => Topic::TaskFailed,
             BusMessage::MemoryWriteRequested { .. } => Topic::MemoryWriteRequested,
+            BusMessage::NeedHumanApproval { .. } => Topic::NeedHumanApproval,
+            BusMessage::MemoryReadRequested { .. } => Topic::MemoryReadRequested,
+            BusMessage::ConsolidationCompleted { .. } => Topic::ConsolidationCompleted,
         }
     }
 }

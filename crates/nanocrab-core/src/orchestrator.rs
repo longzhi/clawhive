@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use nanocrab_bus::BusPublisher;
 use nanocrab_memory::{Episode, MemoryStore};
 use nanocrab_provider::LlmMessage;
+use nanocrab_runtime::TaskExecutor;
 use nanocrab_schema::*;
 
 use super::config::FullAgentConfig;
@@ -21,6 +22,7 @@ pub struct Orchestrator {
     skill_registry: SkillRegistry,
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
+    runtime: Arc<dyn TaskExecutor>,
     react_max_steps: usize,
     react_repeat_guard: usize,
 }
@@ -34,6 +36,7 @@ impl Orchestrator {
         skill_registry: SkillRegistry,
         memory: Arc<MemoryStore>,
         bus: BusPublisher,
+        runtime: Arc<dyn TaskExecutor>,
     ) -> Self {
         let agents_map = agents
             .into_iter()
@@ -47,6 +50,7 @@ impl Orchestrator {
             skill_registry,
             memory,
             bus,
+            runtime,
             react_max_steps: 4,
             react_repeat_guard: 2,
         }
@@ -102,7 +106,7 @@ impl Orchestrator {
         }
         messages.push(LlmMessage {
             role: "user".into(),
-            content: inbound.text.clone(),
+            content: self.runtime.execute(&inbound.text).await?,
         });
 
         let reply_text = self
@@ -113,6 +117,7 @@ impl Orchestrator {
                 messages,
             )
             .await?;
+        let reply_text = self.runtime.execute(&reply_text).await?;
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,

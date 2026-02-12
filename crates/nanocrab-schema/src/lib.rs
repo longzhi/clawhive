@@ -61,6 +61,19 @@ pub enum BusMessage {
         text: String,
         importance: f32,
     },
+    NeedHumanApproval {
+        trace_id: Uuid,
+        reason: String,
+    },
+    MemoryReadRequested {
+        session_key: String,
+        query: String,
+    },
+    ConsolidationCompleted {
+        concepts_created: usize,
+        concepts_updated: usize,
+        episodes_processed: usize,
+    },
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]

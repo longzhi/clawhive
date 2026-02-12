@@ -13,6 +13,9 @@ pub use types::*;
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn chat(&self, request: LlmRequest) -> Result<LlmResponse>;
+    async fn stream(&self, _request: LlmRequest) -> Result<LlmResponse> {
+        anyhow::bail!("streaming not supported by this provider")
+    }
     async fn health(&self) -> Result<()> {
         Ok(())
     }
