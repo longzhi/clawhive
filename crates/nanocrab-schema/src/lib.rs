@@ -74,6 +74,11 @@ pub enum BusMessage {
         concepts_updated: usize,
         episodes_processed: usize,
     },
+    StreamDelta {
+        trace_id: Uuid,
+        delta: String,
+        is_final: bool,
+    },
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -326,6 +331,27 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let de: BusMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(de, BusMessage::MessageAccepted { .. }));
+    }
+
+    #[test]
+    fn bus_message_stream_delta_serde_roundtrip() {
+        let trace_id = Uuid::new_v4();
+        let msg = BusMessage::StreamDelta {
+            trace_id,
+            delta: "hello".into(),
+            is_final: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        match de {
+            BusMessage::StreamDelta {
+                delta, is_final, ..
+            } => {
+                assert_eq!(delta, "hello");
+                assert!(!is_final);
+            }
+            _ => panic!("Expected StreamDelta"),
+        }
     }
 
     #[test]

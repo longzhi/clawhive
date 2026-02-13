@@ -17,6 +17,7 @@ pub enum Topic {
     NeedHumanApproval,
     MemoryReadRequested,
     ConsolidationCompleted,
+    StreamDelta,
 }
 
 impl Topic {
@@ -32,6 +33,7 @@ impl Topic {
             BusMessage::NeedHumanApproval { .. } => Topic::NeedHumanApproval,
             BusMessage::MemoryReadRequested { .. } => Topic::MemoryReadRequested,
             BusMessage::ConsolidationCompleted { .. } => Topic::ConsolidationCompleted,
+            BusMessage::StreamDelta { .. } => Topic::StreamDelta,
         }
     }
 }
@@ -295,10 +297,19 @@ mod tests {
                 },
                 Topic::ConsolidationCompleted,
             ),
+            (
+                BusMessage::StreamDelta {
+                    trace_id,
+                    delta: "hello".into(),
+                    is_final: false,
+                },
+                Topic::StreamDelta,
+            ),
         ];
 
         for (msg, expected_topic) in cases {
             assert_eq!(Topic::from_message(&msg), expected_topic);
         }
     }
+
 }

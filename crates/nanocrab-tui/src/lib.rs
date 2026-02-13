@@ -279,6 +279,24 @@ impl App {
                     "[{ts}] Consolidation done: +{concepts_created} concepts, ~{concepts_updated} updated, {episodes_processed} eps"
                 ));
             }
+            BusMessage::StreamDelta {
+                trace_id,
+                ref delta,
+                is_final,
+            } => {
+                if is_final {
+                    self.push_event(format!(
+                        "[{ts}] StreamComplete trace={}",
+                        &trace_id.to_string()[..8]
+                    ));
+                } else if !delta.is_empty() {
+                    self.push_log(format!(
+                        "[{ts}] Stream[{}]: {}",
+                        &trace_id.to_string()[..8],
+                        delta.chars().take(60).collect::<String>()
+                    ));
+                }
+            }
         }
     }
 }
@@ -294,6 +312,7 @@ pub struct BusReceivers {
     need_human_approval: mpsc::Receiver<BusMessage>,
     memory_read: mpsc::Receiver<BusMessage>,
     consolidation_completed: mpsc::Receiver<BusMessage>,
+    stream_delta: mpsc::Receiver<BusMessage>,
 }
 
 impl BusReceivers {
@@ -328,6 +347,9 @@ impl BusReceivers {
         while let Ok(msg) = self.consolidation_completed.try_recv() {
             app.handle_bus_message(msg);
         }
+        while let Ok(msg) = self.stream_delta.try_recv() {
+            app.handle_bus_message(msg);
+        }
     }
 }
 
@@ -343,6 +365,7 @@ pub async fn subscribe_all(bus: &EventBus) -> BusReceivers {
         need_human_approval: bus.subscribe(Topic::NeedHumanApproval).await,
         memory_read: bus.subscribe(Topic::MemoryReadRequested).await,
         consolidation_completed: bus.subscribe(Topic::ConsolidationCompleted).await,
+        stream_delta: bus.subscribe(Topic::StreamDelta).await,
     }
 }
 
