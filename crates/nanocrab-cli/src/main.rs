@@ -355,6 +355,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
     let workspace_dir = root.to_path_buf();
     let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let session_writer = nanocrab_memory::SessionWriter::new(&workspace_dir);
+    let session_reader = nanocrab_memory::SessionReader::new(&workspace_dir);
     let search_index = SearchIndex::new(memory.db());
     let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
 
@@ -369,6 +370,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        session_reader,
         search_index,
         embedding_provider,
     ));

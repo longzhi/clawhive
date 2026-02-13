@@ -25,6 +25,15 @@ impl Session {
     }
 }
 
+/// Result of get_or_create: the session plus whether it was freshly created
+/// from an expired session (indicating fallback summary may be needed).
+pub struct SessionResult {
+    pub session: Session,
+    /// If this session replaced an expired one, contains the old session's key.
+    /// Used to trigger fallback summary generation.
+    pub expired_previous: bool,
+}
+
 pub struct SessionManager {
     store: Arc<MemoryStore>,
     default_ttl: i64,
@@ -35,7 +44,7 @@ impl SessionManager {
         Self { store, default_ttl }
     }
 
-    pub async fn get_or_create(&self, key: &SessionKey, agent_id: &str) -> Result<Session> {
+    pub async fn get_or_create(&self, key: &SessionKey, agent_id: &str) -> Result<SessionResult> {
         if let Some(record) = self.store.get_session(&key.0).await? {
             let mut session = Session {
                 session_key: key.clone(),
@@ -48,16 +57,25 @@ impl SessionManager {
             if session.is_expired() {
                 let new_session = self.create_new(key, agent_id);
                 self.persist(&new_session).await?;
-                return Ok(new_session);
+                return Ok(SessionResult {
+                    session: new_session,
+                    expired_previous: true,
+                });
             }
 
             session.touch();
             self.persist(&session).await?;
-            Ok(session)
+            Ok(SessionResult {
+                session,
+                expired_previous: false,
+            })
         } else {
             let session = self.create_new(key, agent_id);
             self.persist(&session).await?;
-            Ok(session)
+            Ok(SessionResult {
+                session,
+                expired_previous: false,
+            })
         }
     }
 
@@ -100,12 +118,13 @@ mod tests {
     async fn get_or_create_new_session() {
         let store = Arc::new(MemoryStore::open_in_memory().unwrap());
         let mgr = SessionManager::new(store, 1800);
-        let session = mgr
+        let result = mgr
             .get_or_create(&test_key(), "nanocrab-main")
             .await
             .unwrap();
-        assert_eq!(session.agent_id, "nanocrab-main");
-        assert_eq!(session.ttl_seconds, 1800);
+        assert_eq!(result.session.agent_id, "nanocrab-main");
+        assert_eq!(result.session.ttl_seconds, 1800);
+        assert!(!result.expired_previous);
     }
 
     #[tokio::test]
@@ -120,7 +139,8 @@ mod tests {
             .get_or_create(&test_key(), "nanocrab-main")
             .await
             .unwrap();
-        assert_eq!(s1.created_at, s2.created_at);
+        assert_eq!(s1.session.created_at, s2.session.created_at);
+        assert!(!s2.expired_previous);
     }
 
     #[tokio::test]
@@ -136,7 +156,8 @@ mod tests {
             .get_or_create(&test_key(), "nanocrab-main")
             .await
             .unwrap();
-        assert_ne!(s1.created_at, s2.created_at);
+        assert_ne!(s1.session.created_at, s2.session.created_at);
+        assert!(s2.expired_previous);
     }
 
     #[tokio::test]

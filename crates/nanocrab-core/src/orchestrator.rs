@@ -6,7 +6,7 @@ use nanocrab_bus::BusPublisher;
 use nanocrab_memory::embedding::EmbeddingProvider;
 use nanocrab_memory::file_store::MemoryFileStore;
 use nanocrab_memory::search_index::SearchIndex;
-use nanocrab_memory::SessionWriter;
+use nanocrab_memory::{SessionReader, SessionWriter};
 use nanocrab_memory::{Episode, MemoryStore};
 use nanocrab_provider::LlmMessage;
 use nanocrab_runtime::TaskExecutor;
@@ -29,6 +29,7 @@ pub struct Orchestrator {
     runtime: Arc<dyn TaskExecutor>,
     file_store: MemoryFileStore,
     session_writer: SessionWriter,
+    session_reader: SessionReader,
     search_index: SearchIndex,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     react_max_steps: usize,
@@ -48,6 +49,7 @@ impl Orchestrator {
         runtime: Arc<dyn TaskExecutor>,
         file_store: MemoryFileStore,
         session_writer: SessionWriter,
+        session_reader: SessionReader,
         search_index: SearchIndex,
         embedding_provider: Arc<dyn EmbeddingProvider>,
     ) -> Self {
@@ -66,6 +68,7 @@ impl Orchestrator {
             runtime,
             file_store,
             session_writer,
+            session_reader,
             search_index,
             embedding_provider,
             react_max_steps: 4,
@@ -90,10 +93,14 @@ impl Orchestrator {
             .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
 
         let session_key = SessionKey::from_inbound(&inbound);
-        let _session = self
+        let session_result = self
             .session_mgr
             .get_or_create(&session_key, agent_id)
             .await?;
+
+        if session_result.expired_previous {
+            self.try_fallback_summary(&session_key, agent).await;
+        }
 
         // Save inbound data before it's moved
         let inbound_at = inbound.at;
@@ -249,6 +256,61 @@ impl Orchestrator {
         }
 
         Ok(last_reply)
+    }
+
+    async fn try_fallback_summary(&self, session_key: &SessionKey, agent: &FullAgentConfig) {
+        let messages = match self
+            .session_reader
+            .load_recent_messages(&session_key.0, 20)
+            .await
+        {
+            Ok(msgs) if !msgs.is_empty() => msgs,
+            _ => return,
+        };
+
+        let today = chrono::Utc::now().date_naive();
+        if let Ok(Some(_)) = self.file_store.read_daily(today).await {
+            return;
+        }
+
+        let conversation = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system = "Summarize this conversation in 2-4 bullet points. \
+            Focus on key facts, decisions, and user preferences. \
+            Output Markdown bullet points only, no preamble."
+            .to_string();
+
+        let llm_messages = vec![LlmMessage {
+            role: "user".into(),
+            content: conversation,
+        }];
+
+        match self
+            .router
+            .chat(
+                &agent.model_policy.primary,
+                &agent.model_policy.fallbacks,
+                Some(system),
+                llm_messages,
+                512,
+            )
+            .await
+        {
+            Ok(resp) => {
+                if let Err(e) = self.file_store.append_daily(today, &resp.text).await {
+                    tracing::warn!("Failed to write fallback summary: {e}");
+                } else {
+                    tracing::info!("Wrote fallback summary for expired session");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to generate fallback summary: {e}");
+            }
+        }
     }
 
     async fn build_memory_context(&self, _session_key: &SessionKey, query: &str) -> Result<String> {
