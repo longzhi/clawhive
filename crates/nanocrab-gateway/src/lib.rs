@@ -162,7 +162,7 @@ mod tests {
     use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
     use nanocrab_memory::search_index::SearchIndex;
     use nanocrab_memory::MemoryStore;
-    use nanocrab_memory::{file_store::MemoryFileStore, SessionWriter};
+    use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
     use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
     use nanocrab_runtime::NativeExecutor;
     use nanocrab_schema::InboundMessage;
@@ -184,6 +184,7 @@ mod tests {
         let session_mgr = SessionManager::new(memory.clone(), 1800);
         let file_store = MemoryFileStore::new(tmp.path());
         let session_writer = SessionWriter::new(tmp.path());
+        let session_reader = SessionReader::new(tmp.path());
         let search_index = SearchIndex::new(memory.db());
         let embedding_provider: Arc<dyn EmbeddingProvider> =
             Arc::new(StubEmbeddingProvider::new(8));
@@ -210,6 +211,7 @@ mod tests {
             Arc::new(NativeExecutor),
             file_store,
             session_writer,
+            session_reader,
             search_index,
             embedding_provider,
         ));

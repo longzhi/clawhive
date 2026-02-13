@@ -8,7 +8,7 @@ use nanocrab_core::*;
 use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
-use nanocrab_memory::{file_store::MemoryFileStore, SessionWriter};
+use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
 use nanocrab_provider::{
     register_builtin_providers, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry,
 };
@@ -128,6 +128,7 @@ fn make_orchestrator(
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
+    let session_reader = SessionReader::new(tmp.path());
     let search_index = SearchIndex::new(memory.db());
     let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
 
@@ -143,6 +144,7 @@ fn make_orchestrator(
             Arc::new(NativeExecutor),
             file_store,
             session_writer,
+            session_reader,
             search_index,
             embedding_provider,
         ),
@@ -164,6 +166,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
     let agents = vec![test_full_agent("nanocrab-main", "trace", vec![])];
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
+    let session_reader = SessionReader::new(tmp.path());
 
     let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
     let search_index = SearchIndex::new(memory.db());
@@ -190,6 +193,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        session_reader,
         search_index,
         Arc::clone(&embedding_provider),
     );
@@ -322,6 +326,7 @@ async fn orchestrator_creates_session() {
     let tmp = tempfile::TempDir::new().unwrap();
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
+    let session_reader = SessionReader::new(tmp.path());
     let orch = Orchestrator::new(
         router,
         agents,
@@ -333,6 +338,7 @@ async fn orchestrator_creates_session() {
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        session_reader,
         SearchIndex::new(memory.db()),
         Arc::new(StubEmbeddingProvider::new(8)),
     );
@@ -411,6 +417,7 @@ async fn orchestrator_publishes_reply_ready() {
     let tmp = tempfile::TempDir::new().unwrap();
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
+    let session_reader = SessionReader::new(tmp.path());
     let search_index = SearchIndex::new(memory.db());
     let orch = Orchestrator::new(
         router,
@@ -423,6 +430,7 @@ async fn orchestrator_publishes_reply_ready() {
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        session_reader,
         search_index,
         Arc::new(StubEmbeddingProvider::new(8)),
     );
