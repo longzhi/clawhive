@@ -477,7 +477,10 @@ impl SearchIndex {
 
         // Min-max normalize vector scores
         if !vector_candidates.is_empty() {
-            let max_vec = vector_candidates.iter().map(|c| c.6).fold(0.0_f64, f64::max);
+            let max_vec = vector_candidates
+                .iter()
+                .map(|c| c.6)
+                .fold(0.0_f64, f64::max);
             if max_vec > 0.0 {
                 for candidate in &mut vector_candidates {
                     candidate.6 /= max_vec;
@@ -522,7 +525,8 @@ impl SearchIndex {
             }
             Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
         })
-        .await? {
+        .await?
+        {
             Ok(candidates) => candidates,
             Err(e) => {
                 tracing::debug!("BM25 search failed (falling back to vector-only): {e}");
@@ -893,7 +897,9 @@ mod tests {
             let path = format!("memory/2026-02-{:02}.md", i + 1);
             let content =
                 format!("# Topic {i}\n\nContent about topic number {i} with unique words{i}");
-            index.index_file(&path, &content, "daily", &provider).await?;
+            index
+                .index_file(&path, &content, "daily", &provider)
+                .await?;
         }
 
         let results = index.search("topic", &provider, 3, 0.0).await?;

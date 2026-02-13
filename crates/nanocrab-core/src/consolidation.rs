@@ -359,11 +359,11 @@ mod tests {
 
     #[async_trait]
     impl EmbeddingProvider for StubEmbeddingProvider {
-        async fn embed(&self, texts: &[String]) -> anyhow::Result<nanocrab_memory::embedding::EmbeddingResult> {
-            let embeddings = texts
-                .iter()
-                .map(|_| vec![0.1; 384])
-                .collect();
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> anyhow::Result<nanocrab_memory::embedding::EmbeddingResult> {
+            let embeddings = texts.iter().map(|_| vec![0.1; 384]).collect();
             Ok(nanocrab_memory::embedding::EmbeddingResult {
                 embeddings,
                 model: "stub".to_string(),
