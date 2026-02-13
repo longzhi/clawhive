@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use futures_core::Stream;
 use nanocrab_bus::BusPublisher;
 use nanocrab_memory::embedding::EmbeddingProvider;
 use nanocrab_memory::file_store::MemoryFileStore;
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::{SessionReader, SessionWriter};
 use nanocrab_memory::{Episode, MemoryStore};
-use nanocrab_provider::{ContentBlock, LlmMessage, LlmRequest};
+use nanocrab_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use nanocrab_runtime::TaskExecutor;
 use nanocrab_schema::*;
 
@@ -251,6 +253,114 @@ impl Orchestrator {
             .await;
 
         Ok(outbound)
+    }
+
+    /// Streaming variant of handle_inbound. Runs the tool_use_loop for
+    /// intermediate tool calls, then streams the final LLM response.
+    /// Publishes StreamDelta events to the bus for TUI consumption.
+    pub async fn handle_inbound_stream(
+        &self,
+        inbound: InboundMessage,
+        agent_id: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>>> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
+
+        let session_key = SessionKey::from_inbound(&inbound);
+        let session_result = self
+            .session_mgr
+            .get_or_create(&session_key, agent_id)
+            .await?;
+
+        if session_result.expired_previous {
+            self.try_fallback_summary(&session_key, agent).await;
+        }
+
+        let system_prompt = self
+            .personas
+            .get(agent_id)
+            .map(|p| p.assembled_system_prompt())
+            .unwrap_or_default();
+        let skill_summary = self.skill_registry.summary_prompt();
+        let system_prompt = if skill_summary.is_empty() {
+            system_prompt
+        } else {
+            format!("{system_prompt}\n\n{skill_summary}")
+        };
+
+        let memory_context = self.build_memory_context(&session_key, &inbound.text).await?;
+
+        let history_messages = match self
+            .session_reader
+            .load_recent_messages(&session_key.0, 10)
+            .await
+        {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                tracing::warn!("Failed to load session history: {e}");
+                Vec::new()
+            }
+        };
+
+        let mut messages = Vec::new();
+        if !memory_context.is_empty() {
+            messages.push(LlmMessage::user(format!("[memory context]\n{memory_context}")));
+            messages.push(LlmMessage::assistant("Understood, I have the context."));
+        }
+        for hist_msg in &history_messages {
+            messages.push(LlmMessage {
+                role: hist_msg.role.clone(),
+                content: vec![nanocrab_provider::ContentBlock::Text {
+                    text: hist_msg.content.clone(),
+                }],
+            });
+        }
+        messages.push(LlmMessage::user(
+            self.runtime.preprocess_input(&inbound.text).await?,
+        ));
+
+        let _resp = self
+            .tool_use_loop(
+                &agent.model_policy.primary,
+                &agent.model_policy.fallbacks,
+                Some(system_prompt.clone()),
+                messages.clone(),
+                2048,
+            )
+            .await?;
+
+        let trace_id = inbound.trace_id;
+        let bus = self.bus.clone();
+
+        let stream = self
+            .router
+            .stream(
+                &agent.model_policy.primary,
+                &agent.model_policy.fallbacks,
+                Some(system_prompt),
+                messages,
+                2048,
+            )
+            .await?;
+
+        let mapped = tokio_stream::StreamExt::map(stream, move |chunk_result| {
+            if let Ok(ref chunk) = chunk_result {
+                let bus = bus.clone();
+                let msg = BusMessage::StreamDelta {
+                    trace_id,
+                    delta: chunk.delta.clone(),
+                    is_final: chunk.is_final,
+                };
+                tokio::spawn(async move {
+                    let _ = bus.publish(msg).await;
+                });
+            }
+            chunk_result
+        });
+
+        Ok(Box::pin(mapped))
     }
 
     async fn tool_use_loop(

@@ -448,3 +448,34 @@ async fn orchestrator_publishes_reply_ready() {
         .unwrap();
     assert!(matches!(event, BusMessage::ReplyReady { .. }));
 }
+
+#[tokio::test]
+async fn handle_inbound_stream_yields_chunks() {
+    use nanocrab_provider::StubProvider;
+    use tokio_stream::StreamExt;
+
+    let mut registry = ProviderRegistry::new();
+    registry.register("stub", Arc::new(StubProvider));
+    let aliases = HashMap::from([("stub".to_string(), "stub/model".to_string())]);
+    let agents = vec![test_full_agent("nanocrab-main", "stub", vec![])];
+    let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
+
+    let inbound = test_inbound("hello stream");
+    let mut stream = orch
+        .handle_inbound_stream(inbound, "nanocrab-main")
+        .await
+        .unwrap();
+
+    let mut collected = String::new();
+    let mut got_final = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        if chunk.is_final {
+            got_final = true;
+        } else {
+            collected.push_str(&chunk.delta);
+        }
+    }
+    assert!(got_final);
+    assert!(!collected.is_empty());
+}
