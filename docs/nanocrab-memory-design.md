@@ -394,8 +394,25 @@ Session JSONL（原始对话流，自动写入，不删除）
 
 **vNext 第一步：**
 - 加 `gemini` + `voyage` provider
-- 加 `local` provider（`ort` + GGUF 模型，如 `embeddinggemma-300M`）
+- 加 `local` provider（见下方 Rust 方案选型）
 - `auto` 完整 fallback 链：远程 → local
+
+### 7.3 本地 Embedding：Rust 方案选型
+
+> OpenClaw（Node.js）使用 GGUF 模型 + llama.cpp binding。Rust 生态不同，需要独立选型。
+
+| 方案 | 模型格式 | 优势 | 劣势 |
+|------|---------|------|------|
+| **`ort` (ONNX Runtime)** ⭐ | ONNX | 工业级稳定，跨平台，模型生态丰富 | 需要 ONNX Runtime C++ 库 |
+| `candle` | safetensors | 纯 Rust，零 C++ 依赖 | 较新，embedding 模型支持有限 |
+| `llama-cpp-rs` | GGUF | 可复用 OpenClaw 的 GGUF 模型 | 主要面向 LLM，embedding 支持不如 ort |
+
+**推荐：`ort` + ONNX 格式**
+
+推荐模型（按场景）：
+- **通用英文**：`all-MiniLM-L6-v2`（384 维，22M 参数，快）
+- **多语言**：`bge-small-zh-v1.5` 或 `multilingual-e5-small`（中英文混合场景）
+- **高质量**：`bge-large-en-v1.5`（1024 维，更准但更慢）
 
 **vNext 第二步：**
 - Embedding 缓存（`embedding_cache` 表，避免重复调用 API）
