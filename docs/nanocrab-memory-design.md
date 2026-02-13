@@ -62,9 +62,11 @@
 - FTS5 全文索引（BM25 关键词搜索）
 - 时间索引（`ts` 列）
 
-**写入策略：** 全自动，每条用户消息和 agent 回复都记录（现有行为）。
+**写入策略：** 由 LLM/Orchestrator 判断是否值得记录（重要决策、用户偏好、关键事实等），不自动记录每条消息。
 
-**特点：** 这是 OpenClaw 和 memsearch 都没有的——它们依赖 LLM 主动写文件，可能遗漏。nanocrab 自动记录保证不丢任何信息。
+**兜底机制：** 如果一个 session 结束时 LLM 没有写入任何 episode，触发兜底摘要——用 LLM 对整段对话生成一条总结性 episode，避免完全遗漏。
+
+> **设计决策：** 不自动记录每条消息。原因：自动全量记录会制造大量低价值噪声，增加检索干扰和存储压力。OpenClaw 的实践证明 LLM 主动写入 + 兜底机制足够可靠。
 
 ### 2.2 第二层：Concepts（皮质）
 
@@ -87,7 +89,6 @@
 **增强：**
 - 加 `embedding` 列 + sqlite-vec 向量索引（支持语义查询 concepts）
 - 加 FTS5 全文索引
-- 冲突检测：新 concept 与已有 concept 语义矛盾时自动标记 `Conflicted`
 
 **证据链（links 表，现有，保留）：**
 
@@ -139,7 +140,8 @@ Consolidator 完成后自动导出：
 #### 反向同步（Markdown → SQLite，监听）
 
 Watch `memory/` 文件夹变化（debounce 1.5s）：
-- 解析 Markdown 变更内容
+- 不约束 Markdown 格式（人怎么写都行）
+- 索引阶段自动推断元数据（concept_type, importance 等）
 - 对应更新 concepts（人编辑 = confidence 1.0，最高优先级）
 - 重建向量索引
 - 新增内容自动创建 concept 候选
@@ -244,11 +246,13 @@ return sorted(candidates, by=finalScore, limit=maxResults)
   │
   ├── 2. 调 LLM 提取 concept 候选（JSON）
   │
-  ├── 3. 冲突检测
-  │   └── 新 concept 与已有 concept 语义对比
+  ├── 3. LLM 同时看到新 episodes + 已有 concepts，自然处理冲突
   │       ├── 一致 → 更新 last_verified，提高 confidence
-  │       ├── 矛盾 → 标记 Conflicted，保留双方 evidence
+  │       ├── 矛盾 → 更新为新值（LLM 判断），保留旧 evidence
   │       └── 全新 → 创建新 concept
+  │
+  │   > 不设独立冲突检测系统。Consolidation LLM prompt 中包含
+  │   > 新旧内容，由 LLM 在提取过程中自然识别和解决冲突。
   │
   ├── 4. 建立 episode → concept links
   │
@@ -272,13 +276,13 @@ return sorted(candidates, by=finalScore, limit=maxResults)
 |------|----------|-----------|----------|
 | Source of truth | Markdown | Markdown | **SQLite + Markdown 双轨** |
 | 结构化知识 | ❌ | ❌ | **✅ concepts + confidence + evidence** |
-| 自动记录 | ❌ 依赖 LLM | ❌ 依赖 LLM | **✅ 每条消息自动** |
+| 记录策略 | LLM 主动写入 | LLM 主动写入 | **LLM 写入 + 兜底摘要** |
 | 向量检索 | ✅ | ✅ (Milvus) | **✅ sqlite-vec** |
 | BM25 | ✅ FTS5 | ✅ | **✅ FTS5** |
 | 混合搜索 | ✅ 70/30 | ✅ 70/30 | **✅ 70/30** |
 | 人可编辑 | ✅ | ✅ | **✅ 双向同步** |
 | Compaction | ✅ | ✅ | **✅** |
-| 知识冲突检测 | ❌ | ❌ | **✅ Conflicted 状态** |
+| 知识冲突处理 | ❌ | ❌ | **✅ Consolidation LLM 自然处理** |
 | 置信度演化 | ❌ | ❌ | **✅** |
 | 证据溯源 | ❌ | ❌ | **✅ links 表** |
 | 外部依赖 | Node.js | Python + Milvus | **零依赖（Rust + SQLite）** |
@@ -289,9 +293,10 @@ return sorted(candidates, by=finalScore, limit=maxResults)
 
 ### MVP（当前阶段）
 
-- [x] episodes 自动记录
+- [x] episodes LLM 写入（非自动全量记录）
 - [x] concepts + links 数据模型
-- [x] Consolidator 定时提取
+- [x] Consolidator 定时提取（LLM 同时看新旧内容，自然处理冲突）
+- [ ] 兜底摘要（session 结束时 LLM 未写 episode → 自动总结）
 - [ ] sqlite-vec 向量索引（episodes + concepts）
 - [ ] FTS5 全文索引
 - [ ] 混合搜索（向量 70% + BM25 30%）
@@ -302,7 +307,6 @@ return sorted(candidates, by=finalScore, limit=maxResults)
 - [ ] Markdown 可读层导出（正向同步）
 - [ ] Watch + 反向同步
 - [ ] Auto-Compaction + Memory Flush
-- [ ] Concepts 冲突检测
 
 ### vNext 第二步
 
