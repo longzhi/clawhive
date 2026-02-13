@@ -207,4 +207,42 @@ mod tests {
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:guild:999:channel:123] hello world");
     }
+
+    #[test]
+    fn adapter_to_inbound_text_preservation() {
+        let adapter = DiscordAdapter::new("dc_main");
+        let text = "  hello 世界 🦀  ";
+        let msg = adapter.to_inbound(None, 123, 456, text);
+        assert_eq!(msg.text, text);
+    }
+
+    #[test]
+    fn adapter_to_inbound_trace_id_unique() {
+        let adapter = DiscordAdapter::new("dc_main");
+        let msg1 = adapter.to_inbound(None, 123, 456, "hello");
+        let msg2 = adapter.to_inbound(None, 123, 456, "hello");
+        assert_ne!(msg1.trace_id, msg2.trace_id);
+    }
+
+    #[test]
+    fn render_outbound_dm_scope() {
+        let adapter = DiscordAdapter::new("dc_main");
+        let outbound = OutboundMessage {
+            trace_id: Uuid::new_v4(),
+            channel_type: "discord".into(),
+            connector_id: "dc_main".into(),
+            conversation_scope: "dm:789".into(),
+            text: "reply text".into(),
+            at: Utc::now(),
+        };
+        let rendered = adapter.render_outbound(&outbound);
+        assert_eq!(rendered, "[discord:dm:789] reply text");
+    }
+
+    #[test]
+    fn adapter_connector_id_preserved() {
+        let adapter = DiscordAdapter::new("dc-prod-1");
+        let msg = adapter.to_inbound(None, 123, 456, "test");
+        assert_eq!(msg.connector_id, "dc-prod-1");
+    }
 }
