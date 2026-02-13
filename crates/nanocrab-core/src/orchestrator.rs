@@ -162,7 +162,7 @@ impl Orchestrator {
             });
         }
         messages.push(LlmMessage::user(
-            self.runtime.execute(&inbound.text).await?,
+            self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
         let resp = self
@@ -174,7 +174,7 @@ impl Orchestrator {
                 2048,
             )
             .await?;
-        let reply_text = self.runtime.execute(&resp.text).await?;
+        let reply_text = self.runtime.postprocess_output(&resp.text).await?;
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
