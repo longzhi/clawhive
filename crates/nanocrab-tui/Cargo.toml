@@ -11,6 +11,7 @@ tracing.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 chrono.workspace = true
+uuid.workspace = true
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-core = { path = "../nanocrab-core" }

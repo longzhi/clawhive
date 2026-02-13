@@ -194,11 +194,19 @@ impl App {
                     "[{ts}] MessageAccepted trace={}",
                     &trace_id.to_string()[..8]
                 ));
+                self.push_agent_run(format!(
+                    "[{ts}] trace={} running",
+                    &trace_id.to_string()[..8]
+                ));
             }
             BusMessage::ReplyReady { ref outbound } => {
                 let preview: String = outbound.text.chars().take(60).collect();
                 self.push_event(format!(
                     "[{ts}] ReplyReady trace={}",
+                    &outbound.trace_id.to_string()[..8]
+                ));
+                self.push_agent_run(format!(
+                    "[{ts}] trace={} completed",
                     &outbound.trace_id.to_string()[..8]
                 ));
                 self.push_log(format!("[{ts}] Reply: {preview}"));
@@ -209,6 +217,10 @@ impl App {
             } => {
                 self.push_event(format!(
                     "[{ts}] TaskFailed trace={}",
+                    &trace_id.to_string()[..8]
+                ));
+                self.push_agent_run(format!(
+                    "[{ts}] trace={} failed",
                     &trace_id.to_string()[..8]
                 ));
                 self.push_log(format!("[{ts}] ERROR: {error}"));
@@ -532,4 +544,70 @@ fn render_list_panel(
     );
 
     frame.render_widget(list, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use nanocrab_schema::{BusMessage, InboundMessage, OutboundMessage};
+
+    use super::App;
+
+    #[test]
+    fn message_accepted_populates_agent_runs_panel() {
+        let mut app = App::new();
+        let trace_id = uuid::Uuid::new_v4();
+
+        app.handle_bus_message(BusMessage::MessageAccepted { trace_id });
+
+        assert_ne!(app.agent_runs, vec!["No running agents".to_string()]);
+        assert!(app
+            .agent_runs
+            .iter()
+            .any(|line| line.contains("trace=") && line.contains("running")));
+    }
+
+    #[test]
+    fn reply_ready_populates_agent_runs_panel() {
+        let mut app = App::new();
+        let outbound = OutboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:1".into(),
+            text: "done".into(),
+            at: chrono::Utc::now(),
+        };
+
+        app.handle_bus_message(BusMessage::ReplyReady { outbound });
+
+        assert_ne!(app.agent_runs, vec!["No running agents".to_string()]);
+        assert!(app
+            .agent_runs
+            .iter()
+            .any(|line| line.contains("trace=") && line.contains("completed")));
+    }
+
+    #[test]
+    fn handle_incoming_populates_sessions_panel() {
+        let mut app = App::new();
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:1".into(),
+            user_scope: "user:1".into(),
+            text: "hi".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+
+        app.handle_bus_message(BusMessage::HandleIncomingMessage {
+            inbound,
+            resolved_agent_id: "nanocrab-main".into(),
+        });
+
+        assert_ne!(app.sessions, vec!["No active sessions".to_string()]);
+    }
 }
