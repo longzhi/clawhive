@@ -133,6 +133,14 @@ impl Gateway {
 
         let _ = self
             .bus
+            .publish(BusMessage::HandleIncomingMessage {
+                inbound: inbound.clone(),
+                resolved_agent_id: agent_id.clone(),
+            })
+            .await;
+
+        let _ = self
+            .bus
             .publish(BusMessage::MessageAccepted { trace_id })
             .await;
 
@@ -157,7 +165,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use nanocrab_bus::EventBus;
+    use nanocrab_bus::{EventBus, Topic};
     use nanocrab_core::*;
     use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
     use nanocrab_memory::search_index::SearchIndex;
@@ -165,7 +173,7 @@ mod tests {
     use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
     use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
     use nanocrab_runtime::NativeExecutor;
-    use nanocrab_schema::InboundMessage;
+    use nanocrab_schema::{BusMessage, InboundMessage};
 
     use super::*;
 
@@ -221,6 +229,72 @@ mod tests {
         };
         let rate_limiter = RateLimiter::new(RateLimitConfig::default());
         (Gateway::new(orch, routing, publisher, rate_limiter), tmp)
+    }
+
+    async fn make_gateway_with_receivers(
+    ) -> (
+        Gateway,
+        tokio::sync::mpsc::Receiver<BusMessage>,
+        tokio::sync::mpsc::Receiver<BusMessage>,
+        tempfile::TempDir,
+    ) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut registry = ProviderRegistry::new();
+        register_builtin_providers(&mut registry);
+        let aliases = HashMap::from([(
+            "sonnet".to_string(),
+            "anthropic/claude-sonnet-4-5".to_string(),
+        )]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let bus = EventBus::new(16);
+        let handle_incoming_rx = bus.subscribe(Topic::HandleIncomingMessage).await;
+        let message_accepted_rx = bus.subscribe(Topic::MessageAccepted).await;
+        let publisher = bus.publisher();
+        let session_mgr = SessionManager::new(memory.clone(), 1800);
+        let file_store = MemoryFileStore::new(tmp.path());
+        let session_writer = SessionWriter::new(tmp.path());
+        let session_reader = SessionReader::new(tmp.path());
+        let search_index = SearchIndex::new(memory.db());
+        let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+        let agents = vec![FullAgentConfig {
+            agent_id: "nanocrab-main".into(),
+            enabled: true,
+            identity: None,
+            model_policy: ModelPolicy {
+                primary: "sonnet".into(),
+                fallbacks: vec![],
+            },
+            tool_policy: None,
+            memory_policy: None,
+            sub_agent: None,
+        }];
+        let orch = Arc::new(Orchestrator::new(
+            router,
+            agents,
+            HashMap::new(),
+            session_mgr,
+            SkillRegistry::new(),
+            memory,
+            publisher.clone(),
+            Arc::new(NativeExecutor),
+            file_store,
+            session_writer,
+            session_reader,
+            search_index,
+            embedding_provider,
+        ));
+        let routing = RoutingConfig {
+            default_agent_id: "nanocrab-main".into(),
+            bindings: vec![],
+        };
+        let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+        (
+            Gateway::new(orch, routing, publisher, rate_limiter),
+            handle_incoming_rx,
+            message_accepted_rx,
+            tmp,
+        )
     }
 
     #[tokio::test]
@@ -427,6 +501,55 @@ mod tests {
         let second = gw.handle_inbound(make_inbound()).await;
         assert!(second.is_err());
         assert!(second.unwrap_err().to_string().contains("rate limited"));
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_publishes_handle_incoming_before_accept() {
+        let (gw, mut incoming_rx, mut accepted_rx, _tmp) = make_gateway_with_receivers().await;
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:pubtest".into(),
+            user_scope: "user:pubtest".into(),
+            text: "ping".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+
+        let expected_trace = inbound.trace_id;
+        let expected_conv = inbound.conversation_scope.clone();
+        let expected_user = inbound.user_scope.clone();
+
+        let _ = gw.handle_inbound(inbound).await.unwrap();
+
+        let incoming = tokio::time::timeout(std::time::Duration::from_millis(200), incoming_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match incoming {
+            BusMessage::HandleIncomingMessage {
+                inbound,
+                resolved_agent_id,
+            } => {
+                assert_eq!(inbound.trace_id, expected_trace);
+                assert_eq!(inbound.conversation_scope, expected_conv);
+                assert_eq!(inbound.user_scope, expected_user);
+                assert_eq!(resolved_agent_id, "nanocrab-main");
+            }
+            _ => panic!("expected HandleIncomingMessage event"),
+        }
+
+        let accepted = tokio::time::timeout(std::time::Duration::from_millis(200), accepted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            accepted,
+            BusMessage::MessageAccepted { trace_id } if trace_id == expected_trace
+        ));
     }
 
     #[test]
