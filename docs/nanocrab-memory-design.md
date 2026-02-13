@@ -29,14 +29,14 @@
 │     ↓ LLM 主动记录 + 兜底摘要                      │
 │                                                    │
 │  ③ MEMORY.md（长期记忆）                           │
-│     ↓ 海马体（Consolidation）整合                   │
+│     ↓ 海马体整合                   │
 │                                                    │
 │  🔍 SQLite 检索层（只读索引）                       │
 │     sqlite-vec + FTS5 + chunks 表                  │
 └──────────────────────────────────────────────────┘
 ```
 
-**海马体（Hippocampus）= Consolidation 进程**：定期从短期记忆（daily files）中提炼知识，整合到长期记忆（MEMORY.md）——与神经科学中海马体将短期记忆巩固为长期记忆的过程一致。
+**海马体（Hippocampus）**：定期从短期记忆（daily files）中提炼知识，整合到长期记忆（MEMORY.md）——与神经科学中海马体将短期记忆巩固为长期记忆的过程一致。
 
 **为什么放弃双轨制：**
 - 双向同步增加了大量复杂度（conflict resolution、watch、debounce），收益有限
@@ -83,7 +83,7 @@ workspace/
 
 **写入时机：**
 1. Compaction 前的 memory flush（context 快满时，LLM 将重要信息写入）
-2. Consolidation 定时任务（从近期 daily files 提炼精华）
+2. 海马体定时任务（从近期 daily files 提炼精华）
 3. LLM 在对话中主动写入（发现重要信息时）
 
 **规则：**
@@ -195,7 +195,7 @@ From memory/2026-02-12.md:
 
 ---
 
-## 4. 海马体：Consolidation（记忆整合）
+## 4. 海马体（Hippocampus）
 
 > **海马体（Hippocampus）** 是 nanocrab 记忆系统的核心进程——定期将短期记忆（daily files + session JSONL）整合为长期记忆（MEMORY.md），如同大脑中海马体在睡眠期间巩固当天经历。
 
@@ -292,7 +292,7 @@ workspace/sessions/
 1. **对话恢复**：session 开始时加载最近 N 条 message 行，恢复上下文
 2. **审计追溯**：完整原始记录，即使 compaction 压缩了 context，JSONL 保留全部
 3. **兜底摘要来源**：session 结束时如果 LLM 没写 memory，从 JSONL 生成摘要
-4. **Consolidation 数据源**：海马体读取 JSONL 提取 highlights（补充 daily files）
+4. **海马体数据源**：海马体读取 JSONL 提取 highlights（补充 daily files）
 
 ### 6.4 与记忆文件的关系
 
@@ -303,7 +303,7 @@ Session JSONL（原始对话流，自动写入，不删除）
       │
       └──→ 兜底摘要写入 daily file（session 结束时）
               │
-              └──→ 海马体整合到 MEMORY.md（Consolidation）
+              └──→ 海马体整合到 MEMORY.md
 ```
 
 - **JSONL ≠ 记忆**：JSONL 是原始记录，memory 文件是经过筛选/提炼的
@@ -345,7 +345,7 @@ Session JSONL（原始对话流，自动写入，不删除）
 ### vNext 第一步
 
 - [ ] Auto-Compaction + Memory Flush
-- [ ] Consolidation 定时任务
+- [ ] 海马体定时任务
 - [ ] 语义感知分块（heading 切分 + 超长退化）
 - [ ] 索引增量更新（watch 文件变化）
 
