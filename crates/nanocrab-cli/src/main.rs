@@ -500,16 +500,21 @@ fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvide
 }
 
 async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
-    let (bus, _memory, gateway, config) = bootstrap(root)?;
+    let (bus, memory, gateway, config) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
-    let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let file_store_for_consolidation = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let consolidation_search_index = nanocrab_memory::search_index::SearchIndex::new(memory.db());
+    let consolidation_embedding_provider = build_embedding_provider(&config);
     let consolidator = Arc::new(HippocampusConsolidator::new(
-        file_store,
+        file_store_for_consolidation.clone(),
         Arc::new(build_router_from_config(&config)),
         "sonnet".to_string(),
         vec!["haiku".to_string()],
-    ));
+    )
+    .with_search_index(consolidation_search_index)
+    .with_embedding_provider(consolidation_embedding_provider)
+    .with_file_store_for_reindex(file_store_for_consolidation));
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
     let _consolidation_handle = scheduler.start();
     tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
@@ -604,16 +609,21 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, _memory, _gateway, config) = bootstrap(root)?;
+    let (_bus, memory, _gateway, config) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let consolidation_search_index = nanocrab_memory::search_index::SearchIndex::new(memory.db());
+    let consolidation_embedding_provider = build_embedding_provider(&config);
     let consolidator = Arc::new(HippocampusConsolidator::new(
-        file_store,
+        file_store.clone(),
         Arc::new(build_router_from_config(&config)),
         "sonnet".to_string(),
         vec!["haiku".to_string()],
-    ));
+    )
+    .with_search_index(consolidation_search_index)
+    .with_embedding_provider(consolidation_embedding_provider)
+    .with_file_store_for_reindex(file_store));
 
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
     println!("Running hippocampus consolidation...");
@@ -621,6 +631,7 @@ async fn run_consolidate(root: &Path) -> Result<()> {
     println!("Consolidation complete:");
     println!("  Daily files read: {}", report.daily_files_read);
     println!("  Memory updated: {}", report.memory_updated);
+    println!("  Reindexed: {}", report.reindexed);
     println!("  Summary: {}", report.summary);
     Ok(())
 }
