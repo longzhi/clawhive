@@ -52,6 +52,7 @@ impl LlmRouter {
                     system: system.clone(),
                     messages: messages.clone(),
                     max_tokens,
+                    tools: vec![],
                 };
 
                 match provider.chat(req).await {
@@ -84,10 +85,7 @@ impl LlmRouter {
     }
 
     pub async fn reply(&self, agent: &super::AgentConfig, user_text: &str) -> Result<String> {
-        let messages = vec![LlmMessage {
-            role: "user".into(),
-            content: user_text.to_string(),
-        }];
+        let messages = vec![LlmMessage::user(user_text)];
         let resp = self
             .chat(
                 &agent.model_policy.primary,
@@ -147,6 +145,7 @@ mod tests {
             }
             Ok(LlmResponse {
                 text: format!("ok after {} retries", count),
+                content: vec![],
                 input_tokens: None,
                 output_tokens: None,
                 stop_reason: Some("end_turn".into()),
@@ -179,10 +178,7 @@ mod tests {
                 "model",
                 &[],
                 None,
-                vec![LlmMessage {
-                    role: "user".into(),
-                    content: "hi".into(),
-                }],
+                vec![LlmMessage::user("hi")],
                 100,
             )
             .await
@@ -203,10 +199,7 @@ mod tests {
                 "model",
                 &[],
                 None,
-                vec![LlmMessage {
-                    role: "user".into(),
-                    content: "hi".into(),
-                }],
+                vec![LlmMessage::user("hi")],
                 100,
             )
             .await;

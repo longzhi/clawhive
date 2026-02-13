@@ -67,9 +67,12 @@ impl AnthropicProvider {
             messages: request
                 .messages
                 .into_iter()
-                .map(|m| ApiMessage {
-                    role: m.role,
-                    content: m.content,
+                .map(|m| {
+                    let content = m.text();
+                    ApiMessage {
+                        role: m.role,
+                        content,
+                    }
                 })
                 .collect(),
             stream: false,
@@ -115,6 +118,16 @@ impl LlmProvider for AnthropicProvider {
         }
 
         let body: ApiResponse = resp.json().await?;
+        let content_blocks: Vec<crate::ContentBlock> = body
+            .content
+            .iter()
+            .filter_map(|block| {
+                block
+                    .text
+                    .as_ref()
+                    .map(|t| crate::ContentBlock::Text { text: t.clone() })
+            })
+            .collect();
         let text = body
             .content
             .iter()
@@ -124,6 +137,7 @@ impl LlmProvider for AnthropicProvider {
 
         Ok(LlmResponse {
             text,
+            content: content_blocks,
             input_tokens: body.usage.as_ref().map(|u| u.input_tokens),
             output_tokens: body.usage.as_ref().map(|u| u.output_tokens),
             stop_reason: body.stop_reason,
@@ -315,13 +329,13 @@ pub(crate) struct ApiMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ApiResponse {
-    pub content: Vec<ContentBlock>,
+    pub content: Vec<ApiContentBlock>,
     pub usage: Option<ApiUsage>,
     pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ContentBlock {
+pub(crate) struct ApiContentBlock {
     #[serde(rename = "type")]
     pub block_type: String,
     #[serde(default)]
@@ -364,11 +378,9 @@ mod tests {
         let req = LlmRequest {
             model: "claude-sonnet-4-5".to_string(),
             system: Some("system prompt".to_string()),
-            messages: vec![LlmMessage {
-                role: "user".to_string(),
-                content: "hello".to_string(),
-            }],
+            messages: vec![LlmMessage::user("hello")],
             max_tokens: 1024,
+            tools: vec![],
         };
         let api_req = AnthropicProvider::to_api_request(req);
 

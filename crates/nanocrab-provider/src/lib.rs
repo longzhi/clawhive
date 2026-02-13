@@ -58,10 +58,12 @@ impl LlmProvider for StubProvider {
         let user_text = request
             .messages
             .last()
-            .map(|m| m.content.clone())
+            .map(|m| m.text())
             .unwrap_or_default();
+        let full_text = format!("[stub:anthropic:{}] {} [finish]", request.model, user_text);
         Ok(LlmResponse {
-            text: format!("[stub:anthropic:{}] {} [finish]", request.model, user_text),
+            text: full_text.clone(),
+            content: vec![ContentBlock::Text { text: full_text }],
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),
@@ -75,7 +77,7 @@ impl LlmProvider for StubProvider {
         let user_text = request
             .messages
             .last()
-            .map(|m| m.content.clone())
+            .map(|m| m.text())
             .unwrap_or_default();
         let full_text = format!("[stub:stream:{}] {}", request.model, user_text);
         let words: Vec<String> = full_text
@@ -173,6 +175,7 @@ mod tests {
             system: None,
             messages: vec![],
             max_tokens: 100,
+            tools: vec![],
         };
         let resp = provider.chat(req).await.unwrap();
         assert!(resp.text.contains("stub:anthropic:m"));

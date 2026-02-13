@@ -136,25 +136,22 @@ impl Orchestrator {
 
         let mut messages = Vec::new();
         if !memory_context.is_empty() {
-            messages.push(LlmMessage {
-                role: "user".into(),
-                content: format!("[memory context]\n{memory_context}"),
-            });
-            messages.push(LlmMessage {
-                role: "assistant".into(),
-                content: "Understood, I have the context.".into(),
-            });
+            messages.push(LlmMessage::user(format!(
+                "[memory context]\n{memory_context}"
+            )));
+            messages.push(LlmMessage::assistant("Understood, I have the context."));
         }
         for hist_msg in &history_messages {
             messages.push(LlmMessage {
                 role: hist_msg.role.clone(),
-                content: hist_msg.content.clone(),
+                content: vec![nanocrab_provider::ContentBlock::Text {
+                    text: hist_msg.content.clone(),
+                }],
             });
         }
-        messages.push(LlmMessage {
-            role: "user".into(),
-            content: self.runtime.execute(&inbound.text).await?,
-        });
+        messages.push(LlmMessage::user(
+            self.runtime.execute(&inbound.text).await?,
+        ));
 
         let reply_text = self
             .weak_react_loop(
@@ -267,10 +264,7 @@ impl Orchestrator {
             }
 
             last_reply = reply.clone();
-            messages.push(LlmMessage {
-                role: "assistant".into(),
-                content: reply,
-            });
+            messages.push(LlmMessage::assistant(reply));
         }
 
         Ok(last_reply)
@@ -302,10 +296,7 @@ impl Orchestrator {
             Output Markdown bullet points only, no preamble."
             .to_string();
 
-        let llm_messages = vec![LlmMessage {
-            role: "user".into(),
-            content: conversation,
-        }];
+        let llm_messages = vec![LlmMessage::user(conversation)];
 
         match self
             .router

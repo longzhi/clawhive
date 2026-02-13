@@ -93,10 +93,7 @@ impl SubAgentRunner {
         let trace_id = req.trace_id;
 
         let handle = tokio::spawn(async move {
-            let messages = vec![LlmMessage {
-                role: "user".into(),
-                content: task_text,
-            }];
+            let messages = vec![LlmMessage::user(task_text)];
 
             let result = timeout(
                 Duration::from_secs(timeout_secs),

@@ -10,7 +10,8 @@ use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
 use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
 use nanocrab_provider::{
-    register_builtin_providers, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry,
+    register_builtin_providers, ContentBlock, LlmProvider, LlmRequest, LlmResponse,
+    ProviderRegistry,
 };
 use nanocrab_runtime::NativeExecutor;
 use nanocrab_schema::{BusMessage, InboundMessage, SessionKey};
@@ -31,12 +32,14 @@ impl LlmProvider for FailProvider {
 #[async_trait]
 impl LlmProvider for EchoProvider {
     async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = request
+            .messages
+            .last()
+            .map(|m| m.text())
+            .unwrap_or_default();
         Ok(LlmResponse {
-            text: request
-                .messages
-                .last()
-                .map(|m| m.content.clone())
-                .unwrap_or_default(),
+            text: text.clone(),
+            content: vec![ContentBlock::Text { text }],
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),
@@ -47,8 +50,10 @@ impl LlmProvider for EchoProvider {
 #[async_trait]
 impl LlmProvider for ThinkingEchoProvider {
     async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = "[think] still processing".to_string();
         Ok(LlmResponse {
-            text: "[think] still processing".to_string(),
+            text: text.clone(),
+            content: vec![ContentBlock::Text { text }],
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),
@@ -62,11 +67,12 @@ impl LlmProvider for TranscriptProvider {
         let text = request
             .messages
             .iter()
-            .map(|m| format!("[{}] {}", m.role, m.content))
+            .map(|m| format!("[{}] {}", m.role, m.text()))
             .collect::<Vec<_>>()
             .join("\n\n");
         Ok(LlmResponse {
-            text,
+            text: text.clone(),
+            content: vec![ContentBlock::Text { text }],
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),

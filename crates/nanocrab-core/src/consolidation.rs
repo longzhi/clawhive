@@ -85,10 +85,7 @@ impl HippocampusConsolidator {
                 &self.model_primary,
                 &self.model_fallbacks,
                 Some(CONSOLIDATION_SYSTEM_PROMPT.to_string()),
-                vec![LlmMessage {
-                    role: "user".to_string(),
-                    content: user_prompt,
-                }],
+                vec![LlmMessage::user(user_prompt)],
                 4096,
             )
             .await?;

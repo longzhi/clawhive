@@ -270,10 +270,7 @@ async fn mock_server_handles_rate_limit() {
             "sonnet",
             &[],
             None,
-            vec![LlmMessage {
-                role: "user".into(),
-                content: "please retry".into(),
-            }],
+            vec![LlmMessage::user("please retry")],
             128,
         )
         .await
@@ -347,11 +344,9 @@ async fn mock_server_validates_request_headers() {
         .chat(LlmRequest {
             model: "claude-sonnet-4-5".into(),
             system: Some("sys".into()),
-            messages: vec![LlmMessage {
-                role: "user".into(),
-                content: "check headers".into(),
-            }],
+            messages: vec![LlmMessage::user("check headers")],
             max_tokens: 128,
+            tools: vec![],
         })
         .await
         .unwrap();
@@ -366,11 +361,9 @@ async fn mock_server_handles_connection_error() {
         .chat(LlmRequest {
             model: "claude-sonnet-4-5".into(),
             system: None,
-            messages: vec![LlmMessage {
-                role: "user".into(),
-                content: "ping".into(),
-            }],
+            messages: vec![LlmMessage::user("ping")],
             max_tokens: 64,
+            tools: vec![],
         })
         .await
         .unwrap_err();
