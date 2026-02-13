@@ -1,6 +1,6 @@
 # nanocrab MVP 核心技术方案（v0.1）
 
-> 目标：在不牺牲可扩展性的前提下，尽快交付可运行的第一版。  
+> 目标：在不牺牲可扩展性的前提下，尽快交付可运行的第一版。
 > 核心原则：**Pi 的极简内核 + Nanobot 的清晰分层 + nanocrab 的 WASM 与双层记忆设计**。
 
 ---
@@ -24,7 +24,7 @@
 3. Core/Orchestrator（会话路由、策略决策、执行编排）
 4. 轻量消息总线（进程内 Event Bus）
 5. Runtime 执行层（预留 WASM 执行接口，先可用基础执行器）
-6. 记忆系统 MVP（海马体 episodes + 皮质 concepts）
+6. 记忆系统 MVP（Markdown + SQLite 检索索引）
 7. 基础定时巩固（Cron 每日低峰执行）
 8. CLI 支持（命令式管理与一次性操作）
 9. TUI 支持（开发者实时观测与调试）
@@ -43,7 +43,7 @@
 
 ### 2.0 多 Bot / 多账号 / 多会话空间（MVP 必须支持）
 
-从 v0.1 开始即支持“同一通道类型的多实例 Bot”，避免后续 session、memory 与路由规则重构。
+从 v0.1 开始即支持"同一通道类型的多实例 Bot"，避免后续 session、memory 与路由规则重构。
 
 统一标识三元组：
 
@@ -69,9 +69,9 @@ MVP 强约束：
 
 - **Core / Orchestrator（中枢）**
   - 负责：Session 路由、上下文组装、策略选择、执行编排、记忆控制、人设装配
-  - 是全系统唯一“认知决策入口”
+  - 是全系统唯一"认知决策入口"
 
-- **Bus（事件层 — 旁路广播）**
+- **Bus（事件层 - 旁路广播）**
   - **定位：旁路事件广播，非主链路驱动**
   - 主链路（消息处理→LLM 调用→回复）保持同步直接调用，Bus 不参与
   - Bus 负责非阻塞副作用的广播：审计日志、TUI 实时面板、metrics 统计、告警通知
@@ -90,15 +90,15 @@ MVP 强约束：
 
 ### 2.2 为什么 Gateway 不控制 Memory
 
-Memory 属于“认知层”能力（什么时候读、写什么、冲突如何处理），必须由 Core 决定。  
+Memory 属于"认知层"能力（什么时候读、写什么、冲突如何处理），必须由 Core 决定。
 Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
 
 ---
 
 ## 3. Command / Event Schema（MVP 最小集）
 
-> 先冻结语义协议，再选择传输实现。  
-> **注意**：以下 Command/Event 不代表走 Bus 传递。主链路通过直接函数调用，Bus 仅广播旁路事件（见 §12）。  
+> 先冻结语义协议，再选择传输实现。
+> **注意**：以下 Command/Event 不代表走 Bus 传递。主链路通过直接函数调用，Bus 仅广播旁路事件（见 §12）。
 > Schema 的价值在于统一 DTO 结构，而非决定传输方式。
 
 所有 Inbound/Outbound DTO 的基础字段至少包含：
@@ -146,107 +146,56 @@ Gateway 只做 I/O 边界处理，避免协议细节污染业务决策。
 
 ---
 
-## 5. 记忆系统 MVP（海马体 + 皮质）
+## 5. 记忆系统 MVP
 
-## 5.1 设计目标
+> 采用 OpenClaw 记忆模型：Markdown 文件即记忆，SQLite 仅作检索索引。  
+> 详细设计见 `docs/nanocrab-memory-design.md`。
 
-借鉴“海马体快编码 + 皮质慢整合”：
+### 5.1 核心概念
 
-- **海马体（Hippocampus）**：快速记录近期经历，保细节
-- **皮质（Cortex）**：沉淀稳定知识，保低噪声高置信
+- **MEMORY.md**：长期记忆（curated wisdom），LLM 和人都可直接编辑
+- **memory/YYYY-MM-DD.md**：每日记录（raw log），随时写入
+- **SQLite 检索层**：sqlite-vec + FTS5，纯索引，不持有权威数据
 
-### 5.2 数据模型（SQLite + sqlite-vec）
+```
+Markdown 文件（source of truth）
+  │  索引
+  ▼
+SQLite（chunks 表 + sqlite-vec + FTS5）
+  │  检索
+  ▼
+Prompt 注入（top-K chunks）
+```
 
-MVP 存储层采用 SQLite 搭配 [sqlite-vec](https://github.com/asg017/sqlite-vec) 扩展：
+### 5.2 写入策略
 
-- SQLite 负责结构化数据存储（episodes/concepts/links/session 状态）
-- sqlite-vec 提供向量相似度检索能力（cosine/L2/inner product），用于 episodes 语义召回
-- 零额外依赖，单文件部署，不引入外部向量数据库
+- LLM 在对话中主动写入 Markdown 文件（通过 tool 或 system prompt 引导）
+- 人可直接编辑 Markdown
+- 兜底：session 结束时 LLM 未写入任何内容 → 自动生成摘要写入 daily file
+- **不自动记录每条消息**（避免噪声）
 
-#### 表 1：`episodes`（海马体）
+### 5.3 检索策略（Hybrid Search）
 
-- `id`
-- `ts`
-- `session_id`
-- `speaker`
-- `text`
-- `embedding`（向量，通过 sqlite-vec 索引，用于语义检索）
-- `tags`（JSON）
-- `importance`（0-1）
-- `context_hash`
-- `source_ref`
+并行两路检索，融合重排：
 
-#### 表 2：`concepts`（皮质）
+- **sqlite-vec 向量检索**：语义相似度召回（权重 0.5）
+- **FTS5 全文检索**：BM25 关键词匹配（权重 0.3）
+- **新近性加权**：基于文件日期衰减（权重 0.2）
 
-- `id`
-- `type`（fact/preference/rule/entity/task_state）
-- `key`
-- `value`
-- `confidence`
-- `evidence`
-- `first_seen`
-- `last_verified`
-- `status`（active/stale/conflicted）
+> 零外部依赖：SQLite 内置 FTS5 + sqlite-vec 扩展。
 
-#### 表 3：`links`（证据链，简化版）
+### 5.4 Session 历史
 
-- `id`
-- `episode_id`
-- `concept_id`
-- `relation`（supports/contradicts/updates）
-- `created_at`
+- 每条消息持久化到 `sessions/<session_id>.jsonl`
+- 对话开始时加载最近 N 条历史
+- 与记忆文件分离——这是原始对话记录，不是记忆
 
-### 5.3 写入策略（MVP 保守）
+### 5.5 MVP 不做的（vNext）
 
-长期记忆（concepts）仅在以下场景写入：
-
-1. 用户明确“记住这个”
-2. 稳定偏好（语言、输出风格、工具偏好）
-3. 稳定事实（路径、命名约定、架构决策）
-4. 任务状态（todo / blocked / done）
-
-其余内容只写 `episodes`。
-
-### 5.4 检索策略（MVP）
-
-1. 先查海马体：近期窗口（如 7 天）+ sqlite-vec 向量语义检索（基于 query embedding 召回相关 episodes）
-2. 再查皮质概念层
-3. 融合重排（语义相关度 + 置信度 + 新近性 + importance）
-
-> 向量检索相比纯时间窗口，能在 episodes 量大时精准召回语义相关内容，显著提升记忆注入质量。
-
-### 5.5 巩固流程（Consolidation，定时 Cron）
-
-> 产出与人手写内容隔离：consolidation 产出的 concepts 标记 `source = "consolidation"`，与用户明确要求记住的内容区分。
-
-1. 读取近 24h 高价值 episodes
-2. LLM 同时看到新 episodes + 已有 concepts，自然处理冲突（不需要独立冲突检测系统）
-3. 生成 concept 候选
-4. 与已有 concept 比对并更新 confidence/status
-5. 建立 episode->concept links
-6. 执行遗忘策略（episodes TTL，concept stale 标注）
-
-### 5.6 检索增强（FTS5 + sqlite-vec）
-
-MVP 同时启用两种检索并融合：
-
-- **FTS5 全文检索**：关键词精确匹配，对人名、代码符号等 exact-match 场景效果好
-- **sqlite-vec 向量检索**：语义相似度召回，对模糊/同义表达场景效果好
-- **融合策略**：两路结果取并集，按 (语义相关度 × 0.5 + FTS5 BM25 分数 × 0.3 + 新近性 × 0.2) 加权重排
-
-> 与 OpenClaw 的 hybrid BM25+vector 方案思路一致，但实现更轻量（SQLite 内置 FTS5 + sqlite-vec 扩展，零外部依赖）。
-
-### 5.7 设计备忘（对比 OpenClaw 后的决策）
-
-| 设计点 | nanocrab 选择 | 理由 |
-|---|---|---|
-| 自动记录每条消息 | ❌ 不做 | 会制造噪声；episodes 由 LLM 判断是否值得写入 |
-| 结构化元数据约束 | ❌ 不约束写入格式 | 改为索引/检索阶段自动推断元数据 |
-| 独立冲突检测系统 | ❌ 不做 | Consolidation LLM 同时看新旧内容，自然处理 |
-| FTS5 + sqlite-vec | ✅ MVP 必做 | 零依赖，hybrid 检索显著优于单一方式 |
-| Consolidation 定时任务 | ✅ MVP 必做 | 产出与人手写内容隔离 |
-| 语义感知分块 | vNext | 按 heading 切分 + 超长段落退化处理 |
-| 本地 Embedding 模型 | vNext | 预留接口，MVP 用远程 API |
+- Auto-Compaction + Memory Flush（context 压缩）
+- Consolidation 定时任务（从 daily files 提炼到 MEMORY.md）
+- 语义感知分块（heading 切分）
+- 本地 Embedding 模型（MVP 用远程 API，预留 trait 接口）
 
 ---
 
@@ -280,7 +229,7 @@ MVP 支持：
 
 ### 6.3 Persona（参考 OpenClaw 但做无 workspace 版）
 
-OpenClaw 的实践是“结构化 identity + 文本化行为规则”。  
+OpenClaw 的实践是"结构化 identity + 文本化行为规则"。
 nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 - **IdentityProfile（结构化）**：`name/emoji/avatar/public_label`
@@ -374,8 +323,8 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 
 ### 9.4 与 Tool Schema 关系
 
-- Tool Schema：定义“如何调用工具”（参数契约）
-- Skill：定义“何时调用工具/怎么完成任务”（策略与经验）
+- Tool Schema：定义"如何调用工具"（参数契约）
+- Skill：定义"何时调用工具/怎么完成任务"（策略与经验）
 - MVP 同时保留二者，职责分离
 
 ## 10. 项目结构（面向后续开源拆分）
@@ -386,7 +335,7 @@ nanocrab MVP 保留此思想，但不依赖 workspace 文件系统。
 - `crab-core`：orchestrator + session + policy
 - `crab-schema`：command/event DTO（稳定边界）
 - `crab-bus`：总线抽象与 in-memory 实现
-- `crab-memory`：episodes/concepts/links 存取
+- `crab-memory`：Markdown 读写 + SQLite 检索索引（chunks/FTS5/sqlite-vec）
 - `crab-runtime`：执行器接口（WASM adapter 预留）
 - `crab-channels-telegram`：首个通道驱动
 - `crab-sdk`：后续插件/第三方接入
@@ -459,22 +408,22 @@ TUI 不需要经过 Gateway（本地使用无需限流/路由/鉴权）。
 loop {
     // 1. 流式调 LLM
     let stream = orchestrator.handle_inbound_stream(messages).await;
-    
+
     // 2. 逐 chunk 实时渲染到终端
     for chunk in stream {
         tui.render_delta(chunk.delta);
     }
-    
+
     // 3. 检查是否有 tool_use
     if has_tool_use(&response) {
         let tool_results = execute_tools(tool_calls).await;
         tui.render_tool_results(&tool_results);
-        
+
         // 把 tool_result 加入 messages，继续下一轮（还是流式）
         messages.extend(tool_use_and_result_messages);
         continue;
     }
-    
+
     break;  // 没有 tool_use，结束
 }
 ```
@@ -483,7 +432,7 @@ loop {
 
 | 层 | 当前状态 | 需要补的 |
 |---|---|---|
-| Provider `stream()` | ✅ 已实现（Anthropic SSE 解析完整） | — |
+| Provider `stream()` | ✅ 已实现（Anthropic SSE 解析完整） | - |
 | LlmRouter `stream()` | ❌ 只有 `chat()` | 加 `stream()` 方法，路由到 provider.stream() |
 | Orchestrator | ❌ 只有同步 `handle_inbound()` | 加 `handle_inbound_stream()` 返回 `Stream<StreamChunk>` |
 | TUI Chat 面板 | ❌ 未实现 | 消费 stream，逐 chunk 渲染 + tool use 交替展示 |
@@ -513,7 +462,7 @@ Orchestrator
   ▼  HTTP POST → Anthropic API         ← 唯一的外部网络调用
   │  ← LLM 回复
   │
-  │  记录 episodes → 构造 OutboundMessage
+  │  写入记忆文件 → 构造 OutboundMessage
   ▼  return Ok(OutboundMessage)         ← 函数返回值
 Gateway
   ▼  return Ok(outbound)                ← 函数返回值
@@ -550,8 +499,8 @@ Memory             EpisodeWritten(vNext) TUI、统计
 
 ### M2（可用）
 
-- episodes 写入 + 检索
-- concepts 手动/规则写入
+- Markdown 记忆文件读写
+- SQLite 索引构建 + hybrid 检索
 - 回答前记忆注入
 
 ### M3（可演进）
@@ -567,7 +516,7 @@ Memory             EpisodeWritten(vNext) TUI、统计
 nanocrab MVP 推荐采用：
 
 - **架构层面**：Gateway + Core/Orchestrator + Bus + Memory + Runtime
-- **记忆层面**：海马体（快写入）+ 皮质（慢整合）
+- **记忆层面**：Markdown 文件（source of truth）+ SQLite 检索索引
 - **工程策略**：先轻实现，先稳协议，先保边界
 
 这套方案既能快速落地第一版，也保证后续模块可独立开源与扩展。
