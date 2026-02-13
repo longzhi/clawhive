@@ -24,6 +24,44 @@ pub struct FeaturesConfig {
     pub cli: bool,
 }
 
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".to_string()
+}
+
+fn default_embedding_dimensions() -> usize {
+    1536
+}
+
+fn default_embedding_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    pub enabled: bool,
+    pub provider: String,
+    pub api_key_env: String,
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+    #[serde(default = "default_embedding_dimensions")]
+    pub dimensions: usize,
+    #[serde(default = "default_embedding_base_url")]
+    pub base_url: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "stub".to_string(),
+            api_key_env: String::new(),
+            model: default_embedding_model(),
+            dimensions: default_embedding_dimensions(),
+            base_url: default_embedding_base_url(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConnectorConfig {
     pub connector_id: String,
@@ -62,6 +100,8 @@ pub struct MainConfig {
     pub runtime: RuntimeConfig,
     pub features: FeaturesConfig,
     pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +300,11 @@ fn resolve_main_env(main: &mut MainConfig) {
             connector.token = resolve_env_var(&connector.token);
         }
     }
+
+    main.embedding.api_key_env = resolve_env_var(&main.embedding.api_key_env);
+    main.embedding.base_url = resolve_env_var(&main.embedding.base_url);
+    main.embedding.model = resolve_env_var(&main.embedding.model);
+    main.embedding.provider = resolve_env_var(&main.embedding.provider);
 }
 
 fn resolve_routing_env(routing: &mut RoutingConfig) {
@@ -408,6 +453,7 @@ mod tests {
                     telegram: None,
                     discord: None,
                 },
+                embedding: EmbeddingConfig::default(),
             },
             routing: RoutingConfig {
                 default_agent_id: "nonexistent".into(),
