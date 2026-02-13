@@ -228,9 +228,56 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 
 > OpenClaw 不使用 recency 权重，依赖 vector + BM25 已足够。如需 recency 加权可作为 nanocrab 扩展。
 
-### 3.3 Prompt 注入
+### 3.3 LLM Memory Tools（对齐 OpenClaw）
 
-检索到的 chunks 注入到 LLM prompt 的 system message 中：
+LLM 可通过 tool calling 主动搜索和读取记忆，而非仅依赖被动注入：
+
+**`memory_search`**：语义搜索记忆
+
+```json
+{
+  "name": "memory_search",
+  "parameters": {
+    "query": "string — 搜索关键词或语义描述",
+    "maxResults": "number — 最大返回数（默认 6）",
+    "minScore": "number — 最低分数阈值（默认 0.35）"
+  },
+  "returns": [
+    {
+      "snippet": "匹配的 chunk 文本（截断 ~700 chars）",
+      "path": "来源文件路径",
+      "startLine": 10,
+      "endLine": 25,
+      "score": 0.82
+    }
+  ]
+}
+```
+
+**`memory_get`**：读取记忆文件指定片段
+
+```json
+{
+  "name": "memory_get",
+  "parameters": {
+    "path": "string — 文件路径（MEMORY.md 或 memory/*.md）",
+    "from": "number — 起始行号（可选）",
+    "lines": "number — 读取行数（可选）"
+  },
+  "returns": "string — 文件内容片段"
+}
+```
+
+**使用流程：**
+1. LLM 觉得需要回忆某件事 → 调 `memory_search`
+2. 搜到相关 chunk 但需要更多上下文 → 调 `memory_get` 读完整段落
+3. 结合记忆上下文回答用户
+
+> 被动注入（每次对话自动检索注入 prompt）仍然保留，作为基线。LLM tools 提供主动检索能力，两者互补。
+
+### 3.4 Prompt 注入（被动）
+
+检索到的 chunks 自动注入到 LLM prompt 的 system message 中：
 
 ```
 [Memory Context]
@@ -428,8 +475,9 @@ Session JSONL（原始对话流，自动写入，不删除）
 - [ ] LLM 主动写入记忆（tool/system prompt 指导）
 - [ ] 兜底摘要（session 结束时未写入 → 自动总结）
 - [ ] SQLite 索引层（chunks 表 + sqlite-vec + FTS5）
-- [ ] Hybrid search（向量 50% + BM25 30% + 新近性 20%）
-- [ ] 检索结果注入 prompt
+- [ ] Hybrid search（向量 70% + BM25 30%）
+- [ ] 检索结果被动注入 prompt
+- [ ] `memory_search` + `memory_get` LLM tools（主动检索）
 - [ ] Session 历史加载（conversation history）
 
 ### vNext 第一步
