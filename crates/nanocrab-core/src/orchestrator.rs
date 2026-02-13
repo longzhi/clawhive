@@ -122,6 +122,18 @@ impl Orchestrator {
             .build_memory_context(&session_key, &inbound.text)
             .await?;
 
+        let history_messages = match self
+            .session_reader
+            .load_recent_messages(&session_key.0, 10)
+            .await
+        {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                tracing::warn!("Failed to load session history: {e}");
+                Vec::new()
+            }
+        };
+
         let mut messages = Vec::new();
         if !memory_context.is_empty() {
             messages.push(LlmMessage {
@@ -131,6 +143,12 @@ impl Orchestrator {
             messages.push(LlmMessage {
                 role: "assistant".into(),
                 content: "Understood, I have the context.".into(),
+            });
+        }
+        for hist_msg in &history_messages {
+            messages.push(LlmMessage {
+                role: hist_msg.role.clone(),
+                content: hist_msg.content.clone(),
             });
         }
         messages.push(LlmMessage {

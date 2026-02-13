@@ -417,3 +417,40 @@ async fn mock_server_multi_turn_session() {
         2
     );
 }
+
+#[tokio::test]
+async fn mock_server_includes_session_history() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(mock_anthropic_response("reply with history")),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let bus = EventBus::new(16);
+    let (orch, tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
+
+    // First turn
+    let first = test_inbound("hello");
+    let _ = orch.handle_inbound(first, "nanocrab-main").await.unwrap();
+
+    // Second turn — session history should now include the first turn
+    let second = test_inbound("follow up");
+    let _ = orch.handle_inbound(second, "nanocrab-main").await.unwrap();
+
+    // Verify: the session JSONL should have 4 messages (user+assistant x2)
+    let reader = SessionReader::new(tmp.path());
+    let key_str = "telegram:tg_main:chat:1:user:1";
+    let messages = reader.load_recent_messages(key_str, 20).await.unwrap();
+    assert_eq!(
+        messages.len(),
+        4,
+        "Should have 4 messages: 2 user + 2 assistant"
+    );
+}
