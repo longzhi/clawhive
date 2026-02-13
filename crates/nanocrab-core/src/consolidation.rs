@@ -1,197 +1,134 @@
-use super::router::LlmRouter;
-use anyhow::Result;
-use chrono::Utc;
-use nanocrab_memory::{
-    Concept, ConceptStatus, ConceptType, Episode, Link, LinkRelation, MemoryStore,
-};
-use nanocrab_provider::LlmMessage;
 use std::sync::Arc;
-use uuid::Uuid;
 
-pub struct Consolidator {
-    memory: Arc<MemoryStore>,
+use anyhow::Result;
+use nanocrab_memory::file_store::MemoryFileStore;
+use nanocrab_provider::LlmMessage;
+
+use super::router::LlmRouter;
+
+const CONSOLIDATION_SYSTEM_PROMPT: &str = r#"You are a memory consolidation system. You maintain a personal knowledge base (MEMORY.md)
+by integrating new daily observations.
+
+Rules:
+- Preserve existing important knowledge that is still valid
+- Add new stable facts, user preferences, and behavioral patterns from daily notes
+- Remove or update information that has been contradicted by newer observations
+- Use clear Markdown formatting with headers for organization
+- Be concise - only keep information that is useful for future conversations
+- Output the COMPLETE updated MEMORY.md content (not a diff)"#;
+
+pub struct HippocampusConsolidator {
+    file_store: MemoryFileStore,
     router: Arc<LlmRouter>,
     model_primary: String,
     model_fallbacks: Vec<String>,
+    lookback_days: usize,
 }
 
 #[derive(Debug)]
 pub struct ConsolidationReport {
-    pub concepts_created: usize,
-    pub concepts_updated: usize,
-    pub episodes_processed: usize,
-    pub concepts_staled: usize,
-    pub episodes_purged: usize,
+    pub daily_files_read: usize,
+    pub memory_updated: bool,
+    pub summary: String,
 }
 
-impl Consolidator {
+impl HippocampusConsolidator {
     pub fn new(
-        memory: Arc<MemoryStore>,
+        file_store: MemoryFileStore,
         router: Arc<LlmRouter>,
         model_primary: String,
         model_fallbacks: Vec<String>,
     ) -> Self {
         Self {
-            memory,
+            file_store,
             router,
             model_primary,
             model_fallbacks,
+            lookback_days: 7,
         }
     }
 
-    pub async fn run_daily(&self) -> Result<ConsolidationReport> {
-        let episodes = self.memory.search_episodes("", 1, 100).await?;
-        let high_value: Vec<_> = episodes
-            .into_iter()
-            .filter(|e| e.importance >= 0.6)
-            .collect();
-
-        let mut created = 0;
-        let mut updated = 0;
-
-        if !high_value.is_empty() {
-            let candidates = self.extract_concepts(&high_value).await?;
-
-            for (concept, source_episode_id) in candidates {
-                let existing = self.memory.find_concept_by_key(&concept.key).await?;
-                if existing.is_some() {
-                    updated += 1;
-                } else {
-                    created += 1;
-                }
-                self.memory.upsert_concept(concept.clone()).await?;
-
-                let link = Link {
-                    id: Uuid::new_v4(),
-                    episode_id: source_episode_id,
-                    concept_id: concept.id,
-                    relation: LinkRelation::Supports,
-                    created_at: Utc::now(),
-                };
-                self.memory.insert_link(link).await?;
-            }
-        }
-
-        let concepts_staled = self.memory.mark_stale_concepts(30).await?;
-        let episodes_purged = self.memory.purge_old_episodes(90).await?;
-
-        Ok(ConsolidationReport {
-            concepts_created: created,
-            concepts_updated: updated,
-            episodes_processed: high_value.len(),
-            concepts_staled,
-            episodes_purged,
-        })
+    pub fn with_lookback_days(mut self, days: usize) -> Self {
+        self.lookback_days = days;
+        self
     }
 
-    async fn extract_concepts(&self, episodes: &[Episode]) -> Result<Vec<(Concept, Uuid)>> {
-        let episodes_text = episodes
-            .iter()
-            .map(|e| format!("[{}] {}: {}", e.ts.format("%m-%d"), e.speaker, e.text))
-            .collect::<Vec<_>>()
-            .join("\n");
+    pub async fn consolidate(&self) -> Result<ConsolidationReport> {
+        let current_memory = self.file_store.read_long_term().await?;
+        let recent_daily = self
+            .file_store
+            .read_recent_daily(self.lookback_days)
+            .await?;
 
-        let system = "You are a knowledge extractor. From the following conversations, extract stable facts, preferences, and rules.\
-            Output a JSON array, each item format: {\"type\":\"fact|preference|rule\", \"key\":\"short_identifier\", \"value\":\"description\", \"confidence\":0.0-1.0, \"source_index\":0}\
-            Only extract high-confidence stable knowledge, ignore temporary content.".to_string();
+        if recent_daily.is_empty() {
+            return Ok(ConsolidationReport {
+                daily_files_read: 0,
+                memory_updated: false,
+                summary: "No daily files found in lookback window; skipped consolidation."
+                    .to_string(),
+            });
+        }
 
-        let messages = vec![LlmMessage {
-            role: "user".into(),
-            content: episodes_text,
-        }];
+        let mut daily_sections = String::new();
+        for (date, content) in &recent_daily {
+            daily_sections.push_str(&format!("### {}\n{}\n\n", date.format("%Y-%m-%d"), content));
+        }
 
-        let resp = self
+        let user_prompt = format!(
+            "## Current MEMORY.md\n{}\n\n## Recent Daily Observations\n{}\nPlease synthesize the daily observations into an updated MEMORY.md.\nOutput ONLY the new MEMORY.md content, no explanations.",
+            current_memory, daily_sections
+        );
+
+        let response = self
             .router
             .chat(
                 &self.model_primary,
                 &self.model_fallbacks,
-                Some(system),
-                messages,
-                2048,
+                Some(CONSOLIDATION_SYSTEM_PROMPT.to_string()),
+                vec![LlmMessage {
+                    role: "user".to_string(),
+                    content: user_prompt,
+                }],
+                4096,
             )
             .await?;
 
-        parse_concept_candidates(&resp.text, episodes)
+        let updated_memory = strip_markdown_fence(&response.text);
+        self.file_store.write_long_term(&updated_memory).await?;
+
+        Ok(ConsolidationReport {
+            daily_files_read: recent_daily.len(),
+            memory_updated: true,
+            summary: format!(
+                "Consolidated {} daily files into MEMORY.md.",
+                recent_daily.len()
+            ),
+        })
     }
 }
 
-fn parse_concept_candidates(
-    llm_output: &str,
-    episodes: &[Episode],
-) -> Result<Vec<(Concept, Uuid)>> {
-    let json_str = llm_output
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| llm_output.trim().strip_prefix("```"))
-        .unwrap_or(llm_output.trim());
-    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-    let items: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(_) => return Ok(vec![]),
-    };
-
-    let now = Utc::now();
-    let mut results = Vec::new();
-
-    for item in items {
-        let concept_type = match item.get("type").and_then(|v| v.as_str()) {
-            Some("fact") => ConceptType::Fact,
-            Some("preference") => ConceptType::Preference,
-            Some("rule") => ConceptType::Rule,
-            _ => continue,
-        };
-
-        let key = match item.get("key").and_then(|v| v.as_str()) {
-            Some(k) => k.to_string(),
-            None => continue,
-        };
-
-        let value = match item.get("value").and_then(|v| v.as_str()) {
-            Some(v) => v.to_string(),
-            None => continue,
-        };
-
-        let confidence = item
-            .get("confidence")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.5) as f32;
-
-        let source_index = item
-            .get("source_index")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
-        let source_episode_id = episodes
-            .get(source_index)
-            .map(|e| e.id)
-            .unwrap_or_else(|| episodes[0].id);
-
-        let concept = Concept {
-            id: Uuid::new_v4(),
-            concept_type,
-            key,
-            value,
-            confidence,
-            evidence: vec![format!("episode:{}", source_episode_id)],
-            first_seen: now,
-            last_verified: now,
-            status: ConceptStatus::Active,
-        };
-
-        results.push((concept, source_episode_id));
-    }
-
-    Ok(results)
+fn strip_markdown_fence(text: &str) -> String {
+    let trimmed = text.trim();
+    let without_prefix = trimmed
+        .strip_prefix("```markdown")
+        .or_else(|| trimmed.strip_prefix("```md"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim_start();
+    without_prefix
+        .strip_suffix("```")
+        .unwrap_or(without_prefix)
+        .trim_end()
+        .to_string()
 }
 
 pub struct ConsolidationScheduler {
-    consolidator: Arc<Consolidator>,
+    consolidator: Arc<HippocampusConsolidator>,
     interval_hours: u64,
 }
 
 impl ConsolidationScheduler {
-    pub fn new(consolidator: Arc<Consolidator>, interval_hours: u64) -> Self {
+    pub fn new(consolidator: Arc<HippocampusConsolidator>, interval_hours: u64) -> Self {
         Self {
             consolidator,
             interval_hours,
@@ -205,20 +142,18 @@ impl ConsolidationScheduler {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                tracing::info!("Running scheduled consolidation...");
-                match self.consolidator.run_daily().await {
+                tracing::info!("Running scheduled hippocampus consolidation...");
+                match self.consolidator.consolidate().await {
                     Ok(report) => {
                         tracing::info!(
-                            "Consolidation complete: {} created, {} updated, {} processed, {} staled, {} purged",
-                            report.concepts_created,
-                            report.concepts_updated,
-                            report.episodes_processed,
-                            report.concepts_staled,
-                            report.episodes_purged
+                            "Consolidation complete: daily_files_read={}, memory_updated={}, summary={}",
+                            report.daily_files_read,
+                            report.memory_updated,
+                            report.summary
                         );
                     }
-                    Err(e) => {
-                        tracing::error!("Consolidation failed: {e}");
+                    Err(err) => {
+                        tracing::error!("Consolidation failed: {err}");
                     }
                 }
             }
@@ -226,58 +161,100 @@ impl ConsolidationScheduler {
     }
 
     pub async fn run_once(&self) -> Result<ConsolidationReport> {
-        self.consolidator.run_daily().await
+        self.consolidator.consolidate().await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
-    fn make_episode(text: &str, importance: f32) -> Episode {
-        Episode {
-            id: Uuid::new_v4(),
-            ts: Utc::now(),
-            session_id: "test:session".into(),
-            speaker: "user".into(),
-            text: text.into(),
-            tags: vec![],
-            importance,
-            context_hash: None,
-            source_ref: None,
-        }
+    use anyhow::Result;
+    use nanocrab_memory::file_store::MemoryFileStore;
+    use nanocrab_provider::{ProviderRegistry, StubProvider};
+    use tempfile::TempDir;
+
+    use super::{ConsolidationReport, ConsolidationScheduler, HippocampusConsolidator};
+    use crate::router::LlmRouter;
+
+    fn build_router() -> Arc<LlmRouter> {
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic", Arc::new(StubProvider));
+        let aliases = HashMap::from([(
+            "sonnet".to_string(),
+            "anthropic/claude-sonnet-4-5".to_string(),
+        )]);
+        Arc::new(LlmRouter::new(registry, aliases, vec![]))
+    }
+
+    fn build_file_store() -> Result<(TempDir, MemoryFileStore)> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+        Ok((dir, store))
     }
 
     #[test]
-    fn parse_concept_candidates_valid_json() {
-        let episodes = vec![make_episode("I like Rust", 0.8)];
-        let json = r#"[{"type":"preference","key":"lang.preferred","value":"Rust","confidence":0.9,"source_index":0}]"#;
-        let result = parse_concept_candidates(json, &episodes).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0.key, "lang.preferred");
-        assert_eq!(result[0].0.concept_type, ConceptType::Preference);
+    fn consolidation_report_default_fields() {
+        let report = ConsolidationReport {
+            daily_files_read: 0,
+            memory_updated: false,
+            summary: "none".to_string(),
+        };
+
+        assert_eq!(report.daily_files_read, 0);
+        assert!(!report.memory_updated);
+        assert_eq!(report.summary, "none");
     }
 
     #[test]
-    fn parse_concept_candidates_with_code_fence() {
-        let episodes = vec![make_episode("test", 0.8)];
-        let json = "```json\n[{\"type\":\"fact\",\"key\":\"test.key\",\"value\":\"test value\",\"confidence\":0.8,\"source_index\":0}]\n```";
-        let result = parse_concept_candidates(json, &episodes).unwrap();
-        assert_eq!(result.len(), 1);
+    fn hippocampus_new_default_lookback() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let consolidator =
+            HippocampusConsolidator::new(file_store, build_router(), "sonnet".to_string(), vec![]);
+
+        assert_eq!(consolidator.lookback_days, 7);
+        Ok(())
     }
 
     #[test]
-    fn parse_concept_candidates_invalid_json() {
-        let episodes = vec![make_episode("test", 0.8)];
-        let result = parse_concept_candidates("not json at all", &episodes).unwrap();
-        assert!(result.is_empty());
+    fn hippocampus_with_lookback_days() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let consolidator =
+            HippocampusConsolidator::new(file_store, build_router(), "sonnet".to_string(), vec![])
+                .with_lookback_days(30);
+
+        assert_eq!(consolidator.lookback_days, 30);
+        Ok(())
     }
 
     #[test]
-    fn parse_concept_candidates_missing_fields_skipped() {
-        let episodes = vec![make_episode("test", 0.8)];
-        let json = r#"[{"type":"fact"},{"type":"fact","key":"k","value":"v","confidence":0.9,"source_index":0}]"#;
-        let result = parse_concept_candidates(json, &episodes).unwrap();
-        assert_eq!(result.len(), 1);
+    fn consolidation_scheduler_new() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let consolidator = Arc::new(HippocampusConsolidator::new(
+            file_store,
+            build_router(),
+            "sonnet".to_string(),
+            vec![],
+        ));
+
+        let scheduler = ConsolidationScheduler::new(Arc::clone(&consolidator), 24);
+        assert_eq!(scheduler.interval_hours, 24);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_no_daily_files_returns_early() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# Memory\n\nExisting").await?;
+
+        let consolidator =
+            HippocampusConsolidator::new(file_store, build_router(), "sonnet".to_string(), vec![]);
+
+        let report = consolidator.consolidate().await?;
+        assert_eq!(report.daily_files_read, 0);
+        assert!(!report.memory_updated);
+        assert!(report.summary.contains("No daily files found"));
+        Ok(())
     }
 }

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use nanocrab_bus::BusPublisher;
+use nanocrab_memory::embedding::EmbeddingProvider;
 use nanocrab_memory::file_store::MemoryFileStore;
+use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::SessionWriter;
 use nanocrab_memory::{Episode, MemoryStore};
 use nanocrab_provider::LlmMessage;
@@ -27,6 +29,8 @@ pub struct Orchestrator {
     runtime: Arc<dyn TaskExecutor>,
     file_store: MemoryFileStore,
     session_writer: SessionWriter,
+    search_index: SearchIndex,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
     react_max_steps: usize,
     react_repeat_guard: usize,
 }
@@ -44,6 +48,8 @@ impl Orchestrator {
         runtime: Arc<dyn TaskExecutor>,
         file_store: MemoryFileStore,
         session_writer: SessionWriter,
+        search_index: SearchIndex,
+        embedding_provider: Arc<dyn EmbeddingProvider>,
     ) -> Self {
         let agents_map = agents
             .into_iter()
@@ -60,6 +66,8 @@ impl Orchestrator {
             runtime,
             file_store,
             session_writer,
+            search_index,
+            embedding_provider,
             react_max_steps: 4,
             react_repeat_guard: 2,
         }
@@ -243,11 +251,24 @@ impl Orchestrator {
         Ok(last_reply)
     }
 
-    async fn build_memory_context(
-        &self,
-        _session_key: &SessionKey,
-        _query: &str,
-    ) -> Result<String> {
-        self.file_store.build_memory_context().await
+    async fn build_memory_context(&self, _session_key: &SessionKey, query: &str) -> Result<String> {
+        let results = self
+            .search_index
+            .search(query, self.embedding_provider.as_ref(), 6, 0.35)
+            .await;
+
+        match results {
+            Ok(results) if !results.is_empty() => {
+                let mut context = String::from("## Relevant Memory\n\n");
+                for result in &results {
+                    context.push_str(&format!(
+                        "### {} (score: {:.2})\n{}\n\n",
+                        result.path, result.score, result.text
+                    ));
+                }
+                Ok(context)
+            }
+            _ => self.file_store.build_memory_context().await,
+        }
     }
 }

@@ -78,7 +78,10 @@ impl SearchIndex {
                     .lock()
                     .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
                 let tx = conn.unchecked_transaction()?;
-                tx.execute("DELETE FROM chunks_fts WHERE path = ?1", params![path_owned])?;
+                tx.execute(
+                    "DELETE FROM chunks_fts WHERE path = ?1",
+                    params![path_owned],
+                )?;
                 tx.execute("DELETE FROM chunks WHERE path = ?1", params![path_owned])?;
                 tx.execute(
                     r#"
@@ -181,7 +184,10 @@ impl SearchIndex {
             let prefix_len = chunk.hash.len().min(8);
             let chunk_id = format!(
                 "{}:{}-{}:{}",
-                path, chunk.start_line, chunk.end_line, &chunk.hash[..prefix_len]
+                path,
+                chunk.start_line,
+                chunk.end_line,
+                &chunk.hash[..prefix_len]
             );
             rows.push((
                 chunk_id,
@@ -406,7 +412,9 @@ impl SearchIndex {
             for row in rows {
                 let (chunk_id, path, source, start_line, end_line, text, rank) = row?;
                 let bm25_score = 1.0_f64 / (1.0_f64 + (-rank).max(0.0_f64));
-                out.push((chunk_id, path, source, start_line, end_line, text, bm25_score));
+                out.push((
+                    chunk_id, path, source, start_line, end_line, text, bm25_score,
+                ));
             }
             Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
         })
@@ -425,7 +433,8 @@ impl SearchIndex {
         }
 
         let mut merged = std::collections::HashMap::<String, MergeItem>::new();
-        for (chunk_id, path, source, start_line, end_line, text, vector_score) in vector_candidates {
+        for (chunk_id, path, source, start_line, end_line, text, vector_score) in vector_candidates
+        {
             merged.insert(
                 chunk_id.clone(),
                 MergeItem {
@@ -557,7 +566,12 @@ mod tests {
         let provider = StubEmbeddingProvider::new(8);
 
         let count = index
-            .index_file("MEMORY.md", "# Title\n\nhello world", "long_term", &provider)
+            .index_file(
+                "MEMORY.md",
+                "# Title\n\nhello world",
+                "long_term",
+                &provider,
+            )
             .await?;
 
         assert!(count > 0);
@@ -647,7 +661,12 @@ mod tests {
         let provider = StubEmbeddingProvider::new(8);
 
         index
-            .index_file("MEMORY.md", "# Embedding\n\nstore vectors", "long_term", &provider)
+            .index_file(
+                "MEMORY.md",
+                "# Embedding\n\nstore vectors",
+                "long_term",
+                &provider,
+            )
             .await?;
 
         let conn = db.lock().expect("lock");
@@ -688,7 +707,12 @@ mod tests {
         let provider = StubEmbeddingProvider::new(8);
 
         index
-            .index_file("MEMORY.md", "# Rust\n\nTokio async runtime details", "long_term", &provider)
+            .index_file(
+                "MEMORY.md",
+                "# Rust\n\nTokio async runtime details",
+                "long_term",
+                &provider,
+            )
             .await?;
 
         let results = index.search("tokio runtime", &provider, 6, 0.0).await?;
@@ -704,7 +728,12 @@ mod tests {
         let provider = StubEmbeddingProvider::new(8);
 
         index
-            .index_file("MEMORY.md", "# Topic\n\napple banana", "long_term", &provider)
+            .index_file(
+                "MEMORY.md",
+                "# Topic\n\napple banana",
+                "long_term",
+                &provider,
+            )
             .await?;
 
         let loose = index.search("apple", &provider, 6, 0.0).await?;
@@ -722,7 +751,9 @@ mod tests {
         for i in 0..10 {
             let path = format!("memory/2026-02-{:02}.md", i + 1);
             let content = format!("# Day {}\n\nkeyword repeated", i + 1);
-            index.index_file(&path, &content, "daily", &provider).await?;
+            index
+                .index_file(&path, &content, "daily", &provider)
+                .await?;
         }
 
         let results = index.search("keyword", &provider, 3, 0.0).await?;

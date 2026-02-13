@@ -5,6 +5,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use nanocrab_bus::EventBus;
 use nanocrab_core::*;
+use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
+use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
 use nanocrab_memory::{file_store::MemoryFileStore, SessionWriter};
 use nanocrab_provider::{
@@ -17,6 +19,7 @@ use uuid::Uuid;
 struct FailProvider;
 struct EchoProvider;
 struct ThinkingEchoProvider;
+struct TranscriptProvider;
 
 #[async_trait]
 impl LlmProvider for FailProvider {
@@ -46,6 +49,24 @@ impl LlmProvider for ThinkingEchoProvider {
     async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
             text: "[think] still processing".to_string(),
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: Some("end_turn".into()),
+        })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for TranscriptProvider {
+    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = request
+            .messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(LlmResponse {
+            text,
             input_tokens: None,
             output_tokens: None,
             stop_reason: Some("end_turn".into()),
@@ -107,6 +128,8 @@ fn make_orchestrator(
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
+    let search_index = SearchIndex::new(memory.db());
+    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
 
     (
         Orchestrator::new(
@@ -120,9 +143,63 @@ fn make_orchestrator(
             Arc::new(NativeExecutor),
             file_store,
             session_writer,
+            search_index,
+            embedding_provider,
         ),
         tmp,
     )
+}
+
+#[tokio::test]
+async fn orchestrator_uses_search_index_for_memory_context() {
+    let mut registry = ProviderRegistry::new();
+    registry.register("trace", Arc::new(TranscriptProvider));
+    let aliases = HashMap::from([("trace".to_string(), "trace/model".to_string())]);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let bus = EventBus::new(16);
+    let session_mgr = SessionManager::new(memory.clone(), 1800);
+    let router = LlmRouter::new(registry, aliases, vec![]);
+    let agents = vec![test_full_agent("nanocrab-main", "trace", vec![])];
+    let file_store = MemoryFileStore::new(tmp.path());
+    let session_writer = SessionWriter::new(tmp.path());
+
+    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+    let search_index = SearchIndex::new(memory.db());
+    let memory_text = "# Plans\n\ncobalt migration architecture details";
+    file_store.write_long_term(memory_text).await.unwrap();
+    search_index
+        .index_file(
+            "MEMORY.md",
+            memory_text,
+            "long_term",
+            embedding_provider.as_ref(),
+        )
+        .await
+        .unwrap();
+
+    let orch = Orchestrator::new(
+        router,
+        agents,
+        HashMap::new(),
+        session_mgr,
+        SkillRegistry::new(),
+        memory,
+        bus.publisher(),
+        Arc::new(NativeExecutor),
+        file_store,
+        session_writer,
+        search_index,
+        Arc::clone(&embedding_provider),
+    );
+
+    let out = orch
+        .handle_inbound(test_inbound("cobalt architecture"), "nanocrab-main")
+        .await
+        .unwrap();
+    assert!(out.text.contains("## Relevant Memory"));
+    assert!(out.text.contains("MEMORY.md (score:"));
 }
 
 #[tokio::test]
@@ -256,6 +333,8 @@ async fn orchestrator_creates_session() {
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        SearchIndex::new(memory.db()),
+        Arc::new(StubEmbeddingProvider::new(8)),
     );
 
     let inbound = test_inbound("hello");
@@ -332,6 +411,7 @@ async fn orchestrator_publishes_reply_ready() {
     let tmp = tempfile::TempDir::new().unwrap();
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
+    let search_index = SearchIndex::new(memory.db());
     let orch = Orchestrator::new(
         router,
         agents,
@@ -343,6 +423,8 @@ async fn orchestrator_publishes_reply_ready() {
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        search_index,
+        Arc::new(StubEmbeddingProvider::new(8)),
     );
 
     let _ = orch

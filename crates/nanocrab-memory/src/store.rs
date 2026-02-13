@@ -95,6 +95,10 @@ impl MemoryStore {
         })
     }
 
+    pub fn db(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.db)
+    }
+
     pub async fn insert_episode(&self, episode: Episode) -> Result<()> {
         let db = Arc::clone(&self.db);
         task::spawn_blocking(move || {

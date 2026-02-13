@@ -10,6 +10,8 @@ use nanocrab_bus::EventBus;
 use nanocrab_channels_telegram::TelegramBot;
 use nanocrab_core::*;
 use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
+use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
+use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{register_builtin_providers, AnthropicProvider, ProviderRegistry};
 use nanocrab_runtime::NativeExecutor;
@@ -353,6 +355,8 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
     let workspace_dir = root.to_path_buf();
     let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let session_writer = nanocrab_memory::SessionWriter::new(&workspace_dir);
+    let search_index = SearchIndex::new(memory.db());
+    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
 
     let orchestrator = Arc::new(Orchestrator::new(
         router,
@@ -365,6 +369,8 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
+        search_index,
+        embedding_provider,
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());
@@ -434,17 +440,19 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
 }
 
 async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
-    let (bus, memory, gateway, config) = bootstrap(root)?;
+    let (bus, _memory, gateway, config) = bootstrap(root)?;
 
-    let consolidator = Arc::new(Consolidator::new(
-        memory,
+    let workspace_dir = root.to_path_buf();
+    let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let consolidator = Arc::new(HippocampusConsolidator::new(
+        file_store,
         Arc::new(build_router_from_config(&config)),
         "sonnet".to_string(),
         vec!["haiku".to_string()],
     ));
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
     let _consolidation_handle = scheduler.start();
-    tracing::info!("Consolidation scheduler started (every 24h)");
+    tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
 
     let _tui_handle = if with_tui {
         let receivers = nanocrab_tui::subscribe_all(&bus).await;
@@ -489,24 +497,24 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config) = bootstrap(root)?;
+    let (_bus, _memory, _gateway, config) = bootstrap(root)?;
 
-    let consolidator = Arc::new(Consolidator::new(
-        memory,
+    let workspace_dir = root.to_path_buf();
+    let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let consolidator = Arc::new(HippocampusConsolidator::new(
+        file_store,
         Arc::new(build_router_from_config(&config)),
         "sonnet".to_string(),
         vec!["haiku".to_string()],
     ));
 
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
-    println!("Running consolidation...");
+    println!("Running hippocampus consolidation...");
     let report = scheduler.run_once().await?;
     println!("Consolidation complete:");
-    println!("  Concepts created: {}", report.concepts_created);
-    println!("  Concepts updated: {}", report.concepts_updated);
-    println!("  Episodes processed: {}", report.episodes_processed);
-    println!("  Concepts staled: {}", report.concepts_staled);
-    println!("  Episodes purged: {}", report.episodes_purged);
+    println!("  Daily files read: {}", report.daily_files_read);
+    println!("  Memory updated: {}", report.memory_updated);
+    println!("  Summary: {}", report.summary);
     Ok(())
 }
 
