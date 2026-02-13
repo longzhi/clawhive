@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod openai;
 pub mod types;
 
 use std::collections::HashMap;
@@ -11,6 +12,7 @@ use futures_core::Stream;
 use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
+pub use openai::OpenAiProvider;
 pub use types::StreamChunk;
 pub use types::*;
 

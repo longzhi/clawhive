@@ -17,3 +17,8 @@ channels:
     connectors:
       - connector_id: tg_main
         token: ${TELEGRAM_BOT_TOKEN}
+  discord:
+    enabled: false
+    connectors:
+      - connector_id: dc_main
+        token: ${DISCORD_BOT_TOKEN}

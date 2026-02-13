@@ -7,13 +7,17 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use nanocrab_bus::EventBus;
-use nanocrab_channels_telegram::TelegramBot;
+use nanocrab_channels::discord::DiscordBot;
+use nanocrab_channels::telegram::TelegramBot;
+use nanocrab_channels::ChannelBot;
 use nanocrab_core::*;
 use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
 use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
-use nanocrab_provider::{register_builtin_providers, AnthropicProvider, ProviderRegistry};
+use nanocrab_provider::{
+    register_builtin_providers, AnthropicProvider, OpenAiProvider, ProviderRegistry,
+};
 use nanocrab_runtime::NativeExecutor;
 use nanocrab_schema::InboundMessage;
 
@@ -33,7 +37,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Start the Telegram bot")]
+    #[command(about = "Start all configured channel bots")]
     Start {
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
@@ -406,6 +410,21 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     register_builtin_providers(&mut registry);
                 }
             }
+            "openai" => {
+                let api_key = std::env::var(&provider_config.api_key_env).unwrap_or_default();
+                if !api_key.is_empty() {
+                    let provider = Arc::new(OpenAiProvider::new(
+                        api_key,
+                        provider_config.api_base.clone(),
+                    ));
+                    registry.register("openai", provider);
+                } else {
+                    tracing::warn!(
+                        "OpenAI API key not set (env: {}), skipping",
+                        provider_config.api_key_env
+                    );
+                }
+            }
             _ => {
                 tracing::warn!("Unknown provider: {}", provider_config.provider_id);
             }
@@ -467,33 +486,80 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
         None
     };
 
-    let tg_config = config
-        .main
-        .channels
-        .telegram
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("telegram not configured in main.yaml"))?;
+    let mut bots: Vec<Box<dyn ChannelBot>> = Vec::new();
 
-    if !tg_config.enabled {
-        anyhow::bail!("telegram channel is disabled");
+    if let Some(tg_config) = &config.main.channels.telegram {
+        if tg_config.enabled {
+            for connector in &tg_config.connectors {
+                let token = resolve_env_var(&connector.token);
+                if token.is_empty() {
+                    tracing::warn!(
+                        "Telegram token is empty for connector {}, skipping",
+                        connector.connector_id
+                    );
+                    continue;
+                }
+                tracing::info!("Registering Telegram bot: {}", connector.connector_id);
+                bots.push(Box::new(TelegramBot::new(
+                    token,
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                )));
+            }
+        }
     }
 
-    let connector = tg_config
-        .connectors
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no connectors configured for telegram"))?;
+    if let Some(dc_config) = &config.main.channels.discord {
+        if dc_config.enabled {
+            for connector in &dc_config.connectors {
+                let token = resolve_env_var(&connector.token);
+                if token.is_empty() {
+                    tracing::warn!(
+                        "Discord token is empty for connector {}, skipping",
+                        connector.connector_id
+                    );
+                    continue;
+                }
+                tracing::info!("Registering Discord bot: {}", connector.connector_id);
+                bots.push(Box::new(DiscordBot::new(
+                    token,
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                )));
+            }
+        }
+    }
 
-    let token = resolve_env_var(&connector.token);
-    if token.is_empty() {
-        anyhow::bail!(
-            "Telegram token is empty for connector {}",
-            connector.connector_id
+    if bots.is_empty() {
+        anyhow::bail!("No channel bots configured or enabled. Check main.yaml channels section.");
+    }
+
+    tracing::info!("Starting {} channel bot(s)", bots.len());
+
+    if bots.len() == 1 {
+        let bot = bots.into_iter().next().unwrap();
+        tracing::info!(
+            "Starting {} bot: {}",
+            bot.channel_type(),
+            bot.connector_id()
         );
+        bot.run().await?;
+    } else {
+        let mut handles = Vec::new();
+        for bot in bots {
+            let channel = bot.channel_type().to_string();
+            let connector = bot.connector_id().to_string();
+            handles.push(tokio::spawn(async move {
+                tracing::info!("Starting {channel} bot: {connector}");
+                if let Err(err) = bot.run().await {
+                    tracing::error!("{channel} bot ({connector}) exited with error: {err}");
+                }
+            }));
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
-
-    tracing::info!("Starting Telegram bot: {}", connector.connector_id);
-    let bot = TelegramBot::new(token, connector.connector_id.clone(), gateway.clone());
-    bot.run().await?;
 
     Ok(())
 }

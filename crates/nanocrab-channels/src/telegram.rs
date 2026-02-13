@@ -56,7 +56,7 @@ impl TelegramBot {
         }
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run_impl(self) -> anyhow::Result<()> {
         let bot = Bot::new(&self.token);
         let adapter = Arc::new(TelegramAdapter::new(&self.connector_id));
         let gateway = self.gateway;
@@ -112,6 +112,21 @@ impl TelegramBot {
             .await;
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ChannelBot for TelegramBot {
+    fn channel_type(&self) -> &str {
+        "telegram"
+    }
+
+    fn connector_id(&self) -> &str {
+        &self.connector_id
+    }
+
+    async fn run(self: Box<Self>) -> anyhow::Result<()> {
+        (*self).run_impl().await
     }
 }
 

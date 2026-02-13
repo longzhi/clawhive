@@ -38,8 +38,22 @@ pub struct TelegramChannelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordConnectorConfig {
+    pub connector_id: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordChannelConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<DiscordConnectorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelsConfig {
     pub telegram: Option<TelegramChannelConfig>,
+    pub discord: Option<DiscordChannelConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +253,13 @@ fn resolve_main_env(main: &mut MainConfig) {
             connector.token = resolve_env_var(&connector.token);
         }
     }
+
+    if let Some(discord) = &mut main.channels.discord {
+        for connector in &mut discord.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.token = resolve_env_var(&connector.token);
+        }
+    }
 }
 
 fn resolve_routing_env(routing: &mut RoutingConfig) {
@@ -309,7 +330,7 @@ mod tests {
         let config = load_config(&fixture_config_root()).unwrap();
         assert_eq!(config.main.app.name, "nanocrab");
         assert_eq!(config.routing.default_agent_id, "nanocrab-main");
-        assert_eq!(config.providers.len(), 1);
+        assert_eq!(config.providers.len(), 2);
         assert_eq!(config.agents.len(), 2);
     }
 
@@ -383,7 +404,10 @@ mod tests {
                     tui: false,
                     cli: true,
                 },
-                channels: ChannelsConfig { telegram: None },
+                channels: ChannelsConfig {
+                    telegram: None,
+                    discord: None,
+                },
             },
             routing: RoutingConfig {
                 default_agent_id: "nonexistent".into(),
