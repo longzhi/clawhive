@@ -304,4 +304,147 @@ mod tests {
         assert!(limiter.check("user:2").await);
         assert!(!limiter.check("user:1").await);
     }
+
+    #[tokio::test]
+    async fn resolve_agent_dm_binding() {
+        let mut gw = make_gateway();
+        gw.routing.bindings.push(RoutingBinding {
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            match_rule: MatchRule {
+                kind: "dm".into(),
+                pattern: None,
+            },
+            agent_id: "nanocrab-dm".into(),
+        });
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:private_1".into(),
+            user_scope: "user:1".into(),
+            text: "dm msg".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+        assert_eq!(gw.resolve_agent(&inbound), "nanocrab-dm");
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_dm_binding_skips_group() {
+        let mut gw = make_gateway();
+        gw.routing.bindings.push(RoutingBinding {
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            match_rule: MatchRule {
+                kind: "dm".into(),
+                pattern: None,
+            },
+            agent_id: "nanocrab-dm".into(),
+        });
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "group:chat:123".into(),
+            user_scope: "user:1".into(),
+            text: "group msg".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+        assert_eq!(gw.resolve_agent(&inbound), "nanocrab-main");
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_group_binding() {
+        let mut gw = make_gateway();
+        gw.routing.bindings.push(RoutingBinding {
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            match_rule: MatchRule {
+                kind: "group".into(),
+                pattern: None,
+            },
+            agent_id: "nanocrab-group".into(),
+        });
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:999".into(),
+            user_scope: "user:1".into(),
+            text: "any msg".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+        assert_eq!(gw.resolve_agent(&inbound), "nanocrab-group");
+    }
+
+    #[tokio::test]
+    async fn handle_inbound_rejects_when_rate_limited() {
+        let mut gw = make_gateway();
+        gw.rate_limiter = RateLimiter::new(RateLimitConfig {
+            requests_per_minute: 60,
+            burst: 1,
+        });
+        let make_inbound = || InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:1".into(),
+            user_scope: "user:ratelimit_test".into(),
+            text: "ping".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+
+        let first = gw.handle_inbound(make_inbound()).await;
+        assert!(first.is_ok());
+
+        let second = gw.handle_inbound(make_inbound()).await;
+        assert!(second.is_err());
+        assert!(second.unwrap_err().to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn rate_limit_config_default_values() {
+        let config = RateLimitConfig::default();
+        assert_eq!(config.requests_per_minute, 30);
+        assert_eq!(config.burst, 10);
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_mismatched_connector_uses_default() {
+        let mut gw = make_gateway();
+        gw.routing.bindings.push(RoutingBinding {
+            channel_type: "telegram".into(),
+            connector_id: "tg_other".into(),
+            match_rule: MatchRule {
+                kind: "dm".into(),
+                pattern: None,
+            },
+            agent_id: "nanocrab-other".into(),
+        });
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:1".into(),
+            user_scope: "user:1".into(),
+            text: "test".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+        assert_eq!(gw.resolve_agent(&inbound), "nanocrab-main");
+    }
 }

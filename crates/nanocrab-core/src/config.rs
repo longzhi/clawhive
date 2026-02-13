@@ -342,4 +342,68 @@ mod tests {
     fn resolve_env_var_returns_raw_when_not_placeholder() {
         assert_eq!(resolve_env_var("plain-value"), "plain-value");
     }
+
+    #[test]
+    fn resolve_env_var_multiple_placeholders() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let user = std::env::var("USER").unwrap_or_default();
+        let result = resolve_env_var("home=${HOME},user=${USER}");
+        assert_eq!(result, format!("home={home},user={user}"));
+    }
+
+    #[test]
+    fn resolve_env_var_unclosed_bracket() {
+        let result = resolve_env_var("prefix_${UNCLOSED");
+        assert_eq!(result, "prefix_${UNCLOSED");
+    }
+
+    #[test]
+    fn resolve_env_var_missing_env_returns_empty() {
+        let result = resolve_env_var("val=${NANOCRAB_NONEXISTENT_VAR_XYZ}");
+        assert_eq!(result, "val=");
+    }
+
+    #[test]
+    fn resolve_env_var_empty_string() {
+        assert_eq!(resolve_env_var(""), "");
+    }
+
+    #[test]
+    fn validate_config_missing_default_agent() {
+        let config = NanocrabConfig {
+            main: MainConfig {
+                app: AppConfig {
+                    name: "test".into(),
+                    env: "test".into(),
+                },
+                runtime: RuntimeConfig { max_concurrent: 4 },
+                features: FeaturesConfig {
+                    multi_agent: false,
+                    sub_agent: false,
+                    tui: false,
+                    cli: true,
+                },
+                channels: ChannelsConfig { telegram: None },
+            },
+            routing: RoutingConfig {
+                default_agent_id: "nonexistent".into(),
+                bindings: vec![],
+            },
+            providers: vec![],
+            agents: vec![FullAgentConfig {
+                agent_id: "agent-a".into(),
+                enabled: true,
+                identity: None,
+                model_policy: super::super::ModelPolicy {
+                    primary: "m".into(),
+                    fallbacks: vec![],
+                },
+                tool_policy: None,
+                memory_policy: None,
+                sub_agent: None,
+            }],
+        };
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("default_agent_id does not exist"));
+    }
 }

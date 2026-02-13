@@ -195,4 +195,110 @@ mod tests {
             .unwrap();
         assert!(matches!(received, BusMessage::ReplyReady { .. }));
     }
+
+    #[tokio::test]
+    async fn channel_backpressure_drops_when_full() {
+        let bus = EventBus::new(1);
+        let mut rx = bus.subscribe(Topic::ReplyReady).await;
+
+        bus.publish(reply_ready_message()).await.unwrap();
+        bus.publish(reply_ready_message()).await.unwrap();
+
+        let first = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(first.is_ok());
+
+        let second = timeout(Duration::from_millis(50), rx.recv()).await;
+        assert!(second.is_err());
+    }
+
+    #[tokio::test]
+    async fn topic_from_message_covers_all_variants() {
+        let trace_id = Uuid::new_v4();
+        let inbound = nanocrab_schema::InboundMessage {
+            trace_id,
+            channel_type: "telegram".into(),
+            connector_id: "tg".into(),
+            conversation_scope: "c:1".into(),
+            user_scope: "u:1".into(),
+            text: "hi".into(),
+            at: Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+
+        let cases: Vec<(BusMessage, Topic)> = vec![
+            (
+                BusMessage::HandleIncomingMessage {
+                    inbound: inbound.clone(),
+                    resolved_agent_id: "a".into(),
+                },
+                Topic::HandleIncomingMessage,
+            ),
+            (BusMessage::CancelTask { trace_id }, Topic::CancelTask),
+            (
+                BusMessage::RunScheduledConsolidation,
+                Topic::RunScheduledConsolidation,
+            ),
+            (
+                BusMessage::MessageAccepted { trace_id },
+                Topic::MessageAccepted,
+            ),
+            (
+                BusMessage::ReplyReady {
+                    outbound: OutboundMessage {
+                        trace_id,
+                        channel_type: "t".into(),
+                        connector_id: "c".into(),
+                        conversation_scope: "s".into(),
+                        text: "r".into(),
+                        at: Utc::now(),
+                    },
+                },
+                Topic::ReplyReady,
+            ),
+            (
+                BusMessage::TaskFailed {
+                    trace_id,
+                    error: "e".into(),
+                },
+                Topic::TaskFailed,
+            ),
+            (
+                BusMessage::MemoryWriteRequested {
+                    session_key: "k".into(),
+                    speaker: "s".into(),
+                    text: "t".into(),
+                    importance: 0.5,
+                },
+                Topic::MemoryWriteRequested,
+            ),
+            (
+                BusMessage::NeedHumanApproval {
+                    trace_id,
+                    reason: "r".into(),
+                },
+                Topic::NeedHumanApproval,
+            ),
+            (
+                BusMessage::MemoryReadRequested {
+                    session_key: "k".into(),
+                    query: "q".into(),
+                },
+                Topic::MemoryReadRequested,
+            ),
+            (
+                BusMessage::ConsolidationCompleted {
+                    concepts_created: 0,
+                    concepts_updated: 0,
+                    episodes_processed: 0,
+                },
+                Topic::ConsolidationCompleted,
+            ),
+        ];
+
+        for (msg, expected_topic) in cases {
+            assert_eq!(Topic::from_message(&msg), expected_topic);
+        }
+    }
 }

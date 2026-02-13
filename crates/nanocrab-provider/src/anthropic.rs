@@ -505,6 +505,76 @@ mod tests {
         assert!(!ProviderErrorKind::InvalidRequest.is_retryable());
     }
 
+    #[test]
+    fn format_api_error_with_parsed_body() {
+        let parsed = Some(ApiError {
+            error: ApiErrorDetail {
+                r#type: "invalid_request_error".into(),
+                message: "messages: required".into(),
+            },
+        });
+        let err = format_api_error(StatusCode::BAD_REQUEST, parsed);
+        let text = err.to_string();
+        assert!(text.contains("400"));
+        assert!(text.contains("messages: required"));
+        assert!(!text.contains("[retryable]"));
+    }
+
+    #[test]
+    fn format_api_error_without_parsed_body() {
+        let err = format_api_error(StatusCode::INTERNAL_SERVER_ERROR, None);
+        let text = err.to_string();
+        assert!(text.contains("500"));
+        assert!(text.contains("[retryable]"));
+    }
+
+    #[test]
+    fn format_api_error_rate_limit_is_retryable() {
+        let parsed = Some(ApiError {
+            error: ApiErrorDetail {
+                r#type: "rate_limit_error".into(),
+                message: "too many requests".into(),
+            },
+        });
+        let err = format_api_error(StatusCode::TOO_MANY_REQUESTS, parsed);
+        let text = err.to_string();
+        assert!(text.contains("[retryable]"));
+        assert!(text.contains("429"));
+    }
+
+    #[test]
+    fn from_env_missing_key_returns_error() {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let result = AnthropicProvider::from_env("https://api.anthropic.com");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn parse_sse_event_unknown_type_returns_none() {
+        let event = serde_json::json!({
+            "type": "ping",
+            "data": {}
+        });
+        assert!(parse_sse_event(&event).is_none());
+    }
+
+    #[test]
+    fn api_request_without_system_omits_field() {
+        let req = ApiRequest {
+            model: "m".into(),
+            system: None,
+            max_tokens: 100,
+            messages: vec![],
+            stream: false,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("system").is_none());
+    }
+
     #[tokio::test]
     #[ignore]
     async fn integration_real_api_call() {

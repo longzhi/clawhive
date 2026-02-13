@@ -199,4 +199,150 @@ mod tests {
         assert_eq!(msg.mention_target, None);
         assert_eq!(msg.text, "hello");
     }
+
+    #[test]
+    fn event_inbound_serde_roundtrip() {
+        let inbound = InboundMessage {
+            trace_id: Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:1".into(),
+            user_scope: "user:2".into(),
+            text: "hello".into(),
+            at: Utc::now(),
+            thread_id: Some("thread-42".into()),
+            is_mention: true,
+            mention_target: Some("@bot".into()),
+        };
+        let event = Event::Inbound(inbound);
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: Event = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Event::Inbound(msg) => {
+                assert_eq!(msg.text, "hello");
+                assert_eq!(msg.thread_id, Some("thread-42".into()));
+                assert!(msg.is_mention);
+                assert_eq!(msg.mention_target, Some("@bot".into()));
+            }
+            _ => panic!("Expected Inbound variant"),
+        }
+    }
+
+    #[test]
+    fn event_outbound_serde_roundtrip() {
+        let outbound = OutboundMessage {
+            trace_id: Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:1".into(),
+            text: "reply".into(),
+            at: Utc::now(),
+        };
+        let event = Event::Outbound(outbound);
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: Event = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            Event::Outbound(msg) => assert_eq!(msg.text, "reply"),
+            _ => panic!("Expected Outbound variant"),
+        }
+    }
+
+    #[test]
+    fn bus_message_remaining_variants_serde() {
+        let trace_id = Uuid::new_v4();
+
+        let msg = BusMessage::CancelTask { trace_id };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(de, BusMessage::CancelTask { .. }));
+
+        let msg = BusMessage::RunScheduledConsolidation;
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(de, BusMessage::RunScheduledConsolidation));
+
+        let msg = BusMessage::MemoryWriteRequested {
+            session_key: "s:1".into(),
+            speaker: "user".into(),
+            text: "hello".into(),
+            importance: 0.8,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        match de {
+            BusMessage::MemoryWriteRequested { importance, .. } => {
+                assert!((importance - 0.8).abs() < f32::EPSILON);
+            }
+            _ => panic!("Expected MemoryWriteRequested"),
+        }
+
+        let msg = BusMessage::NeedHumanApproval {
+            trace_id,
+            reason: "risky action".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        match de {
+            BusMessage::NeedHumanApproval { reason, .. } => {
+                assert_eq!(reason, "risky action");
+            }
+            _ => panic!("Expected NeedHumanApproval"),
+        }
+
+        let msg = BusMessage::MemoryReadRequested {
+            session_key: "s:1".into(),
+            query: "find facts".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        match de {
+            BusMessage::MemoryReadRequested { query, .. } => {
+                assert_eq!(query, "find facts");
+            }
+            _ => panic!("Expected MemoryReadRequested"),
+        }
+
+        let msg = BusMessage::ConsolidationCompleted {
+            concepts_created: 3,
+            concepts_updated: 1,
+            episodes_processed: 10,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        match de {
+            BusMessage::ConsolidationCompleted {
+                concepts_created,
+                concepts_updated,
+                episodes_processed,
+            } => {
+                assert_eq!(concepts_created, 3);
+                assert_eq!(concepts_updated, 1);
+                assert_eq!(episodes_processed, 10);
+            }
+            _ => panic!("Expected ConsolidationCompleted"),
+        }
+
+        let msg = BusMessage::MessageAccepted { trace_id };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: BusMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(de, BusMessage::MessageAccepted { .. }));
+    }
+
+    #[test]
+    fn session_key_with_special_characters() {
+        let inbound = InboundMessage {
+            trace_id: Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg:special/id".into(),
+            conversation_scope: "group:chat:-100123".into(),
+            user_scope: "user:0".into(),
+            text: "".into(),
+            at: Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+        };
+        let key = SessionKey::from_inbound(&inbound);
+        assert_eq!(key.0, "telegram:tg:special/id:group:chat:-100123:user:0");
+    }
 }

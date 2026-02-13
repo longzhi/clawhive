@@ -896,4 +896,99 @@ mod tests {
         };
         assert!(ctx.to_prompt_text().is_empty());
     }
+
+    #[test]
+    fn memory_context_to_prompt_text_with_data() {
+        let ctx = MemoryContext {
+            recent_episodes: vec![Episode {
+                id: Uuid::new_v4(),
+                ts: Utc::now(),
+                session_id: "s:1".into(),
+                speaker: "user".into(),
+                text: "hello bot".into(),
+                tags: vec![],
+                importance: 0.5,
+                context_hash: None,
+                source_ref: None,
+            }],
+            relevant_episodes: vec![],
+            active_concepts: vec![Concept {
+                id: Uuid::new_v4(),
+                concept_type: ConceptType::Preference,
+                key: "lang".into(),
+                value: "Rust".into(),
+                confidence: 0.9,
+                evidence: vec![],
+                first_seen: Utc::now(),
+                last_verified: Utc::now(),
+                status: ConceptStatus::Active,
+            }],
+        };
+        let text = ctx.to_prompt_text();
+        assert!(text.contains("## Recent Conversation"));
+        assert!(text.contains("user: hello bot"));
+        assert!(text.contains("## Known Facts"));
+        assert!(text.contains("lang"));
+        assert!(text.contains("Rust"));
+        assert!(text.contains("0.9"));
+    }
+
+    #[tokio::test]
+    async fn get_concepts_by_type_filters_correctly() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .upsert_concept(make_concept("fact.one", "v1", ConceptStatus::Active))
+            .await
+            .unwrap();
+
+        let mut pref = make_concept("pref.theme", "dark", ConceptStatus::Active);
+        pref.concept_type = ConceptType::Preference;
+        store.upsert_concept(pref).await.unwrap();
+
+        let facts = store.get_concepts_by_type(ConceptType::Fact).await.unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].key, "fact.one");
+
+        let prefs = store
+            .get_concepts_by_type(ConceptType::Preference)
+            .await
+            .unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].key, "pref.theme");
+    }
+
+    #[tokio::test]
+    async fn retrieve_context_with_episodes_and_concepts() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .insert_episode(make_episode("session:ctx", "context query test", 0))
+            .await
+            .unwrap();
+        store
+            .upsert_concept(make_concept("ctx.key", "ctx value", ConceptStatus::Active))
+            .await
+            .unwrap();
+
+        let ctx = store
+            .retrieve_context("session:ctx", "context", 10, 20)
+            .await
+            .unwrap();
+        assert_eq!(ctx.recent_episodes.len(), 1);
+        assert!(!ctx.relevant_episodes.is_empty());
+        assert_eq!(ctx.active_concepts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_episodes_respects_time_window() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let mut old_ep = make_episode("s1", "old searchable", 0);
+        old_ep.ts = Utc::now() - TimeDelta::days(60);
+        store.insert_episode(old_ep).await.unwrap();
+
+        let results = store.search_episodes("searchable", 7, 10).await.unwrap();
+        assert!(results.is_empty());
+
+        let results = store.search_episodes("searchable", 90, 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+    }
 }

@@ -252,6 +252,55 @@ async fn orchestrator_creates_session() {
 }
 
 #[tokio::test]
+async fn echo_provider_returns_user_input() {
+    let mut registry = ProviderRegistry::new();
+    registry.register("echo", Arc::new(EchoProvider));
+    let aliases = HashMap::from([("echo".to_string(), "echo/model".to_string())]);
+    let router = LlmRouter::new(registry, aliases, vec![]);
+    let agent = test_agent("echo", vec![]);
+
+    let out = router.reply(&agent, "echo this back").await.unwrap();
+    assert_eq!(out, "echo this back");
+}
+
+#[tokio::test]
+async fn orchestrator_unknown_agent_returns_error() {
+    let mut registry = ProviderRegistry::new();
+    register_builtin_providers(&mut registry);
+    let aliases = HashMap::from([(
+        "sonnet".to_string(),
+        "anthropic/claude-sonnet-4-5".to_string(),
+    )]);
+    let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
+    let orch = make_orchestrator(registry, aliases, agents);
+
+    let err = orch
+        .handle_inbound(test_inbound("hello"), "nonexistent-agent")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("agent not found"));
+}
+
+#[tokio::test]
+async fn orchestrator_disabled_agent_still_reachable() {
+    let mut registry = ProviderRegistry::new();
+    register_builtin_providers(&mut registry);
+    let aliases = HashMap::from([(
+        "sonnet".to_string(),
+        "anthropic/claude-sonnet-4-5".to_string(),
+    )]);
+    let mut agent = test_full_agent("nanocrab-main", "sonnet", vec![]);
+    agent.enabled = false;
+    let orch = make_orchestrator(registry, aliases, vec![agent]);
+
+    let out = orch
+        .handle_inbound(test_inbound("hello"), "nanocrab-main")
+        .await
+        .unwrap();
+    assert!(!out.text.is_empty());
+}
+
+#[tokio::test]
 async fn orchestrator_publishes_reply_ready() {
     let mut registry = ProviderRegistry::new();
     register_builtin_providers(&mut registry);

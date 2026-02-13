@@ -153,4 +153,34 @@ mod tests {
         assert!(got_final);
         assert!(collected.contains("stub:stream"));
     }
+
+    #[tokio::test]
+    async fn stub_provider_chat_returns_expected_format() {
+        let provider = StubProvider;
+        let req = LlmRequest::simple("my-model".into(), None, "ping".into());
+        let resp = provider.chat(req).await.unwrap();
+        assert!(resp.text.contains("stub:anthropic:my-model"));
+        assert!(resp.text.contains("ping"));
+        assert!(resp.text.contains("[finish]"));
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn stub_provider_chat_empty_messages() {
+        let provider = StubProvider;
+        let req = LlmRequest {
+            model: "m".into(),
+            system: None,
+            messages: vec![],
+            max_tokens: 100,
+        };
+        let resp = provider.chat(req).await.unwrap();
+        assert!(resp.text.contains("stub:anthropic:m"));
+    }
+
+    #[tokio::test]
+    async fn default_health_returns_ok() {
+        let provider = StubProvider;
+        assert!(provider.health().await.is_ok());
+    }
 }

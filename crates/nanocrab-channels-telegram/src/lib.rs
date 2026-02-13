@@ -180,4 +180,57 @@ mod tests {
         assert_eq!(msg.mention_target, None);
         assert_eq!(msg.thread_id, None);
     }
+
+    #[test]
+    fn render_outbound_formats_correctly() {
+        let adapter = TelegramAdapter::new("tg_main");
+        let outbound = OutboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:123".into(),
+            text: "hello world".into(),
+            at: chrono::Utc::now(),
+        };
+        let rendered = adapter.render_outbound(&outbound);
+        assert_eq!(rendered, "[telegram:chat:123] hello world");
+    }
+
+    #[test]
+    fn utf16_offset_ascii_basic() {
+        let result = utf16_offset_to_byte_idx("hello", 0);
+        assert_eq!(result, Some(0));
+        let result = utf16_offset_to_byte_idx("hello", 3);
+        assert_eq!(result, Some(3));
+        let result = utf16_offset_to_byte_idx("hello", 5);
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn utf16_offset_with_emoji() {
+        let text = "hi 👋 there";
+        let byte_idx = utf16_offset_to_byte_idx(text, 3);
+        assert_eq!(byte_idx, Some(3));
+        let byte_idx = utf16_offset_to_byte_idx(text, 5);
+        assert_eq!(byte_idx, Some(7));
+    }
+
+    #[test]
+    fn utf16_offset_out_of_range() {
+        let result = utf16_offset_to_byte_idx("hi", 10);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn utf16_range_to_byte_range_basic() {
+        let result = utf16_range_to_byte_range("@bot hello", 0, 4);
+        assert_eq!(result, Some((0, 4)));
+    }
+
+    #[test]
+    fn adapter_to_inbound_negative_chat_id() {
+        let adapter = TelegramAdapter::new("tg");
+        let msg = adapter.to_inbound(-100123, 456, "group msg");
+        assert_eq!(msg.conversation_scope, "chat:-100123");
+    }
 }
