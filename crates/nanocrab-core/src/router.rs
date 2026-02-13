@@ -279,8 +279,9 @@ mod tests {
         async fn stream(
             &self,
             _request: LlmRequest,
-        ) -> anyhow::Result<std::pin::Pin<Box<dyn futures_core::Stream<Item = anyhow::Result<StreamChunk>> + Send>>>
-        {
+        ) -> anyhow::Result<
+            std::pin::Pin<Box<dyn futures_core::Stream<Item = anyhow::Result<StreamChunk>> + Send>>,
+        > {
             let chunks = vec![
                 Ok(StreamChunk {
                     delta: "hello ".into(),
@@ -320,13 +321,7 @@ mod tests {
         let router = LlmRouter::new(registry, aliases, vec![]);
 
         let resp = router
-            .chat(
-                "model",
-                &[],
-                None,
-                vec![LlmMessage::user("hi")],
-                100,
-            )
+            .chat("model", &[], None, vec![LlmMessage::user("hi")], 100)
             .await
             .unwrap();
         assert!(resp.text.contains("ok after 2 retries"));
@@ -341,13 +336,7 @@ mod tests {
         let router = LlmRouter::new(registry, aliases, vec![]);
 
         let result = router
-            .chat(
-                "model",
-                &[],
-                None,
-                vec![LlmMessage::user("hi")],
-                100,
-            )
+            .chat("model", &[], None, vec![LlmMessage::user("hi")], 100)
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("401"));
@@ -391,7 +380,13 @@ mod tests {
         let router = LlmRouter::new(registry, aliases, vec![]);
 
         let stream = router
-            .stream("bad", &["good".into()], None, vec![LlmMessage::user("hi")], 100)
+            .stream(
+                "bad",
+                &["good".into()],
+                None,
+                vec![LlmMessage::user("hi")],
+                100,
+            )
             .await;
         assert!(stream.is_ok());
     }

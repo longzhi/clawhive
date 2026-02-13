@@ -231,8 +231,7 @@ mod tests {
         (Gateway::new(orch, routing, publisher, rate_limiter), tmp)
     }
 
-    async fn make_gateway_with_receivers(
-    ) -> (
+    async fn make_gateway_with_receivers() -> (
         Gateway,
         tokio::sync::mpsc::Receiver<BusMessage>,
         tokio::sync::mpsc::Receiver<BusMessage>,
@@ -256,7 +255,8 @@ mod tests {
         let session_writer = SessionWriter::new(tmp.path());
         let session_reader = SessionReader::new(tmp.path());
         let search_index = SearchIndex::new(memory.db());
-        let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+        let embedding_provider: Arc<dyn EmbeddingProvider> =
+            Arc::new(StubEmbeddingProvider::new(8));
         let agents = vec![FullAgentConfig {
             agent_id: "nanocrab-main".into(),
             enabled: true,
@@ -525,10 +525,11 @@ mod tests {
 
         let _ = gw.handle_inbound(inbound).await.unwrap();
 
-        let incoming = tokio::time::timeout(std::time::Duration::from_millis(200), incoming_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let incoming =
+            tokio::time::timeout(std::time::Duration::from_millis(200), incoming_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         match incoming {
             BusMessage::HandleIncomingMessage {
                 inbound,
@@ -542,10 +543,11 @@ mod tests {
             _ => panic!("expected HandleIncomingMessage event"),
         }
 
-        let accepted = tokio::time::timeout(std::time::Duration::from_millis(200), accepted_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(200), accepted_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         assert!(matches!(
             accepted,
             BusMessage::MessageAccepted { trace_id } if trace_id == expected_trace

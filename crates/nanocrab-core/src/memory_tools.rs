@@ -15,10 +15,7 @@ pub struct MemorySearchTool {
 }
 
 impl MemorySearchTool {
-    pub fn new(
-        search_index: SearchIndex,
-        embedding_provider: Arc<dyn EmbeddingProvider>,
-    ) -> Self {
+    pub fn new(search_index: SearchIndex, embedding_provider: Arc<dyn EmbeddingProvider>) -> Self {
         Self {
             search_index,
             embedding_provider,

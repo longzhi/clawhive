@@ -8,8 +8,8 @@ use nanocrab_bus::BusPublisher;
 use nanocrab_memory::embedding::EmbeddingProvider;
 use nanocrab_memory::file_store::MemoryFileStore;
 use nanocrab_memory::search_index::SearchIndex;
-use nanocrab_memory::{SessionReader, SessionWriter};
 use nanocrab_memory::{Episode, MemoryStore};
+use nanocrab_memory::{SessionReader, SessionWriter};
 use nanocrab_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use nanocrab_runtime::TaskExecutor;
 use nanocrab_schema::*;
@@ -290,7 +290,9 @@ impl Orchestrator {
             format!("{system_prompt}\n\n{skill_summary}")
         };
 
-        let memory_context = self.build_memory_context(&session_key, &inbound.text).await?;
+        let memory_context = self
+            .build_memory_context(&session_key, &inbound.text)
+            .await?;
 
         let history_messages = match self
             .session_reader
@@ -306,7 +308,9 @@ impl Orchestrator {
 
         let mut messages = Vec::new();
         if !memory_context.is_empty() {
-            messages.push(LlmMessage::user(format!("[memory context]\n{memory_context}")));
+            messages.push(LlmMessage::user(format!(
+                "[memory context]\n{memory_context}"
+            )));
             messages.push(LlmMessage::assistant("Understood, I have the context."));
         }
         for hist_msg in &history_messages {
@@ -384,10 +388,7 @@ impl Orchestrator {
                 tools: tool_defs.clone(),
             };
 
-            let resp = self
-                .router
-                .chat_with_tools(primary, fallbacks, req)
-                .await?;
+            let resp = self.router.chat_with_tools(primary, fallbacks, req).await?;
 
             let tool_uses: Vec<_> = resp
                 .content

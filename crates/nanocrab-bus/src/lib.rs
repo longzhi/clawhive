@@ -311,5 +311,4 @@ mod tests {
             assert_eq!(Topic::from_message(&msg), expected_topic);
         }
     }
-
 }

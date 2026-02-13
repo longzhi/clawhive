@@ -109,9 +109,7 @@ mod tests {
     #[tokio::test]
     async fn registry_execute_unknown_tool() {
         let registry = ToolRegistry::new();
-        let result = registry
-            .execute("nonexistent", serde_json::json!({}))
-            .await;
+        let result = registry.execute("nonexistent", serde_json::json!({})).await;
         assert!(result.is_err());
     }
 }

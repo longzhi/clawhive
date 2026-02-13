@@ -61,7 +61,9 @@ impl ToolExecutor for SubAgentTool {
             .ok_or_else(|| anyhow::anyhow!("missing 'task' field"))?
             .to_string();
 
-        let timeout_seconds = input["timeout_seconds"].as_u64().unwrap_or(self.default_timeout);
+        let timeout_seconds = input["timeout_seconds"]
+            .as_u64()
+            .unwrap_or(self.default_timeout);
 
         let req = SubAgentRequest {
             parent_run_id: Uuid::new_v4(),

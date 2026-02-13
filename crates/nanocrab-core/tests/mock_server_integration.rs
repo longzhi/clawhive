@@ -418,8 +418,7 @@ async fn mock_server_includes_session_history() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(mock_anthropic_response("reply with history")),
+            ResponseTemplate::new(200).set_body_json(mock_anthropic_response("reply with history")),
         )
         .mount(&server)
         .await;

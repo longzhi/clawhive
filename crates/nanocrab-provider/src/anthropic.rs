@@ -171,7 +171,10 @@ impl LlmProvider for AnthropicProvider {
                 "tool_use" => {
                     let id = block.id.as_ref()?.clone();
                     let name = block.name.as_ref()?.clone();
-                    let input = block.input.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+                    let input = block
+                        .input
+                        .clone()
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
                     Some(crate::ContentBlock::ToolUse { id, name, input })
                 }
                 _ => None,
