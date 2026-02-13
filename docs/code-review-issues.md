@@ -7,12 +7,14 @@
 
 ## Issue #1: Bus 是旁路，非主链路驱动
 
-**状态：** 🟡 待讨论  
+**状态：** 🟡 M2/M3 延期  
 **模块：** `nanocrab-gateway`, `nanocrab-bus`  
 **描述：**  
 当前消息流是 TelegramBot → Gateway → Orchestrator 的直接同步调用链，Bus 仅用于旁路通知（`MessageAccepted` / `ReplyReady` / `TaskFailed`）。与 MVP 技术文档 §3 设计的「Command/Event 驱动」模式有差距。  
 **影响：** 模块耦合度高于预期，后续接入新通道或做异步编排时需要重构调用方式。  
 **建议：** MVP 阶段可接受，但应在 M2/M3 阶段将主链路切换为 Bus 驱动（Gateway publish Command → Core subscribe 处理 → publish Event → Gateway 回写）。
+
+> **MVP 决定：** 保持当前 Bus 旁路架构，M2/M3 阶段再切换为 Bus 驱动主链路。
 
 ---
 
@@ -44,7 +46,7 @@
 
 ## Issue #4: Runtime `execute()` 语义不明确
 
-**状态：** 🟡 待讨论  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-runtime`  
 **描述：**  
 `runtime.execute()` 在 `handle_inbound` 中被调用了两次：
@@ -53,9 +55,7 @@
 
 从上下文看 `NativeExecutor` 可能是 pass-through（原样返回），但语义不清晰——用户输入为什么需要经过 runtime execute？LLM 输出又为什么需要？  
 **影响：** 代码可读性差，后续维护者容易困惑。如果 execute 有副作用，可能产生非预期行为。  
-**建议：**  
-1. 明确 `TaskExecutor::execute()` 的职责文档
-2. 如果是为后续 WASM 预留，考虑拆分为 `preprocess_input()` 和 `postprocess_output()` 两个语义明确的方法
+**修复：** `TaskExecutor::execute()` 拆分为 `preprocess_input()`（用户输入预处理）和 `postprocess_output()`（LLM 输出后处理），语义明确。NativeExecutor 两者均为 passthrough，WasmExecutor 预留沙箱处理。
 
 ---
 
@@ -83,35 +83,29 @@
 
 ## Issue #7: Bus 事件无消费者
 
-**状态：** 🟡 待修复  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-bus`  
 **描述：**  
 Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，但没有任何代码订阅和消费这些事件。Bus 处于"发了没人听"的状态。  
 **影响：** Bus 占用代码但无实际作用，TUI 面板和审计日志也没有数据源。  
-**建议：**  
-1. MVP 阶段至少接入 TUI 面板消费 `MessageAccepted` / `ReplyReady` / `TaskFailed`
-2. 接入审计日志 writer 消费关键事件写入 SQLite
-3. Bus 定位已明确为旁路广播（见 MVP 文档 §2.1 / §12），不参与主链路
+**修复：** TUI 已订阅并处理全部 10 种事件类型。6 种事件（CancelTask、RunScheduledConsolidation、MemoryWriteRequested、NeedHumanApproval、MemoryReadRequested、ConsolidationCompleted）暂无生产代码发布——属于功能占位，待对应功能实现时自然接入。
 
 ---
 
 ## Issue #8: SubAgentRunner 未接入 Orchestrator
 
-**状态：** 🔴 待修复  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-core/subagent.rs`  
 **描述：**  
 `SubAgentRunner` 骨架已实现（spawn/cancel/wait_result/result_merge），但 Orchestrator 中没有任何代码使用它。Sub-Agent 能力处于"写了但没接上"的状态。  
 **影响：** MVP 文档 §6 明确要求 Sub-Agent 为必做项，当前无法使用。  
-**建议：**  
-1. 在 Orchestrator 中持有 `SubAgentRunner` 实例
-2. 定义触发条件：可先通过 LLM 文本标记（如 `[delegate: agent_id] task`）或未来通过 tool_use 触发
-3. spawn 结果合并回 parent 上下文后继续生成
+**修复：** 创建 `SubAgentTool` 实现 `ToolExecutor` trait，通过 `delegate_task` 工具名注册到 `ToolRegistry`。LLM 可通过 tool_use 调用触发 sub-agent spawn，同步等待结果返回。Orchestrator 在 `new()` 中自动创建 `SubAgentRunner` 并注册该工具。
 
 ---
 
 ## Issue #9: 流式输出链路未打通（Provider 已实现，上层未接入）
 
-**状态：** 🔴 待修复  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-core/router.rs`, `nanocrab-core/orchestrator.rs`, `nanocrab-tui`  
 **描述：**  
 `AnthropicProvider::stream()` 和 `StreamChunk` 类型已完整实现（SSE 解析、三种事件类型），但上层链路完全未接入：
@@ -120,11 +114,11 @@ Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，
 - TUI 没有 Chat 面板消费 stream
 
 **影响：** TUI 作为本地 Chat 入口无法提供流式交互体验，与 Claude Code 类似的逐字输出无法实现。  
-**建议：**  
-1. `LlmRouter` 加 `stream()` 方法（路由到 provider.stream()，支持 fallback）
-2. `Orchestrator` 加 `handle_inbound_stream()` 返回 `Stream<StreamChunk>`
-3. TUI Chat 面板消费 stream + tool use 交替执行循环
-4. Telegram 等远程通道的流式回复（send + edit）留作后续优化
+**修复：** 三层打通：
+1. `LlmRouter::stream()` — 路由到 provider.stream()，支持 fallback（仅在 stream 启动前）
+2. `Orchestrator::handle_inbound_stream()` — tool_use_loop 保持阻塞，最终响应流式返回，同时发布 `StreamDelta` bus 事件
+3. TUI `StreamDelta` handler — Logs 面板实时显示流式 delta
+4. `BusMessage::StreamDelta` + `Topic::StreamDelta` — schema/bus 层新增流式事件类型
 
 ---
 
