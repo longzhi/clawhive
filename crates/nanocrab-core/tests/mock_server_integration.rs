@@ -447,3 +447,47 @@ async fn mock_server_includes_session_history() {
         "Should have 4 messages: 2 user + 2 assistant"
     );
 }
+
+#[tokio::test]
+async fn mock_server_tool_use_loop() {
+    let server = MockServer::start().await;
+
+    let tool_use_response = serde_json::json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Let me search memory..."},
+            {"type": "tool_use", "id": "toolu_1", "name": "memory_search", "input": {"query": "test"}}
+        ],
+        "model": "claude-sonnet-4-5",
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 20}
+    });
+
+    let final_response = mock_anthropic_response("Here is what I found in memory.");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tool_use_response))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(final_response))
+        .mount(&server)
+        .await;
+
+    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let bus = EventBus::new(16);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
+
+    let out = orch
+        .handle_inbound(test_inbound("search my memory"), "nanocrab-main")
+        .await
+        .unwrap();
+    assert!(out.text.contains("Here is what I found"));
+}

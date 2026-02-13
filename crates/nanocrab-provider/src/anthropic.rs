@@ -60,6 +60,16 @@ impl AnthropicProvider {
     }
 
     pub(crate) fn to_api_request(request: LlmRequest) -> ApiRequest {
+        let tools: Vec<ApiToolDef> = request
+            .tools
+            .into_iter()
+            .map(|t| ApiToolDef {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+            })
+            .collect();
+
         ApiRequest {
             model: request.model,
             system: request.system,
@@ -68,13 +78,45 @@ impl AnthropicProvider {
                 .messages
                 .into_iter()
                 .map(|m| {
-                    let content = m.text();
-                    ApiMessage {
-                        role: m.role,
-                        content,
+                    let has_non_text = m
+                        .content
+                        .iter()
+                        .any(|b| !matches!(b, crate::ContentBlock::Text { .. }));
+                    if has_non_text {
+                        // Send as array for tool_use/tool_result messages
+                        let blocks: Vec<serde_json::Value> = m
+                            .content
+                            .iter()
+                            .map(|b| match b {
+                                crate::ContentBlock::Text { text } => {
+                                    serde_json::json!({"type": "text", "text": text})
+                                }
+                                crate::ContentBlock::ToolUse { id, name, input } => {
+                                    serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})
+                                }
+                                crate::ContentBlock::ToolResult {
+                                    tool_use_id,
+                                    content,
+                                    is_error,
+                                } => {
+                                    serde_json::json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
+                                }
+                            })
+                            .collect();
+                        ApiMessage {
+                            role: m.role,
+                            content: serde_json::Value::Array(blocks),
+                        }
+                    } else {
+                        let text = m.text();
+                        ApiMessage {
+                            role: m.role,
+                            content: serde_json::Value::String(text),
+                        }
                     }
                 })
                 .collect(),
+            tools: if tools.is_empty() { None } else { Some(tools) },
             stream: false,
         }
     }
@@ -121,11 +163,18 @@ impl LlmProvider for AnthropicProvider {
         let content_blocks: Vec<crate::ContentBlock> = body
             .content
             .iter()
-            .filter_map(|block| {
-                block
+            .filter_map(|block| match block.block_type.as_str() {
+                "text" => block
                     .text
                     .as_ref()
-                    .map(|t| crate::ContentBlock::Text { text: t.clone() })
+                    .map(|t| crate::ContentBlock::Text { text: t.clone() }),
+                "tool_use" => {
+                    let id = block.id.as_ref()?.clone();
+                    let name = block.name.as_ref()?.clone();
+                    let input = block.input.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+                    Some(crate::ContentBlock::ToolUse { id, name, input })
+                }
+                _ => None,
             })
             .collect();
         let text = body
@@ -317,6 +366,8 @@ pub(crate) struct ApiRequest {
     pub system: Option<String>,
     pub max_tokens: u32,
     pub messages: Vec<ApiMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ApiToolDef>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
 }
@@ -324,7 +375,14 @@ pub(crate) struct ApiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ApiMessage {
     pub role: String,
-    pub content: String,
+    pub content: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ApiToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +398,12 @@ pub(crate) struct ApiContentBlock {
     pub block_type: String,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +540,7 @@ mod tests {
             system: None,
             max_tokens: 1024,
             messages: vec![],
+            tools: None,
             stream: false,
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -486,6 +551,7 @@ mod tests {
             system: None,
             max_tokens: 1024,
             messages: vec![],
+            tools: None,
             stream: true,
         };
         let json_stream = serde_json::to_value(&req_stream).unwrap();
@@ -581,6 +647,7 @@ mod tests {
             system: None,
             max_tokens: 100,
             messages: vec![],
+            tools: None,
             stream: false,
         };
         let json = serde_json::to_value(&req).unwrap();

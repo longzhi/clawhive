@@ -8,15 +8,17 @@ use nanocrab_memory::file_store::MemoryFileStore;
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::{SessionReader, SessionWriter};
 use nanocrab_memory::{Episode, MemoryStore};
-use nanocrab_provider::LlmMessage;
+use nanocrab_provider::{ContentBlock, LlmMessage, LlmRequest};
 use nanocrab_runtime::TaskExecutor;
 use nanocrab_schema::*;
 
 use super::config::FullAgentConfig;
+use super::memory_tools::{MemoryGetTool, MemorySearchTool};
 use super::persona::Persona;
 use super::router::LlmRouter;
 use super::session::SessionManager;
 use super::skill::SkillRegistry;
+use super::tool::ToolRegistry;
 
 pub struct Orchestrator {
     router: LlmRouter,
@@ -32,6 +34,7 @@ pub struct Orchestrator {
     session_reader: SessionReader,
     search_index: SearchIndex,
     embedding_provider: Arc<dyn EmbeddingProvider>,
+    tool_registry: ToolRegistry,
     react_max_steps: usize,
     react_repeat_guard: usize,
 }
@@ -57,6 +60,14 @@ impl Orchestrator {
             .into_iter()
             .map(|a| (a.agent_id.clone(), a))
             .collect();
+
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(MemorySearchTool::new(
+            search_index.clone(),
+            embedding_provider.clone(),
+        )));
+        tool_registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
+
         Self {
             router,
             agents: agents_map,
@@ -71,6 +82,7 @@ impl Orchestrator {
             session_reader,
             search_index,
             embedding_provider,
+            tool_registry,
             react_max_steps: 4,
             react_repeat_guard: 2,
         }
@@ -153,15 +165,16 @@ impl Orchestrator {
             self.runtime.execute(&inbound.text).await?,
         ));
 
-        let reply_text = self
-            .weak_react_loop(
+        let resp = self
+            .tool_use_loop(
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt),
                 messages,
+                2048,
             )
             .await?;
-        let reply_text = self.runtime.execute(&reply_text).await?;
+        let reply_text = self.runtime.execute(&resp.text).await?;
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
@@ -227,6 +240,79 @@ impl Orchestrator {
         Ok(outbound)
     }
 
+    async fn tool_use_loop(
+        &self,
+        primary: &str,
+        fallbacks: &[String],
+        system: Option<String>,
+        initial_messages: Vec<LlmMessage>,
+        max_tokens: u32,
+    ) -> Result<nanocrab_provider::LlmResponse> {
+        let mut messages = initial_messages;
+        let tool_defs = self.tool_registry.tool_defs();
+        let max_iterations = 10;
+
+        for _iteration in 0..max_iterations {
+            let req = LlmRequest {
+                model: primary.into(),
+                system: system.clone(),
+                messages: messages.clone(),
+                max_tokens,
+                tools: tool_defs.clone(),
+            };
+
+            let resp = self
+                .router
+                .chat_with_tools(primary, fallbacks, req)
+                .await?;
+
+            let tool_uses: Vec<_> = resp
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => {
+                        Some((id.clone(), name.clone(), input.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            if tool_uses.is_empty() || resp.stop_reason.as_deref() != Some("tool_use") {
+                return Ok(resp);
+            }
+
+            messages.push(LlmMessage {
+                role: "assistant".into(),
+                content: resp.content.clone(),
+            });
+
+            let mut tool_results = Vec::new();
+            for (id, name, input) in tool_uses {
+                let result = match self.tool_registry.execute(&name, input).await {
+                    Ok(output) => ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content: output.content,
+                        is_error: output.is_error,
+                    },
+                    Err(e) => ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content: format!("Tool execution error: {e}"),
+                        is_error: true,
+                    },
+                };
+                tool_results.push(result);
+            }
+
+            messages.push(LlmMessage {
+                role: "user".into(),
+                content: tool_results,
+            });
+        }
+
+        Err(anyhow!("tool use loop exceeded max iterations"))
+    }
+
+    #[allow(dead_code)]
     async fn weak_react_loop(
         &self,
         primary: &str,

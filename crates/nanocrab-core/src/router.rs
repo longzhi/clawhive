@@ -98,6 +98,62 @@ impl LlmRouter {
         Ok(resp.text)
     }
 
+    pub async fn chat_with_tools(
+        &self,
+        primary: &str,
+        fallbacks: &[String],
+        request: LlmRequest,
+    ) -> Result<LlmResponse> {
+        let mut candidates = vec![primary.to_string()];
+        candidates.extend(fallbacks.iter().cloned());
+        candidates.extend(self.global_fallbacks.clone());
+
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for candidate in candidates {
+            let resolved = self.resolve_model(&candidate)?;
+            let (provider_id, model_id) = parse_provider_model(&resolved)?;
+            let provider = self.registry.get(&provider_id)?;
+
+            let mut attempts = 0;
+            loop {
+                let req = LlmRequest {
+                    model: model_id.clone(),
+                    system: request.system.clone(),
+                    messages: request.messages.clone(),
+                    max_tokens: request.max_tokens,
+                    tools: request.tools.clone(),
+                };
+
+                match provider.chat(req).await {
+                    Ok(resp) => return Ok(resp),
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        let is_retryable = err_str.contains("[retryable]");
+
+                        if is_retryable && attempts < MAX_RETRIES {
+                            attempts += 1;
+                            let backoff = BASE_BACKOFF_MS * (1 << (attempts - 1));
+                            tracing::warn!(
+                                "provider {provider_id} retryable error (attempt {attempts}/{MAX_RETRIES}), backing off {backoff}ms: {err_str}"
+                            );
+                            time::sleep(time::Duration::from_millis(backoff)).await;
+                            continue;
+                        }
+
+                        tracing::warn!(
+                            "provider {provider_id} failed (retryable={is_retryable}, attempts={attempts}): {err_str}"
+                        );
+                        last_err = Some(err);
+                        break;
+                    }
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("no model candidate available")))
+    }
+
     fn resolve_model(&self, raw: &str) -> Result<String> {
         if raw.contains('/') {
             return Ok(raw.to_string());

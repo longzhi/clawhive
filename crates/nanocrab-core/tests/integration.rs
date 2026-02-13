@@ -279,23 +279,19 @@ async fn orchestrator_handles_inbound_to_outbound() {
 }
 
 #[tokio::test]
-async fn weak_react_stops_on_repeat_guard() {
+async fn tool_use_loop_returns_directly_without_tool_calls() {
     let mut registry = ProviderRegistry::new();
     registry.register("echo", Arc::new(ThinkingEchoProvider));
 
     let aliases = HashMap::from([("echo".to_string(), "echo/model".to_string())]);
     let agents = vec![test_full_agent("nanocrab-main", "echo", vec![])];
     let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
-    let orch = orch.with_react_config(WeakReActConfig {
-        max_steps: 4,
-        repeat_guard: 1,
-    });
 
     let out = orch
         .handle_inbound(test_inbound("loop"), "nanocrab-main")
         .await
         .unwrap();
-    assert!(out.text.contains("weak-react"));
+    assert!(out.text.contains("[think] still processing"));
 }
 
 #[tokio::test]
