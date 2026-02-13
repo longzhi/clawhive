@@ -1444,7 +1444,9 @@ name = "nanocrab-memory"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
