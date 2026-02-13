@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use nanocrab_memory::embedding::EmbeddingProvider;
 use nanocrab_memory::file_store::MemoryFileStore;
+use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_provider::LlmMessage;
 
 use super::router::LlmRouter;
@@ -23,12 +25,16 @@ pub struct HippocampusConsolidator {
     model_primary: String,
     model_fallbacks: Vec<String>,
     lookback_days: usize,
+    search_index: Option<SearchIndex>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    reindex_file_store: Option<MemoryFileStore>,
 }
 
 #[derive(Debug)]
 pub struct ConsolidationReport {
     pub daily_files_read: usize,
     pub memory_updated: bool,
+    pub reindexed: bool,
     pub summary: String,
 }
 
@@ -45,11 +51,29 @@ impl HippocampusConsolidator {
             model_primary,
             model_fallbacks,
             lookback_days: 7,
+            search_index: None,
+            embedding_provider: None,
+            reindex_file_store: None,
         }
     }
 
     pub fn with_lookback_days(mut self, days: usize) -> Self {
         self.lookback_days = days;
+        self
+    }
+
+    pub fn with_search_index(mut self, index: SearchIndex) -> Self {
+        self.search_index = Some(index);
+        self
+    }
+
+    pub fn with_embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embedding_provider = Some(provider);
+        self
+    }
+
+    pub fn with_file_store_for_reindex(mut self, file_store: MemoryFileStore) -> Self {
+        self.reindex_file_store = Some(file_store);
         self
     }
 
@@ -64,6 +88,7 @@ impl HippocampusConsolidator {
             return Ok(ConsolidationReport {
                 daily_files_read: 0,
                 memory_updated: false,
+                reindexed: false,
                 summary: "No daily files found in lookback window; skipped consolidation."
                     .to_string(),
             });
@@ -93,9 +118,29 @@ impl HippocampusConsolidator {
         let updated_memory = strip_markdown_fence(&response.text);
         self.file_store.write_long_term(&updated_memory).await?;
 
+        let reindexed = if let (Some(index), Some(provider), Some(fs)) = (
+            &self.search_index,
+            &self.embedding_provider,
+            &self.reindex_file_store,
+        ) {
+            match index.index_all(fs, provider.as_ref()).await {
+                Ok(count) => {
+                    tracing::info!("Post-consolidation reindex: {count} chunks indexed");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("Post-consolidation reindex failed: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
         Ok(ConsolidationReport {
             daily_files_read: recent_daily.len(),
             memory_updated: true,
+            reindexed,
             summary: format!(
                 "Consolidated {} daily files into MEMORY.md.",
                 recent_daily.len()
@@ -168,6 +213,8 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Result;
+    use async_trait::async_trait;
+    use nanocrab_memory::embedding::EmbeddingProvider;
     use nanocrab_memory::file_store::MemoryFileStore;
     use nanocrab_provider::{ProviderRegistry, StubProvider};
     use tempfile::TempDir;
@@ -196,11 +243,13 @@ mod tests {
         let report = ConsolidationReport {
             daily_files_read: 0,
             memory_updated: false,
+            reindexed: false,
             summary: "none".to_string(),
         };
 
         assert_eq!(report.daily_files_read, 0);
         assert!(!report.memory_updated);
+        assert!(!report.reindexed);
         assert_eq!(report.summary, "none");
     }
 
@@ -253,5 +302,81 @@ mod tests {
         assert!(!report.memory_updated);
         assert!(report.summary.contains("No daily files found"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_triggers_reindex_after_write() -> Result<()> {
+        use chrono::Local;
+        use nanocrab_memory::search_index::SearchIndex;
+        use nanocrab_memory::store::MemoryStore;
+
+        // Create temp dir and file store
+        let (_dir, file_store) = build_file_store()?;
+
+        // Write MEMORY.md
+        file_store
+            .write_long_term("# Existing Memory\n\nSome knowledge.")
+            .await?;
+
+        // Write today's daily file
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Today's Observations\n\nLearned something new.")
+            .await?;
+
+        // Create in-memory MemoryStore and SearchIndex
+        let memory_store = MemoryStore::open_in_memory()?;
+        let search_index = SearchIndex::new(memory_store.db());
+
+        // Create a stub embedding provider
+        let embedding_provider = Arc::new(StubEmbeddingProvider);
+
+        // Create consolidator with re-indexing enabled
+        let consolidator = HippocampusConsolidator::new(
+            file_store.clone(),
+            build_router(),
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_search_index(search_index.clone())
+        .with_embedding_provider(embedding_provider)
+        .with_file_store_for_reindex(file_store);
+
+        // Run consolidation
+        let report = consolidator.consolidate().await?;
+
+        // Verify consolidation succeeded
+        assert!(report.memory_updated);
+        assert_eq!(report.daily_files_read, 1);
+
+        // Verify re-indexing happened
+        assert!(report.reindexed);
+
+        Ok(())
+    }
+
+    struct StubEmbeddingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for StubEmbeddingProvider {
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> anyhow::Result<nanocrab_memory::embedding::EmbeddingResult> {
+            let embeddings = texts.iter().map(|_| vec![0.1; 384]).collect();
+            Ok(nanocrab_memory::embedding::EmbeddingResult {
+                embeddings,
+                model: "stub".to_string(),
+                dimensions: 384,
+            })
+        }
+
+        fn model_id(&self) -> &str {
+            "stub"
+        }
+
+        fn dimensions(&self) -> usize {
+            384
+        }
     }
 }

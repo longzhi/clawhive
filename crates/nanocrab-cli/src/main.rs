@@ -12,7 +12,9 @@ use nanocrab_channels::telegram::TelegramBot;
 use nanocrab_channels::ChannelBot;
 use nanocrab_core::*;
 use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
-use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
+use nanocrab_memory::embedding::{
+    EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
+};
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{
@@ -361,7 +363,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
     let session_writer = nanocrab_memory::SessionWriter::new(&workspace_dir);
     let session_reader = nanocrab_memory::SessionReader::new(&workspace_dir);
     let search_index = SearchIndex::new(memory.db());
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+    let embedding_provider = build_embedding_provider(&config);
 
     let orchestrator = Arc::new(Orchestrator::new(
         router,
@@ -460,17 +462,88 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     LlmRouter::new(registry, aliases, vec![])
 }
 
+fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvider> {
+    let embedding_config = &config.main.embedding;
+
+    // Check if embedding is disabled or provider is not openai
+    if !embedding_config.enabled || embedding_config.provider != "openai" {
+        tracing::info!(
+            "Embedding provider disabled or not openai (provider: {}), using stub",
+            embedding_config.provider
+        );
+        return Arc::new(StubEmbeddingProvider::new(8));
+    }
+
+    // Read API key from environment
+    let api_key = std::env::var(&embedding_config.api_key_env).unwrap_or_default();
+    if api_key.is_empty() {
+        tracing::warn!(
+            "OpenAI embedding API key not set (env: {}), using stub provider",
+            embedding_config.api_key_env
+        );
+        return Arc::new(StubEmbeddingProvider::new(8));
+    }
+
+    // Create OpenAI embedding provider with configured model and dimensions
+    let provider = OpenAiEmbeddingProvider::with_model(
+        api_key,
+        embedding_config.model.clone(),
+        embedding_config.dimensions,
+    )
+    .with_base_url(embedding_config.base_url.clone());
+
+    tracing::info!(
+        "OpenAI embedding provider initialized (model: {}, dimensions: {})",
+        embedding_config.model,
+        embedding_config.dimensions
+    );
+
+    Arc::new(provider)
+}
+
 async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
-    let (bus, _memory, gateway, config) = bootstrap(root)?;
+    let (bus, memory, gateway, config) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
-    let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
-    let consolidator = Arc::new(HippocampusConsolidator::new(
-        file_store,
-        Arc::new(build_router_from_config(&config)),
-        "sonnet".to_string(),
-        vec!["haiku".to_string()],
-    ));
+    let file_store_for_consolidation =
+        nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let consolidation_search_index = nanocrab_memory::search_index::SearchIndex::new(memory.db());
+    let consolidation_embedding_provider = build_embedding_provider(&config);
+
+    {
+        let startup_index = consolidation_search_index.clone();
+        let startup_fs = file_store_for_consolidation.clone();
+        let startup_ep = consolidation_embedding_provider.clone();
+        tokio::task::spawn(async move {
+            if let Err(e) = startup_index.ensure_vec_table(startup_ep.dimensions()) {
+                tracing::warn!("Failed to ensure vec table at startup: {e}");
+                return;
+            }
+            match startup_index
+                .index_all(&startup_fs, startup_ep.as_ref())
+                .await
+            {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!("Startup indexing: {count} chunks indexed");
+                    }
+                }
+                Err(e) => tracing::warn!("Startup indexing failed: {e}"),
+            }
+        });
+    }
+
+    let consolidator = Arc::new(
+        HippocampusConsolidator::new(
+            file_store_for_consolidation.clone(),
+            Arc::new(build_router_from_config(&config)),
+            "sonnet".to_string(),
+            vec!["haiku".to_string()],
+        )
+        .with_search_index(consolidation_search_index)
+        .with_embedding_provider(consolidation_embedding_provider)
+        .with_file_store_for_reindex(file_store_for_consolidation),
+    );
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
     let _consolidation_handle = scheduler.start();
     tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
@@ -565,16 +638,23 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, _memory, _gateway, config) = bootstrap(root)?;
+    let (_bus, memory, _gateway, config) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
-    let consolidator = Arc::new(HippocampusConsolidator::new(
-        file_store,
-        Arc::new(build_router_from_config(&config)),
-        "sonnet".to_string(),
-        vec!["haiku".to_string()],
-    ));
+    let consolidation_search_index = nanocrab_memory::search_index::SearchIndex::new(memory.db());
+    let consolidation_embedding_provider = build_embedding_provider(&config);
+    let consolidator = Arc::new(
+        HippocampusConsolidator::new(
+            file_store.clone(),
+            Arc::new(build_router_from_config(&config)),
+            "sonnet".to_string(),
+            vec!["haiku".to_string()],
+        )
+        .with_search_index(consolidation_search_index)
+        .with_embedding_provider(consolidation_embedding_provider)
+        .with_file_store_for_reindex(file_store),
+    );
 
     let scheduler = ConsolidationScheduler::new(consolidator, 24);
     println!("Running hippocampus consolidation...");
@@ -582,6 +662,7 @@ async fn run_consolidate(root: &Path) -> Result<()> {
     println!("Consolidation complete:");
     println!("  Daily files read: {}", report.daily_files_read);
     println!("  Memory updated: {}", report.memory_updated);
+    println!("  Reindexed: {}", report.reindexed);
     println!("  Summary: {}", report.summary);
     Ok(())
 }

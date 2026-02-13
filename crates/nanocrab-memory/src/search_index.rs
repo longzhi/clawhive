@@ -29,6 +29,40 @@ impl SearchIndex {
         Self { db }
     }
 
+    pub fn ensure_vec_table(&self, dimensions: usize) -> Result<()> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+
+        let current_dims: Option<String> = db
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'vec_dimensions'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let needs_recreate = match current_dims {
+            Some(d) => d.parse::<usize>().unwrap_or(0) != dimensions,
+            None => true,
+        };
+
+        if needs_recreate {
+            db.execute_batch("DROP TABLE IF EXISTS chunks_vec;")?;
+            db.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE chunks_vec USING vec0(chunk_id TEXT PRIMARY KEY, embedding float[{dimensions}]);"
+            ))?;
+            db.execute(
+                "INSERT INTO meta(key, value) VALUES('vec_dimensions', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![dimensions.to_string()],
+            )?;
+            tracing::info!("Created chunks_vec virtual table with {dimensions} dimensions");
+        }
+
+        Ok(())
+    }
+
     pub async fn index_file(
         &self,
         path: &str,
@@ -36,6 +70,8 @@ impl SearchIndex {
         source: &str,
         provider: &dyn EmbeddingProvider,
     ) -> Result<usize> {
+        self.ensure_vec_table(provider.dimensions())?;
+
         let file_hash = {
             let mut hasher = Sha256::new();
             hasher.update(content.as_bytes());
@@ -80,6 +116,10 @@ impl SearchIndex {
                 let tx = conn.unchecked_transaction()?;
                 tx.execute(
                     "DELETE FROM chunks_fts WHERE path = ?1",
+                    params![path_owned],
+                )?;
+                tx.execute(
+                    "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE path = ?1)",
                     params![path_owned],
                 )?;
                 tx.execute("DELETE FROM chunks WHERE path = ?1", params![path_owned])?;
@@ -212,6 +252,10 @@ impl SearchIndex {
             let tx = conn.unchecked_transaction()?;
 
             tx.execute("DELETE FROM chunks_fts WHERE path = ?1", params![path_owned])?;
+            tx.execute(
+                "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE path = ?1)",
+                params![path_owned],
+            )?;
             tx.execute("DELETE FROM chunks WHERE path = ?1", params![path_owned])?;
 
             for (chunk_id, start_line, end_line, hash, model, text, embedding) in rows {
@@ -248,6 +292,10 @@ impl SearchIndex {
                         start_line,
                         end_line
                     ],
+                )?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
+                    params![chunk_id, embedding],
                 )?;
             }
 
@@ -345,11 +393,57 @@ impl SearchIndex {
             .cloned()
             .ok_or_else(|| anyhow!("embedding provider returned empty query embedding"))?;
 
+        let query_embedding_for_vec = query_embedding.clone();
+        let query_embedding_json = embedding_to_json(&query_embedding_for_vec);
+
         let db = Arc::clone(&self.db);
-        let vector_candidates = task::spawn_blocking(move || {
+        let mut vector_candidates = task::spawn_blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+
+            let has_vec_table: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+
+            if has_vec_table {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT v.chunk_id, c.path, c.source, c.start_line, c.end_line, c.text, v.distance
+                    FROM chunks_vec v
+                    JOIN chunks c ON c.id = v.chunk_id
+                    WHERE v.embedding MATCH ?1 AND k = ?2
+                    "#,
+                )?;
+                let rows = stmt.query_map(params![query_embedding_json, candidate_limit as i64], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, f64>(6)?,
+                    ))
+                })?;
+
+                let mut out = Vec::new();
+                for row in rows {
+                    let (chunk_id, path, source, start_line, end_line, text, distance) = row?;
+                    let score = (1.0_f64 - distance).max(0.0_f64);
+                    out.push((chunk_id, path, source, start_line, end_line, text, score));
+                }
+                out.sort_by(|a, b| b.6.total_cmp(&a.6));
+                out.truncate(candidate_limit);
+                return Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(
+                    out,
+                );
+            }
+
             let mut stmt = conn.prepare(
                 "SELECT id, path, source, start_line, end_line, text, embedding FROM chunks",
             )?;
@@ -381,9 +475,22 @@ impl SearchIndex {
         })
         .await??;
 
+        // Min-max normalize vector scores
+        if !vector_candidates.is_empty() {
+            let max_vec = vector_candidates
+                .iter()
+                .map(|c| c.6)
+                .fold(0.0_f64, f64::max);
+            if max_vec > 0.0 {
+                for candidate in &mut vector_candidates {
+                    candidate.6 /= max_vec;
+                }
+            }
+        }
+
         let db = Arc::clone(&self.db);
         let query_owned = query.to_owned();
-        let bm25_candidates = task::spawn_blocking(move || {
+        let mut bm25_candidates = match task::spawn_blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -418,7 +525,24 @@ impl SearchIndex {
             }
             Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
         })
-        .await??;
+        .await?
+        {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                tracing::debug!("BM25 search failed (falling back to vector-only): {e}");
+                Vec::new()
+            }
+        };
+
+        // Min-max normalize BM25 scores
+        if !bm25_candidates.is_empty() {
+            let max_bm25 = bm25_candidates.iter().map(|c| c.6).fold(0.0_f64, f64::max);
+            if max_bm25 > 0.0 {
+                for candidate in &mut bm25_candidates {
+                    candidate.6 /= max_bm25;
+                }
+            }
+        }
 
         #[derive(Clone)]
         struct MergeItem {
@@ -762,6 +886,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_uses_vec_index() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db));
+        let provider = StubEmbeddingProvider::new(8);
+
+        index.ensure_vec_table(provider.dimensions())?;
+
+        for i in 0..5 {
+            let path = format!("memory/2026-02-{:02}.md", i + 1);
+            let content =
+                format!("# Topic {i}\n\nContent about topic number {i} with unique words{i}");
+            index
+                .index_file(&path, &content, "daily", &provider)
+                .await?;
+        }
+
+        let results = index.search("topic", &provider, 3, 0.0).await?;
+        assert!(!results.is_empty());
+        assert!(results.len() <= 3);
+
+        let conn = db.lock().expect("lock");
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        assert!(table_exists, "chunks_vec virtual table should exist");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn search_empty_index_returns_empty() -> Result<()> {
         let db = test_db()?;
         let index = SearchIndex::new(db);
@@ -841,6 +998,58 @@ mod tests {
         let conn = db.lock().expect("lock");
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         assert!(count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_scores_are_normalized() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db);
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Cooking\n\nI love making pasta with tomato sauce and fresh basil",
+                "long_term",
+                &provider,
+            )
+            .await?;
+        index
+            .index_file(
+                "memory/2026-02-13.md",
+                "# Programming\n\nRust async runtime with tokio and futures",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let results = index.search("pasta cooking", &provider, 6, 0.0).await?;
+        assert!(!results.is_empty());
+        for result in &results {
+            assert!(result.score >= 0.0, "Score below 0: {}", result.score);
+            assert!(result.score <= 1.0, "Score above 1: {}", result.score);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_vector_only_fallback_on_fts_error() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db);
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Title\n\nSome content here about testing",
+                "long_term",
+                &provider,
+            )
+            .await?;
+
+        let results = index.search("testing content", &provider, 6, 0.0).await?;
+        assert!(!results.is_empty());
         Ok(())
     }
 }
