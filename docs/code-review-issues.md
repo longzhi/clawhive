@@ -29,7 +29,7 @@
 
 ## Issue #3: Session 不加载历史对话
 
-**状态：** 🔴 待修复  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-core/orchestrator.rs`  
 **描述：**  
 `Orchestrator::handle_inbound()` 中 `SessionManager::get_or_create()` 只管理 session 元数据（创建/续期/过期），没有将 session 内的历史对话消息加入 LLM 的 messages 列表。当前每次对话只有：
@@ -38,10 +38,7 @@
 
 缺少 conversation history（最近 N 轮对话），导致 agent 无法进行连续多轮对话。  
 **影响：** 用户体验：agent 没有短期对话记忆，每次都像新对话。  
-**建议：**  
-1. 在 `handle_inbound` 中从 `episodes` 表查询当前 session 最近 N 条记录（按 `session_id` + 时间排序）
-2. 将历史对话作为 messages 注入到 LLM 请求中（在 memory context 之后、当前用户消息之前）
-3. 可配置窗口大小（如 `session.history_window: 20`）
+**修复：** `handle_inbound` 通过 `SessionReader::load_recent_messages()` 加载最近 10 条对话历史，注入到 memory context 之后、当前用户消息之前的 LLM messages 列表中。Session JSONL 作为历史来源。
 
 ---
 
@@ -64,14 +61,12 @@
 
 ## Issue #5: Weak ReAct 缺少 Prompt 指令
 
-**状态：** 🔴 待修复  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-core/persona.rs`  
 **描述：**  
 `weak_react_loop()` 依赖 LLM 输出特定标记（`[think]`、`[action]`、`[finish]`）来驱动循环，但当前没有看到在 system prompt 中注入这些标记的使用说明。Persona 的 `assembled_system_prompt()` 和 Skill 的 `summary_prompt()` 中是否包含 ReAct 指令需要确认。  
 **影响：** 如果 LLM 不知道这些标记的存在，永远不会输出 `[think]`/`[action]`，ReAct 循环实际上退化为单轮调用。  
-**建议：**  
-1. 在 system prompt 组装阶段注入 Weak ReAct 的行为指令模板
-2. 或在 `Orchestrator` 中硬编码一段 ReAct instruction 拼接到 system prompt 末尾
+**修复：** `tool_use_loop` 取代 `weak_react_loop` 作为主循环。通过 Anthropic 原生 tool calling API（`tool_use` stop_reason + `tool_result` messages）驱动多轮工具调用，不再依赖文本标记。`ToolRegistry` 注册 `memory_search` 和 `memory_get` 工具，定义通过 JSON Schema 传递给 API。
 
 ---
 
