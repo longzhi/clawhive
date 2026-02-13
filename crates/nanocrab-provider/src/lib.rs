@@ -96,6 +96,7 @@ impl LlmProvider for StubProvider {
                     input_tokens: None,
                     output_tokens: None,
                     stop_reason: None,
+                    content_blocks: vec![],
                 })
             })
             .collect();
@@ -106,6 +107,7 @@ impl LlmProvider for StubProvider {
             input_tokens: Some(10),
             output_tokens: Some(20),
             stop_reason: Some("end_turn".into()),
+            content_blocks: vec![],
         }));
 
         let stream = stream_iter(chunks);

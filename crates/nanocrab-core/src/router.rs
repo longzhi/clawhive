@@ -289,6 +289,7 @@ mod tests {
                     input_tokens: None,
                     output_tokens: None,
                     stop_reason: None,
+                    content_blocks: vec![],
                 }),
                 Ok(StreamChunk {
                     delta: "world".into(),
@@ -296,6 +297,7 @@ mod tests {
                     input_tokens: None,
                     output_tokens: None,
                     stop_reason: None,
+                    content_blocks: vec![],
                 }),
                 Ok(StreamChunk {
                     delta: String::new(),
@@ -303,6 +305,7 @@ mod tests {
                     input_tokens: Some(5),
                     output_tokens: Some(10),
                     stop_reason: Some("end_turn".into()),
+                    content_blocks: vec![],
                 }),
             ];
             Ok(Box::pin(tokio_stream::iter(chunks)))

@@ -114,6 +114,8 @@ pub struct StreamChunk {
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
     pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_blocks: Vec<ContentBlock>,
 }
 
 #[cfg(test)]

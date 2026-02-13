@@ -281,6 +281,7 @@ fn parse_sse_stream(
     async_stream::stream! {
         tokio::pin!(byte_stream);
         let mut buffer = String::new();
+        let mut tool_accumulators: Vec<ToolCallAccumulator> = Vec::new();
 
         while let Some(chunk_result) = byte_stream.next().await {
             match chunk_result {
@@ -302,7 +303,7 @@ fn parse_sse_stream(
 
                             match serde_json::from_str::<ApiStreamChunk>(data) {
                                 Ok(event) => {
-                                    if let Some(chunk) = parse_sse_event(&event) {
+                                    if let Some(chunk) = parse_sse_event(&event, &mut tool_accumulators) {
                                         yield Ok(chunk);
                                     }
                                 }
@@ -323,8 +324,32 @@ fn parse_sse_stream(
     }
 }
 
-fn parse_sse_event(event: &ApiStreamChunk) -> Option<StreamChunk> {
+fn parse_sse_event(
+    event: &ApiStreamChunk,
+    tool_accumulators: &mut Vec<ToolCallAccumulator>,
+) -> Option<StreamChunk> {
     let choice = event.choices.first()?;
+
+    if let Some(tool_calls) = &choice.delta.tool_calls {
+        for tc in tool_calls {
+            let idx = tc.index as usize;
+            while tool_accumulators.len() <= idx {
+                tool_accumulators.push(ToolCallAccumulator::default());
+            }
+            let acc = &mut tool_accumulators[idx];
+            if let Some(id) = &tc.id {
+                acc.id = id.clone();
+            }
+            if let Some(f) = &tc.function {
+                if let Some(name) = &f.name {
+                    acc.name = name.clone();
+                }
+                if let Some(args) = &f.arguments {
+                    acc.arguments.push_str(args);
+                }
+            }
+        }
+    }
 
     if let Some(text) = &choice.delta.content {
         if !text.is_empty() {
@@ -334,21 +359,47 @@ fn parse_sse_event(event: &ApiStreamChunk) -> Option<StreamChunk> {
                 input_tokens: None,
                 output_tokens: None,
                 stop_reason: None,
+                content_blocks: vec![],
             });
         }
     }
 
     if choice.finish_reason.is_some() {
+        let content_blocks = drain_tool_accumulators(tool_accumulators);
         return Some(StreamChunk {
             delta: String::new(),
             is_final: true,
             input_tokens: event.usage.as_ref().map(|u| u.prompt_tokens),
             output_tokens: event.usage.as_ref().map(|u| u.completion_tokens),
             stop_reason: normalize_finish_reason(choice.finish_reason.clone()),
+            content_blocks,
         });
     }
 
     None
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolCallAccumulator {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn drain_tool_accumulators(accumulators: &mut Vec<ToolCallAccumulator>) -> Vec<ContentBlock> {
+    accumulators
+        .drain(..)
+        .filter(|acc| !acc.id.is_empty())
+        .map(|acc| {
+            let input = serde_json::from_str::<serde_json::Value>(&acc.arguments)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            ContentBlock::ToolUse {
+                id: acc.id,
+                name: acc.name,
+                input,
+            }
+        })
+        .collect()
 }
 
 fn normalize_finish_reason(reason: Option<String>) -> Option<String> {
@@ -472,6 +523,25 @@ pub(crate) struct ApiStreamChoice {
 pub(crate) struct ApiStreamDelta {
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ApiStreamToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ApiStreamToolCall {
+    pub index: u32,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub function: Option<ApiStreamFunctionDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ApiStreamFunctionDelta {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,9 +701,11 @@ mod tests {
             "choices": [{"delta": {"content": "Hel"}, "finish_reason": null}]
         }))
         .unwrap();
-        let chunk = parse_sse_event(&event).unwrap();
+        let mut acc = Vec::new();
+        let chunk = parse_sse_event(&event, &mut acc).unwrap();
         assert_eq!(chunk.delta, "Hel");
         assert!(!chunk.is_final);
+        assert!(chunk.content_blocks.is_empty());
     }
 
     #[test]
@@ -643,11 +715,13 @@ mod tests {
             "usage": {"prompt_tokens": 8, "completion_tokens": 4}
         }))
         .unwrap();
-        let chunk = parse_sse_event(&event).unwrap();
+        let mut acc = Vec::new();
+        let chunk = parse_sse_event(&event, &mut acc).unwrap();
         assert!(chunk.is_final);
         assert_eq!(chunk.input_tokens, Some(8));
         assert_eq!(chunk.output_tokens, Some(4));
         assert_eq!(chunk.stop_reason.as_deref(), Some("end_turn"));
+        assert!(chunk.content_blocks.is_empty());
     }
 
     #[test]
@@ -692,5 +766,138 @@ mod tests {
             normalize_finish_reason(Some("stop".into())).as_deref(),
             Some("end_turn")
         );
+    }
+
+    #[test]
+    fn streaming_tool_calls_single_tool_accumulation() {
+        let mut acc = Vec::new();
+
+        let e1: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": ""}}
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        assert!(parse_sse_event(&e1, &mut acc).is_none());
+        assert_eq!(acc.len(), 1);
+        assert_eq!(acc[0].id, "call_1");
+        assert_eq!(acc[0].name, "weather");
+
+        let e2: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{\"ci"}}
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        assert!(parse_sse_event(&e2, &mut acc).is_none());
+
+        let e3: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "ty\": \"shanghai\"}"}}
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        assert!(parse_sse_event(&e3, &mut acc).is_none());
+
+        let e_final: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }))
+        .unwrap();
+        let chunk = parse_sse_event(&e_final, &mut acc).unwrap();
+        assert!(chunk.is_final);
+        assert_eq!(chunk.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(chunk.content_blocks.len(), 1);
+        assert!(
+            matches!(&chunk.content_blocks[0], ContentBlock::ToolUse { id, name, input }
+                if id == "call_1" && name == "weather" && input["city"] == "shanghai")
+        );
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn streaming_tool_calls_multiple_tools() {
+        let mut acc = Vec::new();
+
+        let e1: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": ""}},
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        parse_sse_event(&e1, &mut acc);
+
+        let e2: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 1, "id": "call_2", "type": "function", "function": {"name": "time", "arguments": ""}},
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        parse_sse_event(&e2, &mut acc);
+        assert_eq!(acc.len(), 2);
+
+        let e3: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{\"city\":\"tokyo\"}"}}
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        parse_sse_event(&e3, &mut acc);
+
+        let e4: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [
+                {"index": 1, "function": {"arguments": "{\"zone\":\"JST\"}"}}
+            ]}, "finish_reason": null}]
+        }))
+        .unwrap();
+        parse_sse_event(&e4, &mut acc);
+
+        let e_final: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10}
+        }))
+        .unwrap();
+        let chunk = parse_sse_event(&e_final, &mut acc).unwrap();
+        assert_eq!(chunk.content_blocks.len(), 2);
+        assert!(
+            matches!(&chunk.content_blocks[0], ContentBlock::ToolUse { name, .. } if name == "weather")
+        );
+        assert!(
+            matches!(&chunk.content_blocks[1], ContentBlock::ToolUse { name, .. } if name == "time")
+        );
+    }
+
+    #[test]
+    fn streaming_text_then_finish_no_tool_blocks() {
+        let mut acc = Vec::new();
+
+        let e1: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"content": "hello"}, "finish_reason": null}]
+        }))
+        .unwrap();
+        let chunk = parse_sse_event(&e1, &mut acc).unwrap();
+        assert_eq!(chunk.delta, "hello");
+        assert!(chunk.content_blocks.is_empty());
+
+        let e_final: ApiStreamChunk = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+        }))
+        .unwrap();
+        let chunk = parse_sse_event(&e_final, &mut acc).unwrap();
+        assert!(chunk.is_final);
+        assert!(chunk.content_blocks.is_empty());
+    }
+
+    #[test]
+    fn streaming_tool_calls_malformed_json_falls_back_to_empty_object() {
+        let mut acc = vec![ToolCallAccumulator {
+            id: "call_1".into(),
+            name: "broken".into(),
+            arguments: "not valid json{{{".into(),
+        }];
+        let blocks = drain_tool_accumulators(&mut acc);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], ContentBlock::ToolUse { input, .. } if input.is_object()));
     }
 }

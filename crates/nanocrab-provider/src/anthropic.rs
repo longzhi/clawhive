@@ -301,6 +301,7 @@ fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
                 input_tokens: None,
                 output_tokens: None,
                 stop_reason: None,
+                content_blocks: vec![],
             })
         }
         "message_delta" => {
@@ -321,6 +322,7 @@ fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
                 input_tokens: None,
                 output_tokens,
                 stop_reason,
+                content_blocks: vec![],
             })
         }
         "message_start" => {
@@ -337,6 +339,7 @@ fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
                 input_tokens,
                 output_tokens: None,
                 stop_reason: None,
+                content_blocks: vec![],
             })
         }
         _ => None,
