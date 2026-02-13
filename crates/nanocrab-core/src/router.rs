@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 
 use anyhow::{anyhow, Result};
-use nanocrab_provider::{LlmMessage, LlmRequest, LlmResponse, ProviderRegistry};
+use futures_core::Stream;
+use nanocrab_provider::{LlmMessage, LlmRequest, LlmResponse, ProviderRegistry, StreamChunk};
 use tokio::time;
 
 const MAX_RETRIES: usize = 2;
@@ -154,6 +156,45 @@ impl LlmRouter {
         Err(last_err.unwrap_or_else(|| anyhow!("no model candidate available")))
     }
 
+    pub async fn stream(
+        &self,
+        primary: &str,
+        fallbacks: &[String],
+        system: Option<String>,
+        messages: Vec<LlmMessage>,
+        max_tokens: u32,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        let mut candidates = vec![primary.to_string()];
+        candidates.extend(fallbacks.iter().cloned());
+        candidates.extend(self.global_fallbacks.clone());
+
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for candidate in candidates {
+            let resolved = self.resolve_model(&candidate)?;
+            let (provider_id, model_id) = parse_provider_model(&resolved)?;
+            let provider = self.registry.get(&provider_id)?;
+
+            let req = LlmRequest {
+                model: model_id,
+                system: system.clone(),
+                messages: messages.clone(),
+                max_tokens,
+                tools: vec![],
+            };
+
+            match provider.stream(req).await {
+                Ok(stream) => return Ok(stream),
+                Err(err) => {
+                    tracing::warn!("provider {provider_id} stream failed: {err}");
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("no model candidate available for streaming")))
+    }
+
     fn resolve_model(&self, raw: &str) -> Result<String> {
         if raw.contains('/') {
             return Ok(raw.to_string());
@@ -183,7 +224,10 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use nanocrab_provider::{LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry};
+    use nanocrab_provider::{
+        LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry, StreamChunk,
+    };
+    use tokio_stream::StreamExt;
 
     use super::LlmRouter;
 
@@ -215,6 +259,52 @@ mod tests {
     impl LlmProvider for PermanentFailProvider {
         async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
             anyhow::bail!("anthropic api error (401): unauthorized")
+        }
+    }
+
+    struct StubStreamProvider;
+
+    #[async_trait]
+    impl LlmProvider for StubStreamProvider {
+        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+            Ok(LlmResponse {
+                text: "chat".into(),
+                content: vec![],
+                input_tokens: None,
+                output_tokens: None,
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: LlmRequest,
+        ) -> anyhow::Result<std::pin::Pin<Box<dyn futures_core::Stream<Item = anyhow::Result<StreamChunk>> + Send>>>
+        {
+            let chunks = vec![
+                Ok(StreamChunk {
+                    delta: "hello ".into(),
+                    is_final: false,
+                    input_tokens: None,
+                    output_tokens: None,
+                    stop_reason: None,
+                }),
+                Ok(StreamChunk {
+                    delta: "world".into(),
+                    is_final: false,
+                    input_tokens: None,
+                    output_tokens: None,
+                    stop_reason: None,
+                }),
+                Ok(StreamChunk {
+                    delta: String::new(),
+                    is_final: true,
+                    input_tokens: Some(5),
+                    output_tokens: Some(10),
+                    stop_reason: Some("end_turn".into()),
+                }),
+            ];
+            Ok(Box::pin(tokio_stream::iter(chunks)))
         }
     }
 
@@ -261,5 +351,48 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn stream_returns_chunks() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("test", Arc::new(StubStreamProvider));
+        let aliases = HashMap::from([("model".to_string(), "test/model".to_string())]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+
+        let mut stream = router
+            .stream("model", &[], None, vec![LlmMessage::user("hi")], 100)
+            .await
+            .unwrap();
+
+        let mut collected = String::new();
+        let mut got_final = false;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            if chunk.is_final {
+                got_final = true;
+            } else {
+                collected.push_str(&chunk.delta);
+            }
+        }
+        assert!(got_final);
+        assert_eq!(collected, "hello world");
+    }
+
+    #[tokio::test]
+    async fn stream_falls_back_on_failure() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("fail", Arc::new(PermanentFailProvider));
+        registry.register("test", Arc::new(StubStreamProvider));
+        let aliases = HashMap::from([
+            ("bad".to_string(), "fail/model".to_string()),
+            ("good".to_string(), "test/model".to_string()),
+        ]);
+        let router = LlmRouter::new(registry, aliases, vec![]);
+
+        let stream = router
+            .stream("bad", &["good".into()], None, vec![LlmMessage::user("hi")], 100)
+            .await;
+        assert!(stream.is_ok());
     }
 }

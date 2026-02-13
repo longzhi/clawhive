@@ -14,6 +14,8 @@ tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+futures-core = "0.3"
+tokio-stream = "0.1"
 nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-memory = { path = "../nanocrab-memory" }
