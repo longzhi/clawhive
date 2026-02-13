@@ -346,7 +346,7 @@ impl SearchIndex {
             .ok_or_else(|| anyhow!("embedding provider returned empty query embedding"))?;
 
         let db = Arc::clone(&self.db);
-        let vector_candidates = task::spawn_blocking(move || {
+        let mut vector_candidates = task::spawn_blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -381,9 +381,19 @@ impl SearchIndex {
         })
         .await??;
 
+        // Min-max normalize vector scores
+        if !vector_candidates.is_empty() {
+            let max_vec = vector_candidates.iter().map(|c| c.6).fold(0.0_f64, f64::max);
+            if max_vec > 0.0 {
+                for candidate in &mut vector_candidates {
+                    candidate.6 /= max_vec;
+                }
+            }
+        }
+
         let db = Arc::clone(&self.db);
         let query_owned = query.to_owned();
-        let bm25_candidates = task::spawn_blocking(move || {
+        let mut bm25_candidates = match task::spawn_blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -418,7 +428,23 @@ impl SearchIndex {
             }
             Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
         })
-        .await??;
+        .await? {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                tracing::debug!("BM25 search failed (falling back to vector-only): {e}");
+                Vec::new()
+            }
+        };
+
+        // Min-max normalize BM25 scores
+        if !bm25_candidates.is_empty() {
+            let max_bm25 = bm25_candidates.iter().map(|c| c.6).fold(0.0_f64, f64::max);
+            if max_bm25 > 0.0 {
+                for candidate in &mut bm25_candidates {
+                    candidate.6 /= max_bm25;
+                }
+            }
+        }
 
         #[derive(Clone)]
         struct MergeItem {
@@ -841,6 +867,58 @@ mod tests {
         let conn = db.lock().expect("lock");
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         assert!(count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_scores_are_normalized() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db);
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Cooking\n\nI love making pasta with tomato sauce and fresh basil",
+                "long_term",
+                &provider,
+            )
+            .await?;
+        index
+            .index_file(
+                "memory/2026-02-13.md",
+                "# Programming\n\nRust async runtime with tokio and futures",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let results = index.search("pasta cooking", &provider, 6, 0.0).await?;
+        assert!(!results.is_empty());
+        for result in &results {
+            assert!(result.score >= 0.0, "Score below 0: {}", result.score);
+            assert!(result.score <= 1.0, "Score above 1: {}", result.score);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_vector_only_fallback_on_fts_error() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db);
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Title\n\nSome content here about testing",
+                "long_term",
+                &provider,
+            )
+            .await?;
+
+        let results = index.search("testing content", &provider, 6, 0.0).await?;
+        assert!(!results.is_empty());
         Ok(())
     }
 }

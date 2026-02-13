@@ -543,7 +543,7 @@ impl Orchestrator {
     async fn build_memory_context(&self, _session_key: &SessionKey, query: &str) -> Result<String> {
         let results = self
             .search_index
-            .search(query, self.embedding_provider.as_ref(), 6, 0.35)
+            .search(query, self.embedding_provider.as_ref(), 6, 0.25)
             .await;
 
         match results {
