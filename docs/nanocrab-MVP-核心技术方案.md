@@ -178,9 +178,10 @@ Prompt 注入（top-K chunks）
 
 并行两路检索，融合重排：
 
-- **sqlite-vec 向量检索**：语义相似度召回（权重 0.5）
+- **sqlite-vec 向量检索**：语义相似度召回（权重 0.7）
 - **FTS5 全文检索**：BM25 关键词匹配（权重 0.3）
-- **新近性加权**：基于文件日期衰减（权重 0.2）
+- 默认参数：maxResults=6, minScore=0.35, candidateMultiplier=4
+- chunk 大小 ~400 tokens，overlap ~80 tokens
 
 > 零外部依赖：SQLite 内置 FTS5 + sqlite-vec 扩展。
 

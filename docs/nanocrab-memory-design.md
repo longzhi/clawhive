@@ -119,30 +119,82 @@ workspace/
 
 ### 3.1 索引构建
 
-Markdown 文件变化时（启动时全量 + 运行时增量），构建 SQLite 检索索引：
+Markdown 文件变化时（启动时全量 + 运行时 watch 增量），构建 SQLite 检索索引。
 
-```
-Markdown 文件
-  │
-  ├── 按 heading 分块（## 级别切分）
-  │   └── 超长段落退化为固定窗口（~512 tokens）
-  │
-  ├── 每个 chunk 生成 embedding → sqlite-vec
-  │
-  └── 每个 chunk 文本 → FTS5 全文索引
-```
+> 以下 schema 与 OpenClaw 对齐。
 
-**chunks 表：**
+**分块参数（对齐 OpenClaw 默认值）：**
+- chunk 目标大小：~400 tokens
+- chunk 重叠：~80 tokens
+- 超长段落退化为固定窗口切分
+
+#### SQLite Schema
+
+**表 1：`meta`（索引元数据）**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | INTEGER | 主键 |
-| file_path | TEXT | 来源文件路径 |
-| heading | TEXT | 所属 heading |
-| content | TEXT | chunk 文本 |
-| embedding | BLOB | 向量（sqlite-vec） |
-| char_offset | INTEGER | 在文件中的字符偏移 |
+| key | TEXT (PK) | 元数据键 |
+| value | TEXT | 元数据值（如 embedding provider/model fingerprint，用于判断是否需要 reindex） |
+
+**表 2：`files`（已索引文件快照）**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| path | TEXT (PK) | 文件路径 |
+| source | TEXT | 来源分类（`memory` / `sessions`） |
+| hash | TEXT | 文件内容哈希（增量更新判断） |
+| mtime | INTEGER | 文件修改时间 |
+| size | INTEGER | 文件大小 |
+
+**表 3：`chunks`（分块 + embedding）**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | TEXT (PK) | chunk 唯一标识 |
+| path | TEXT | 来源文件路径 |
+| source | TEXT | 来源分类（`memory`） |
+| start_line | INTEGER | 在文件中的起始行号 |
+| end_line | INTEGER | 在文件中的结束行号 |
+| hash | TEXT | chunk 内容哈希（增量判断） |
+| model | TEXT | 生成 embedding 的模型标识 |
+| text | TEXT | chunk 原文 |
+| embedding | TEXT | 向量（JSON 序列化） |
 | updated_at | INTEGER | 最后索引时间 |
+
+**表 4：`embedding_cache`（跨模型 embedding 缓存）**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| provider | TEXT | embedding provider |
+| model | TEXT | embedding model |
+| provider_key | TEXT | provider 标识 |
+| hash | TEXT | 内容哈希 |
+| embedding | TEXT | 向量（JSON 序列化） |
+| dims | INTEGER | 向量维度 |
+| updated_at | INTEGER | 缓存时间 |
+| | | **PK: (provider, model, provider_key, hash)** |
+
+**FTS5 虚拟表：`chunks_fts`**
+
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+  text,
+  id UNINDEXED,
+  path UNINDEXED,
+  source UNINDEXED,
+  model UNINDEXED,
+  start_line UNINDEXED,
+  end_line UNINDEXED
+);
+```
+
+#### 增量更新策略
+
+1. 启动时扫描 memory 文件，对比 `files` 表的 hash/mtime
+2. 仅 hash 变化的文件重新分块 + 重新 embedding
+3. **Reindex 触发**：当 `meta` 表中的 embedding provider/model fingerprint 变化时，全量重建索引
+4. **运行时 watch**：监听 `memory/` 目录文件变化（debounce），增量更新
 
 ### 3.2 混合检索（Hybrid Search）
 
@@ -161,18 +213,20 @@ Markdown 文件
   │
   ▼  融合重排
   │
-  finalScore = vectorScore × 0.5
-             + bm25Score × 0.3
-             + recencyScore × 0.2
+  finalScore = vectorScore × 0.7 + bm25Score × 0.3
   │
   ▼  返回 top-K chunks
 ```
 
-**融合细节：**
-- `vectorScore`：cosine similarity，归一化到 0-1
-- `bm25Score`：`1.0 / (1.0 + max(0, bm25_rank))`，归一化
-- `recencyScore`：基于文件日期衰减（MEMORY.md 永远为 1.0，daily files 按天数衰减）
-- candidatePool = maxResults × 4（先取多再排）
+**融合细节（对齐 OpenClaw 默认值）：**
+- `vectorWeight`：0.7（cosine similarity，归一化到 0-1）
+- `textWeight`：0.3（BM25 rank score，归一化）
+- `candidateMultiplier`：4（candidatePool = maxResults × 4，先取多再排）
+- `maxResults`：6
+- `minScore`：0.35（低于此分数的结果丢弃）
+- 两个权重之和归一化为 1.0（可配置调整比例）
+
+> OpenClaw 不使用 recency 权重，依赖 vector + BM25 已足够。如需 recency 加权可作为 nanocrab 扩展。
 
 ### 3.3 Prompt 注入
 
