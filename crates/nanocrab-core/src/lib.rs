@@ -1,20 +1,24 @@
 pub mod config;
 pub mod consolidation;
+pub mod memory_tools;
 pub mod orchestrator;
 pub mod persona;
 pub mod router;
 pub mod session;
 pub mod skill;
 pub mod subagent;
+pub mod tool;
 
 pub use config::*;
 pub use consolidation::*;
+pub use memory_tools::*;
 pub use orchestrator::*;
 pub use persona::*;
 pub use router::*;
 pub use session::*;
 pub use skill::*;
 pub use subagent::*;
+pub use tool::*;
 
 use serde::{Deserialize, Serialize};
 

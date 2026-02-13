@@ -5,6 +5,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 /// Manages MEMORY.md and memory/YYYY-MM-DD.md files
+#[derive(Clone)]
 pub struct MemoryFileStore {
     workspace: PathBuf,
 }
