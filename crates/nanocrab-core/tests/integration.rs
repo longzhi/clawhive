@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use nanocrab_bus::EventBus;
 use nanocrab_core::*;
 use nanocrab_memory::MemoryStore;
+use nanocrab_memory::{file_store::MemoryFileStore, SessionWriter};
 use nanocrab_provider::{
     register_builtin_providers, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry,
 };
@@ -97,22 +98,30 @@ fn make_orchestrator(
     registry: ProviderRegistry,
     aliases: HashMap<String, String>,
     agents: Vec<FullAgentConfig>,
-) -> Orchestrator {
+) -> (Orchestrator, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
     let router = LlmRouter::new(registry, aliases, vec![]);
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let publisher = bus.publisher();
     let session_mgr = SessionManager::new(memory.clone(), 1800);
+    let file_store = MemoryFileStore::new(tmp.path());
+    let session_writer = SessionWriter::new(tmp.path());
 
-    Orchestrator::new(
-        router,
-        agents,
-        HashMap::new(),
-        session_mgr,
-        SkillRegistry::new(),
-        memory,
-        publisher,
-        Arc::new(NativeExecutor),
+    (
+        Orchestrator::new(
+            router,
+            agents,
+            HashMap::new(),
+            session_mgr,
+            SkillRegistry::new(),
+            memory,
+            publisher,
+            Arc::new(NativeExecutor),
+            file_store,
+            session_writer,
+        ),
+        tmp,
     )
 }
 
@@ -173,7 +182,7 @@ async fn orchestrator_handles_inbound_to_outbound() {
         "anthropic/claude-sonnet-4-5".to_string(),
     )]);
     let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
-    let orch = make_orchestrator(registry, aliases, agents);
+    let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
 
     let out = orch
         .handle_inbound(test_inbound("hello"), "nanocrab-main")
@@ -189,7 +198,8 @@ async fn weak_react_stops_on_repeat_guard() {
 
     let aliases = HashMap::from([("echo".to_string(), "echo/model".to_string())]);
     let agents = vec![test_full_agent("nanocrab-main", "echo", vec![])];
-    let orch = make_orchestrator(registry, aliases, agents).with_react_config(WeakReActConfig {
+    let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
+    let orch = orch.with_react_config(WeakReActConfig {
         max_steps: 4,
         repeat_guard: 1,
     });
@@ -210,7 +220,7 @@ async fn orchestrator_new_with_full_deps() {
         "anthropic/claude-sonnet-4-5".to_string(),
     )]);
     let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
-    let orch = make_orchestrator(registry, aliases, agents);
+    let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
 
     let out = orch
         .handle_inbound(test_inbound("hello"), "nanocrab-main")
@@ -232,6 +242,9 @@ async fn orchestrator_creates_session() {
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
     let router = LlmRouter::new(registry, aliases, vec![]);
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file_store = MemoryFileStore::new(tmp.path());
+    let session_writer = SessionWriter::new(tmp.path());
     let orch = Orchestrator::new(
         router,
         agents,
@@ -241,6 +254,8 @@ async fn orchestrator_creates_session() {
         memory.clone(),
         bus.publisher(),
         Arc::new(NativeExecutor),
+        file_store,
+        session_writer,
     );
 
     let inbound = test_inbound("hello");
@@ -272,7 +287,7 @@ async fn orchestrator_unknown_agent_returns_error() {
         "anthropic/claude-sonnet-4-5".to_string(),
     )]);
     let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
-    let orch = make_orchestrator(registry, aliases, agents);
+    let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
 
     let err = orch
         .handle_inbound(test_inbound("hello"), "nonexistent-agent")
@@ -291,7 +306,7 @@ async fn orchestrator_disabled_agent_still_reachable() {
     )]);
     let mut agent = test_full_agent("nanocrab-main", "sonnet", vec![]);
     agent.enabled = false;
-    let orch = make_orchestrator(registry, aliases, vec![agent]);
+    let (orch, _tmp) = make_orchestrator(registry, aliases, vec![agent]);
 
     let out = orch
         .handle_inbound(test_inbound("hello"), "nanocrab-main")
@@ -314,6 +329,9 @@ async fn orchestrator_publishes_reply_ready() {
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let agents = vec![test_full_agent("nanocrab-main", "sonnet", vec![])];
     let router = LlmRouter::new(registry, aliases, vec![]);
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file_store = MemoryFileStore::new(tmp.path());
+    let session_writer = SessionWriter::new(tmp.path());
     let orch = Orchestrator::new(
         router,
         agents,
@@ -323,6 +341,8 @@ async fn orchestrator_publishes_reply_ready() {
         memory,
         bus.publisher(),
         Arc::new(NativeExecutor),
+        file_store,
+        session_writer,
     );
 
     let _ = orch

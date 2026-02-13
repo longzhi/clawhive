@@ -19,3 +19,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 nanocrab-runtime = { path = "../nanocrab-runtime" }
+tempfile.workspace = true

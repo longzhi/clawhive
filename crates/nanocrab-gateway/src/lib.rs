@@ -160,13 +160,15 @@ mod tests {
     use nanocrab_bus::EventBus;
     use nanocrab_core::*;
     use nanocrab_memory::MemoryStore;
+    use nanocrab_memory::{file_store::MemoryFileStore, SessionWriter};
     use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
     use nanocrab_runtime::NativeExecutor;
     use nanocrab_schema::InboundMessage;
 
     use super::*;
 
-    fn make_gateway() -> Gateway {
+    fn make_gateway() -> (Gateway, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
         let mut registry = ProviderRegistry::new();
         register_builtin_providers(&mut registry);
         let aliases = HashMap::from([(
@@ -178,6 +180,8 @@ mod tests {
         let bus = EventBus::new(16);
         let publisher = bus.publisher();
         let session_mgr = SessionManager::new(memory.clone(), 1800);
+        let file_store = MemoryFileStore::new(tmp.path());
+        let session_writer = SessionWriter::new(tmp.path());
         let agents = vec![FullAgentConfig {
             agent_id: "nanocrab-main".into(),
             enabled: true,
@@ -199,18 +203,20 @@ mod tests {
             memory,
             publisher.clone(),
             Arc::new(NativeExecutor),
+            file_store,
+            session_writer,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),
             bindings: vec![],
         };
         let rate_limiter = RateLimiter::new(RateLimitConfig::default());
-        Gateway::new(orch, routing, publisher, rate_limiter)
+        (Gateway::new(orch, routing, publisher, rate_limiter), tmp)
     }
 
     #[tokio::test]
     async fn gateway_e2e_inbound_to_outbound() {
-        let gw = make_gateway();
+        let (gw, _tmp) = make_gateway();
         let inbound = InboundMessage {
             trace_id: uuid::Uuid::new_v4(),
             channel_type: "telegram".into(),
@@ -229,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_agent_default() {
-        let gw = make_gateway();
+        let (gw, _tmp) = make_gateway();
         let inbound = InboundMessage {
             trace_id: uuid::Uuid::new_v4(),
             channel_type: "telegram".into(),
@@ -247,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_agent_mention_binding() {
-        let mut gw = make_gateway();
+        let (mut gw, _tmp) = make_gateway();
         gw.routing.bindings.push(RoutingBinding {
             channel_type: "telegram".into(),
             connector_id: "tg_main".into(),
@@ -307,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_agent_dm_binding() {
-        let mut gw = make_gateway();
+        let (mut gw, _tmp) = make_gateway();
         gw.routing.bindings.push(RoutingBinding {
             channel_type: "telegram".into(),
             connector_id: "tg_main".into(),
@@ -334,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_agent_dm_binding_skips_group() {
-        let mut gw = make_gateway();
+        let (mut gw, _tmp) = make_gateway();
         gw.routing.bindings.push(RoutingBinding {
             channel_type: "telegram".into(),
             connector_id: "tg_main".into(),
@@ -361,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_agent_group_binding() {
-        let mut gw = make_gateway();
+        let (mut gw, _tmp) = make_gateway();
         gw.routing.bindings.push(RoutingBinding {
             channel_type: "telegram".into(),
             connector_id: "tg_main".into(),
@@ -388,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_inbound_rejects_when_rate_limited() {
-        let mut gw = make_gateway();
+        let (mut gw, _tmp) = make_gateway();
         gw.rate_limiter = RateLimiter::new(RateLimitConfig {
             requests_per_minute: 60,
             burst: 1,
@@ -423,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_agent_mismatched_connector_uses_default() {
-        let mut gw = make_gateway();
+        let (mut gw, _tmp) = make_gateway();
         gw.routing.bindings.push(RoutingBinding {
             channel_type: "telegram".into(),
             connector_id: "tg_other".into(),

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use nanocrab_bus::{EventBus, Topic};
 use nanocrab_core::*;
 use nanocrab_memory::MemoryStore;
+use nanocrab_memory::{file_store::MemoryFileStore, SessionWriter};
 use nanocrab_provider::{AnthropicProvider, LlmMessage, LlmProvider, LlmRequest, ProviderRegistry};
 use nanocrab_runtime::NativeExecutor;
 use nanocrab_schema::{BusMessage, InboundMessage, SessionKey};
@@ -51,7 +52,8 @@ fn make_orchestrator_with_provider(
     provider: Arc<dyn LlmProvider>,
     memory: Arc<MemoryStore>,
     bus: &EventBus,
-) -> Orchestrator {
+) -> (Orchestrator, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
     let mut registry = ProviderRegistry::new();
     registry.register("anthropic", provider);
     let aliases = HashMap::from([(
@@ -72,20 +74,27 @@ fn make_orchestrator_with_provider(
         memory_policy: None,
         sub_agent: None,
     }];
-    Orchestrator::new(
-        router,
-        agents,
-        HashMap::new(),
-        session_mgr,
-        SkillRegistry::new(),
-        memory,
-        bus.publisher(),
-        Arc::new(NativeExecutor),
+    let file_store = MemoryFileStore::new(tmp.path());
+    let session_writer = SessionWriter::new(tmp.path());
+    (
+        Orchestrator::new(
+            router,
+            agents,
+            HashMap::new(),
+            session_mgr,
+            SkillRegistry::new(),
+            memory,
+            bus.publisher(),
+            Arc::new(NativeExecutor),
+            file_store,
+            session_writer,
+        )
+        .with_react_config(WeakReActConfig {
+            max_steps: 1,
+            repeat_guard: 1,
+        }),
+        tmp,
     )
-    .with_react_config(WeakReActConfig {
-        max_steps: 1,
-        repeat_guard: 1,
-    })
 }
 
 async fn mount_success(server: &MockServer, text: &str) {
@@ -114,7 +123,7 @@ async fn mock_server_e2e_chat() {
     let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let orch = make_orchestrator_with_provider(provider, memory, &bus);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
 
     let out = orch
         .handle_inbound(test_inbound("hi"), "nanocrab-main")
@@ -131,7 +140,7 @@ async fn mock_server_records_episodes() {
     let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let orch = make_orchestrator_with_provider(provider, memory.clone(), &bus);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
 
     let inbound = test_inbound("episode input");
     let key = SessionKey::from_inbound(&inbound);
@@ -156,7 +165,7 @@ async fn mock_server_creates_session() {
     let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let orch = make_orchestrator_with_provider(provider, memory.clone(), &bus);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
 
     let inbound = test_inbound("session input");
     let key = SessionKey::from_inbound(&inbound);
@@ -176,7 +185,7 @@ async fn mock_server_publishes_bus_events() {
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe(Topic::ReplyReady).await;
-    let orch = make_orchestrator_with_provider(provider, memory, &bus);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
 
     let _ = orch
         .handle_inbound(test_inbound("bus input"), "nanocrab-main")
@@ -207,7 +216,7 @@ async fn mock_server_handles_api_error() {
     let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let orch = make_orchestrator_with_provider(provider, memory, &bus);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
 
     let err = orch
         .handle_inbound(test_inbound("error input"), "nanocrab-main")
@@ -378,7 +387,7 @@ async fn mock_server_multi_turn_session() {
     let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let orch = make_orchestrator_with_provider(provider, memory.clone(), &bus);
+    let (orch, _tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
 
     let first = test_inbound("first");
     let key = SessionKey::from_inbound(&first);

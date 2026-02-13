@@ -72,6 +72,60 @@ fn migrations() -> Vec<Migration> {
             );
             "#,
         ),
+        (
+            5,
+            r#"
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS files (
+                path TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                mtime INTEGER NOT NULL,
+                size INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS chunks (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                embedding TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
+            CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                provider_key TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                embedding TEXT NOT NULL,
+                dims INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (provider, model, provider_key, hash)
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                text,
+                id UNINDEXED,
+                path UNINDEXED,
+                source UNINDEXED,
+                model UNINDEXED,
+                start_line UNINDEXED,
+                end_line UNINDEXED
+            );
+            "#,
+        ),
     ]
 }
 

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use nanocrab_bus::BusPublisher;
+use nanocrab_memory::file_store::MemoryFileStore;
+use nanocrab_memory::SessionWriter;
 use nanocrab_memory::{Episode, MemoryStore};
 use nanocrab_provider::LlmMessage;
 use nanocrab_runtime::TaskExecutor;
@@ -23,6 +25,8 @@ pub struct Orchestrator {
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     runtime: Arc<dyn TaskExecutor>,
+    file_store: MemoryFileStore,
+    session_writer: SessionWriter,
     react_max_steps: usize,
     react_repeat_guard: usize,
 }
@@ -38,6 +42,8 @@ impl Orchestrator {
         memory: Arc<MemoryStore>,
         bus: BusPublisher,
         runtime: Arc<dyn TaskExecutor>,
+        file_store: MemoryFileStore,
+        session_writer: SessionWriter,
     ) -> Self {
         let agents_map = agents
             .into_iter()
@@ -52,6 +58,8 @@ impl Orchestrator {
             memory,
             bus,
             runtime,
+            file_store,
+            session_writer,
             react_max_steps: 4,
             react_repeat_guard: 2,
         }
@@ -140,7 +148,7 @@ impl Orchestrator {
             ts: inbound_at,
             session_id: session_key.0.clone(),
             speaker: "user".into(),
-            text: inbound_text,
+            text: inbound_text.clone(),
             tags: vec![],
             importance: 0.5,
             context_hash: None,
@@ -148,6 +156,13 @@ impl Orchestrator {
         };
         if let Err(e) = self.memory.insert_episode(user_ep).await {
             tracing::warn!("Failed to record user episode: {e}");
+        }
+        if let Err(e) = self
+            .session_writer
+            .append_message(&session_key.0, "user", &inbound_text)
+            .await
+        {
+            tracing::warn!("Failed to write user session entry: {e}");
         }
 
         let asst_ep = Episode {
@@ -163,6 +178,13 @@ impl Orchestrator {
         };
         if let Err(e) = self.memory.insert_episode(asst_ep).await {
             tracing::warn!("Failed to record assistant episode: {e}");
+        }
+        if let Err(e) = self
+            .session_writer
+            .append_message(&session_key.0, agent_id, &outbound.text)
+            .await
+        {
+            tracing::warn!("Failed to write assistant session entry: {e}");
         }
 
         let _ = self
@@ -221,11 +243,11 @@ impl Orchestrator {
         Ok(last_reply)
     }
 
-    async fn build_memory_context(&self, session_key: &SessionKey, query: &str) -> Result<String> {
-        let context = self
-            .memory
-            .retrieve_context(&session_key.0, query, 10, 20)
-            .await?;
-        Ok(context.to_prompt_text())
+    async fn build_memory_context(
+        &self,
+        _session_key: &SessionKey,
+        _query: &str,
+    ) -> Result<String> {
+        self.file_store.build_memory_context().await
     }
 }

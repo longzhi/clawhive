@@ -11,5 +11,10 @@ uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
+sqlite-vec.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile.workspace = true

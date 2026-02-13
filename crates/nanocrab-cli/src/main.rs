@@ -350,6 +350,9 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         tracing::warn!("Failed to load skills: {e}");
         SkillRegistry::new()
     });
+    let workspace_dir = root.to_path_buf();
+    let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let session_writer = nanocrab_memory::SessionWriter::new(&workspace_dir);
 
     let orchestrator = Arc::new(Orchestrator::new(
         router,
@@ -360,6 +363,8 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         memory.clone(),
         publisher.clone(),
         Arc::new(NativeExecutor),
+        file_store,
+        session_writer,
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());

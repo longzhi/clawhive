@@ -59,8 +59,23 @@ pub struct MemoryStore {
     db: Arc<Mutex<Connection>>,
 }
 
+/// Initialize sqlite-vec extension. Must be called before Connection::open().
+fn init_sqlite_vec() {
+    use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
+
+    type Sqlite3AutoExtFn =
+        unsafe extern "C" fn(*mut sqlite3, *mut *mut i8, *const sqlite3_api_routines) -> i32;
+
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute::<*const (), Sqlite3AutoExtFn>(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    }
+}
+
 impl MemoryStore {
     pub fn open(path: &str) -> Result<Self> {
+        init_sqlite_vec();
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -71,6 +86,7 @@ impl MemoryStore {
     }
 
     pub fn open_in_memory() -> Result<Self> {
+        init_sqlite_vec();
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         run_migrations(&conn)?;
@@ -586,6 +602,64 @@ mod tests {
     async fn open_in_memory_succeeds() {
         let store = MemoryStore::open_in_memory();
         assert!(store.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sqlite_vec_extension_loaded() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let db = store.db.lock().expect("lock");
+        let version: String = db
+            .query_row("SELECT vec_version()", [], |row| row.get(0))
+            .expect("vec_version");
+        assert!(!version.is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_search_tables_created() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let db = store.db.lock().expect("lock");
+
+        db.execute("INSERT INTO meta (key, value) VALUES ('test', 'value')", [])
+            .expect("insert meta");
+        let v: String = db
+            .query_row("SELECT value FROM meta WHERE key = 'test'", [], |r| {
+                r.get(0)
+            })
+            .expect("select meta");
+        assert_eq!(v, "value");
+
+        db.execute(
+            "INSERT INTO files (path, source, hash, mtime, size) VALUES ('test.md', 'memory', 'abc', 1234, 100)",
+            [],
+        )
+        .expect("insert files");
+
+        db.execute(
+            "INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES ('c1', 'test.md', 'memory', 1, 10, 'h1', 'openai', 'hello world', '', 1234)",
+            [],
+        )
+        .expect("insert chunks");
+
+        db.execute(
+            "INSERT INTO chunks_fts (text, id, path, source, model, start_line, end_line) VALUES ('hello world', 'c1', 'test.md', 'memory', 'openai', 1, 10)",
+            [],
+        )
+        .expect("insert chunks_fts");
+
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'hello'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("fts search");
+        assert_eq!(count, 1);
+
+        db.execute(
+            "INSERT INTO embedding_cache (provider, model, provider_key, hash, embedding, dims, updated_at) VALUES ('openai', 'text-embedding-3-small', 'key1', 'hash1', '[]', 1536, 1234)",
+            [],
+        )
+        .expect("insert embedding_cache");
     }
 
     #[tokio::test]
