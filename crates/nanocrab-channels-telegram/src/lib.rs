@@ -4,7 +4,7 @@ use chrono::Utc;
 use nanocrab_gateway::Gateway;
 use nanocrab_schema::{InboundMessage, OutboundMessage};
 use teloxide::prelude::*;
-use teloxide::types::{Message, MessageEntityKind};
+use teloxide::types::{ChatAction, Message, MessageEntityKind};
 use uuid::Uuid;
 
 pub struct TelegramAdapter {
@@ -71,25 +71,35 @@ impl TelegramBot {
                     None => return Ok::<(), teloxide::RequestError>(()),
                 };
 
-                let chat_id = msg.chat.id.0;
+                let chat_id = msg.chat.id;
                 let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(0);
                 let (is_mention, mention_target) = detect_mention(&msg);
 
-                let mut inbound = adapter.to_inbound(chat_id, user_id, &text);
+                let mut inbound = adapter.to_inbound(chat_id.0, user_id, &text);
                 inbound.is_mention = is_mention;
                 inbound.mention_target = mention_target;
                 inbound.thread_id = msg.thread_id.map(|thread| thread.0.to_string());
 
-                match gateway.handle_inbound(inbound).await {
-                    Ok(outbound) => {
-                        bot.send_message(msg.chat.id, outbound.text).await?;
+                let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+
+                tokio::spawn(async move {
+                    match gateway.handle_inbound(inbound).await {
+                        Ok(outbound) => {
+                            if let Err(err) = bot.send_message(chat_id, outbound.text).await {
+                                tracing::error!("failed to send reply: {err}");
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("gateway error: {err}");
+                            if let Err(send_err) = bot
+                                .send_message(chat_id, "Internal error, please try again later.")
+                                .await
+                            {
+                                tracing::error!("failed to send error message: {send_err}");
+                            }
+                        }
                     }
-                    Err(err) => {
-                        tracing::error!("gateway error: {err}");
-                        bot.send_message(msg.chat.id, "Internal error, please try again later.")
-                            .await?;
-                    }
-                }
+                });
 
                 Ok::<(), teloxide::RequestError>(())
             }

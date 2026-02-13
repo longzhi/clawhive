@@ -18,14 +18,12 @@
 
 ## Issue #2: 无消息队列缓冲，LLM 慢响应会积压
 
-**状态：** 🔴 待修复  
+**状态：** 🟢 已解决  
 **模块：** `nanocrab-channels-telegram`  
 **描述：**  
 `TelegramBot::run()` 的 endpoint closure 直接 await Gateway 返回。如果 LLM 响应慢（数秒甚至超时），teloxide dispatcher 的并发处理能力受限，可能导致消息积压或丢失。  
 **影响：** 高并发场景下用户体验差，消息处理可能超时。  
-**建议：**  
-1. 短期：在 endpoint 中 spawn 异步任务，立即返回 teloxide，LLM 完成后主动 `bot.send_message()`
-2. 中期：引入 Bus 驱动的异步模式，Gateway 接收后投递到队列，Core 异步消费
+**修复：** endpoint 中先发 `ChatAction::Typing`，然后 `tokio::spawn` gateway 调用，endpoint 立即返回。spawned task 完成后主动 `bot.send_message()` 发送回复。
 
 ---
 
@@ -79,16 +77,12 @@
 
 ## Issue #6: TelegramBot endpoint 阻塞 dispatcher
 
-**状态：** 🔴 待修复  
+**状态：** 🟢 已解决（同 Issue #2）  
 **模块：** `nanocrab-channels-telegram`  
 **描述：**  
 当前 TelegramBot 的 endpoint handler 直接 `await gateway.handle_inbound(inbound)`，LLM 响应期间（5-30 秒）阻塞 teloxide dispatcher。多用户并发时后续消息排队等待，严重时可能因 long polling 超时导致消息丢失。  
 **影响：** 并发场景下用户体验差，消息处理可能超时或丢失。  
-**建议：**  
-1. 将 `gateway.handle_inbound()` 放入 `tokio::spawn` 异步任务，endpoint 立即返回
-2. 异步任务完成后主动调用 `bot.send_message()` 发送回复
-3. 可选：spawn 前先发 `send_chat_action(Typing)` 提示用户正在处理
-4. 可选（vNext）：streaming 回复，先发消息再 edit_message 逐步更新
+**修复：** 同 Issue #2。endpoint 发 `ChatAction::Typing` 后 `tokio::spawn` 异步处理，立即返回 dispatcher。
 
 ---
 
