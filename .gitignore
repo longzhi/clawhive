@@ -3,3 +3,6 @@
 **/.DS_Store
 /data
 *.db
+.envrc
+/sessions
+/memory

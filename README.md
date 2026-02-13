@@ -1,18 +1,33 @@
 # nanocrab
 
-A Rust-based multi-agent AI bot framework with Markdown-native memory, hybrid search, and Telegram integration.
+A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and Telegram-first deployment.
 
 ## Overview
 
-nanocrab is a multi-agent AI framework written in Rust. It connects to Telegram (with more channels planned), routes messages to configurable AI agents, and maintains persistent memory across conversations.
+nanocrab is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
 
-The memory system follows a "Markdown as source of truth" philosophy — inspired by the OpenClaw project. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 serves purely as a search index layer, enabling hybrid vector + full-text retrieval.
+The memory system follows a "Markdown as source of truth" philosophy. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 is used only as a search index layer, enabling hybrid vector + full-text retrieval.
 
-Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), tool permissions, and memory access. Agents can spawn sub-agents for delegated tasks. A Weak ReAct loop provides iterative reasoning capabilities.
+Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), memory policy, and optional tool policy config. Agents can spawn sub-agents with explicit depth and timeout bounds. A Weak ReAct loop provides iterative reasoning with repeat guards.
+
+## Technical Differentiators (vs OpenClaw)
+
+- Rust workspace with embedded SQLite (`rusqlite` + bundled SQLite): no Node.js runtime dependency in production deployment.
+- Smaller integration surface by design (Telegram-first) to keep operational complexity and background process load low.
+- Markdown-first memory architecture: `MEMORY.md` and daily Markdown files are canonical; SQLite index is rebuildable and non-authoritative.
+- Built-in runtime bounds: per-user token-bucket rate limiting, sub-agent recursion depth limits, and sub-agent timeout control.
+- Honest security boundary: policy configuration exists today; OS-level sandbox runtime is not yet shipped (current WASM executor is a placeholder).
+
+## Security Boundary (Current State)
+
+- Implemented controls: tool allowlist model in agent config, gateway rate limiting, and bounded sub-agent execution.
+- Implemented behavior constraints: Weak ReAct repeat guard to avoid unbounded reasoning loops.
+- Not yet implemented: production-grade OS sandbox execution path (WASM executor currently returns not implemented).
+- Documentation principle: claims are limited to implemented controls, not roadmap intent.
 
 ## Features
 
-- Multi-agent orchestration with per-agent personas, model routing, and tool policies
+- Multi-agent orchestration with per-agent personas, model routing, and memory policy controls
 - Three-layer memory system: Session JSONL (working memory) → Daily files (short-term) → MEMORY.md (long-term)
 - Hybrid search: sqlite-vec vector similarity (70%) + FTS5 BM25 (30%) over memory chunks
 - Hippocampus consolidation: periodic LLM-driven synthesis of daily observations into long-term memory
@@ -173,4 +188,4 @@ MIT
 
 ## Status
 
-This project is under active development. The memory system is being rewritten from a structured episodes/concepts model to a Markdown-native model with hybrid search.
+This project is under active development. The memory architecture has moved to Markdown-native storage + hybrid retrieval. Runtime sandboxing is planned; current execution path uses the native executor.
