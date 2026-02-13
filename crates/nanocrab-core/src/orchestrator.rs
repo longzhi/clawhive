@@ -180,7 +180,7 @@ impl Orchestrator {
             self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
-        let resp = self
+        let (resp, _messages) = self
             .tool_use_loop(
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
@@ -325,12 +325,12 @@ impl Orchestrator {
             self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
-        let _resp = self
+        let (_resp, final_messages) = self
             .tool_use_loop(
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt.clone()),
-                messages.clone(),
+                messages,
                 2048,
             )
             .await?;
@@ -344,7 +344,7 @@ impl Orchestrator {
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt),
-                messages,
+                final_messages,
                 2048,
             )
             .await?;
@@ -367,6 +367,14 @@ impl Orchestrator {
         Ok(Box::pin(mapped))
     }
 
+    /// Runs the tool-use loop: sends messages to the LLM, executes any
+    /// requested tools, appends tool results, and repeats until the LLM
+    /// produces a final (non-tool-use) response.
+    ///
+    /// Returns both the final LLM response **and** the accumulated messages
+    /// (including all intermediate assistant/tool_result turns). Callers that
+    /// need the full conversation context (e.g. `handle_inbound_stream`)
+    /// should use the returned messages instead of the original input.
     async fn tool_use_loop(
         &self,
         primary: &str,
@@ -374,7 +382,7 @@ impl Orchestrator {
         system: Option<String>,
         initial_messages: Vec<LlmMessage>,
         max_tokens: u32,
-    ) -> Result<nanocrab_provider::LlmResponse> {
+    ) -> Result<(nanocrab_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
         let tool_defs = self.tool_registry.tool_defs();
         let max_iterations = 10;
@@ -402,7 +410,7 @@ impl Orchestrator {
                 .collect();
 
             if tool_uses.is_empty() || resp.stop_reason.as_deref() != Some("tool_use") {
-                return Ok(resp);
+                return Ok((resp, messages));
             }
 
             messages.push(LlmMessage {
