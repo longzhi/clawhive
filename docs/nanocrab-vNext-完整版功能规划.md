@@ -138,6 +138,15 @@ vNext 重点是：
 - **跨 agent 知识共享**（共享 concepts 表的向量索引）
 - **任务/步骤状态持久化与相似任务召回**
 
+### 8.2 vNext 记忆增强
+
+从 MVP 延后到 vNext 的记忆功能：
+
+- **语义感知分块**：按 Markdown heading 切分长文本，超长段落退化为固定窗口切分；提升 embedding 质量
+- **本地 Embedding 模型**：MVP 预留 `EmbeddingProvider` trait 接口，vNext 实现本地模型（如 `ort` + ONNX），消除对远程 API 的依赖
+- **记忆压缩（Compaction）**：参考 OpenClaw 的 auto-compaction 设计，对超长 episode 序列做摘要压缩，保留关键信息同时减少 token 消耗
+- **多模态记忆**：图片/文件的 embedding 索引与召回
+
 ---
 
 ## 9. 工具调用系统（Tool Calling）

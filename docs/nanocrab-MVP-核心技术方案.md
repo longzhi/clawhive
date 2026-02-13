@@ -215,14 +215,38 @@ MVP 存储层采用 SQLite 搭配 [sqlite-vec](https://github.com/asg017/sqlite-
 
 > 向量检索相比纯时间窗口，能在 episodes 量大时精准召回语义相关内容，显著提升记忆注入质量。
 
-### 5.5 巩固流程（每日低峰 Cron）
+### 5.5 巩固流程（Consolidation，定时 Cron）
+
+> 产出与人手写内容隔离：consolidation 产出的 concepts 标记 `source = "consolidation"`，与用户明确要求记住的内容区分。
 
 1. 读取近 24h 高价值 episodes
-2. 去重聚类（规则优先）
+2. LLM 同时看到新 episodes + 已有 concepts，自然处理冲突（不需要独立冲突检测系统）
 3. 生成 concept 候选
 4. 与已有 concept 比对并更新 confidence/status
 5. 建立 episode->concept links
 6. 执行遗忘策略（episodes TTL，concept stale 标注）
+
+### 5.6 检索增强（FTS5 + sqlite-vec）
+
+MVP 同时启用两种检索并融合：
+
+- **FTS5 全文检索**：关键词精确匹配，对人名、代码符号等 exact-match 场景效果好
+- **sqlite-vec 向量检索**：语义相似度召回，对模糊/同义表达场景效果好
+- **融合策略**：两路结果取并集，按 (语义相关度 × 0.5 + FTS5 BM25 分数 × 0.3 + 新近性 × 0.2) 加权重排
+
+> 与 OpenClaw 的 hybrid BM25+vector 方案思路一致，但实现更轻量（SQLite 内置 FTS5 + sqlite-vec 扩展，零外部依赖）。
+
+### 5.7 设计备忘（对比 OpenClaw 后的决策）
+
+| 设计点 | nanocrab 选择 | 理由 |
+|---|---|---|
+| 自动记录每条消息 | ❌ 不做 | 会制造噪声；episodes 由 LLM 判断是否值得写入 |
+| 结构化元数据约束 | ❌ 不约束写入格式 | 改为索引/检索阶段自动推断元数据 |
+| 独立冲突检测系统 | ❌ 不做 | Consolidation LLM 同时看新旧内容，自然处理 |
+| FTS5 + sqlite-vec | ✅ MVP 必做 | 零依赖，hybrid 检索显著优于单一方式 |
+| Consolidation 定时任务 | ✅ MVP 必做 | 产出与人手写内容隔离 |
+| 语义感知分块 | vNext | 按 heading 切分 + 超长段落退化处理 |
+| 本地 Embedding 模型 | vNext | 预留接口，MVP 用远程 API |
 
 ---
 
