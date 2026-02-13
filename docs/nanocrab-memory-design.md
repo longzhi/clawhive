@@ -1,316 +1,292 @@
 # nanocrab 记忆系统设计方案
 
 > 日期：2026-02-13  
-> 状态：设计确认  
-> 核心思路：SQLite 结构化存储 + Markdown 可读层，双轨双向同步
+> 状态：设计确认（v2，采纳 OpenClaw 记忆模型）  
+> 核心思路：Markdown 文件即记忆，SQLite 仅作检索索引
 
 ---
 
 ## 1. 设计哲学
 
-**双轨制：机器用 SQLite 高效查询，人用 Markdown 透明审计，双向同步保持一致。**
+**Markdown 是 source of truth，SQLite 是搜索引擎。**
 
-既保留 nanocrab 的结构化优势（concepts/置信度/证据链），又补上 OpenClaw 的透明可控优势。不选择纯 Markdown 路线（丢失结构化能力），也不放弃人可读性（纯数据库不透明）。
+直接采用 OpenClaw 验证过的记忆模型：LLM 像人一样直接读写 Markdown 文件，不引入额外的结构化数据库层。SQLite + sqlite-vec + FTS5 纯粹作为检索加速层，不持有权威数据。
+
+**为什么放弃双轨制：**
+- 双向同步增加了大量复杂度（conflict resolution、watch、debounce），收益有限
+- Concepts/Links 图结构过度设计——LLM 直接读 Markdown 比查结构化数据库更自然
+- OpenClaw 的实践证明：Markdown + 向量索引已经足够好
 
 ```
-┌─────────────────────────────────────────────┐
-│              nanocrab 记忆系统                │
-│                                              │
-│  ┌──────────────┐    ┌───────────────────┐  │
-│  │  Markdown 层  │◄──►│   SQLite 层       │  │
-│  │  （人可读写）  │同步 │  （机器可查询）    │  │
-│  │              │    │                    │  │
-│  │ MEMORY.md    │    │ episodes 表        │  │
-│  │ memory/      │    │ concepts 表        │  │
-│  │  YYYY-MM-DD  │    │ links 表           │  │
-│  │ entities/    │    │ vec0 (sqlite-vec)  │  │
-│  │              │    │ FTS5 (BM25)        │  │
-│  └──────────────┘    └───────────────────┘  │
-│         │                     │              │
-│         ▼                     ▼              │
-│  人直接编辑 md          Orchestrator 自动     │
-│  → 触发反向同步          记录 + 检索          │
-│    更新 SQLite           Consolidator 整合    │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────┐
+│        nanocrab 记忆系统             │
+│                                     │
+│  Source of Truth:                   │
+│  ┌───────────────────────────┐     │
+│  │  Markdown 文件             │     │
+│  │  ├── MEMORY.md（长期记忆）  │     │
+│  │  └── memory/               │     │
+│  │      ├── 2026-02-13.md     │     │
+│  │      └── 2026-02-12.md     │     │
+│  └───────────────────────────┘     │
+│           │ 索引                    │
+│           ▼                         │
+│  ┌───────────────────────────┐     │
+│  │  SQLite 检索层（只读索引）  │     │
+│  │  ├── sqlite-vec（向量）    │     │
+│  │  ├── FTS5（全文）          │     │
+│  │  └── chunks 表（分块元数据）│     │
+│  └───────────────────────────┘     │
+└─────────────────────────────────────┘
 ```
 
 ---
 
-## 2. 四层架构
+## 2. 记忆文件结构
 
-### 2.1 第一层：Episodes（海马体）
-
-**职责：** 自动记录每条对话消息，快写入，保细节。
-
-**数据模型：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 主键 |
-| ts | DateTime | 时间戳 |
-| session_id | String | 所属 session |
-| speaker | String | 发言者（user / agent_id） |
-| text | String | 消息文本 |
-| embedding | Vec\<f32\> | 向量（sqlite-vec 索引） |
-| tags | JSON | 标签 |
-| importance | f32 | 重要性 0-1 |
-| context_hash | String? | 上下文哈希 |
-| source_ref | String? | 来源引用 |
-
-**索引：**
-- sqlite-vec `vec0` 虚拟表（向量相似度搜索）
-- FTS5 全文索引（BM25 关键词搜索）
-- 时间索引（`ts` 列）
-
-**写入策略：** 由 LLM/Orchestrator 判断是否值得记录（重要决策、用户偏好、关键事实等），不自动记录每条消息。
-
-**兜底机制：** 如果一个 session 结束时 LLM 没有写入任何 episode，触发兜底摘要——用 LLM 对整段对话生成一条总结性 episode，避免完全遗漏。
-
-> **设计决策：** 不自动记录每条消息。原因：自动全量记录会制造大量低价值噪声，增加检索干扰和存储压力。OpenClaw 的实践证明 LLM 主动写入 + 兜底机制足够可靠。
-
-### 2.2 第二层：Concepts（皮质）
-
-**职责：** 结构化稳定知识，慢整合，保高置信。这是 nanocrab 的**核心差异化**。
-
-**数据模型（现有，保留）：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 主键 |
-| concept_type | Enum | Fact / Preference / Rule / Entity / TaskState |
-| key | String | 知识标识符（唯一） |
-| value | String | 知识内容 |
-| confidence | f32 | 置信度 0-1 |
-| evidence | JSON | 证据引用列表 |
-| first_seen | DateTime | 首次发现时间 |
-| last_verified | DateTime | 最后验证时间 |
-| status | Enum | Active / Stale / Conflicted |
-
-**增强：**
-- 加 `embedding` 列 + sqlite-vec 向量索引（支持语义查询 concepts）
-- 加 FTS5 全文索引
-
-**证据链（links 表，现有，保留）：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | UUID | 主键 |
-| episode_id | UUID | 关联 episode |
-| concept_id | UUID | 关联 concept |
-| relation | Enum | Supports / Contradicts / Updates |
-| created_at | DateTime | 创建时间 |
-
-### 2.3 第三层：Markdown 可读层（新增）
-
-**目录结构：**
+### 2.1 目录布局
 
 ```
-workspace/memory/
-├── MEMORY.md              ← 从 Active concepts 生成 / 人可编辑
-├── 2026-02-13.md          ← 从当日 episodes 生成 / 人可编辑
-├── 2026-02-12.md
-└── entities/
-    ├── nanocrab.md         ← 从 Entity 类型 concepts 生成
-    └── peter.md
+workspace/
+├── MEMORY.md              ← 长期记忆（curated wisdom）
+└── memory/
+    ├── 2026-02-13.md      ← 每日记录（raw log）
+    ├── 2026-02-12.md
+    └── ...
 ```
 
-**双向同步机制：**
+### 2.2 MEMORY.md（长期记忆）
 
-#### 正向同步（SQLite → Markdown，自动）
+**性质：** 精炼后的核心知识，类似人的长期记忆。
 
-Consolidator 完成后自动导出：
-- 当日 episodes → `memory/YYYY-MM-DD.md`（按时间排列，标注 speaker）
-- Active concepts → `MEMORY.md`（按 concept_type 分组，标注 confidence）
-- Entity 类型 concepts → `entities/<name>.md`
-
+**内容示例：**
 ```markdown
-# MEMORY.md（自动生成示例）
+# MEMORY.md
 
-## Facts
-- [0.95] db.choice: SQLite + sqlite-vec 作为本地存储方案
-- [0.90] lang.primary: Rust
+## 用户偏好
+- 开发语言：Rust，偏好极简设计
+- 文档风格：中文为主，技术术语保留英文
+- 工具链：neovim + wezterm + zellij
 
-## Preferences
-- [0.85] output.style: 简洁优先，代码示例辅助
+## 项目决策
+- 数据库：SQLite + sqlite-vec，零外部依赖
+- 架构：单进程 monolith，Bus 仅做 sidecar 广播
+- 记忆系统：Markdown 为 source of truth
 
-## Rules
-- [0.90] safety.no_rm: 使用 trash 替代 rm
+## 重要事实
+- nanocrab 仓库：/Users/dragon/Workspace/nanocrab/
+- Obsidian vault 会同步到 GitHub
 ```
 
-#### 反向同步（Markdown → SQLite，监听）
+**写入时机：**
+1. Compaction 前的 memory flush（context 快满时，LLM 将重要信息写入）
+2. Consolidation 定时任务（从近期 daily files 提炼精华）
+3. LLM 在对话中主动写入（发现重要信息时）
 
-Watch `memory/` 文件夹变化（debounce 1.5s）：
-- 不约束 Markdown 格式（人怎么写都行）
-- 索引阶段自动推断元数据（concept_type, importance 等）
-- 对应更新 concepts（人编辑 = confidence 1.0，最高优先级）
-- 重建向量索引
-- 新增内容自动创建 concept 候选
+**规则：**
+- LLM 直接读写，无格式约束
+- 人也可以手动编辑
+- 定期清理过时信息
 
-### 2.4 第四层：Context Window 管理（新增）
+### 2.3 memory/YYYY-MM-DD.md（每日记录）
 
-**Session 历史持久化：**
-- 每条消息写入 JSONL 文件（`sessions/<session_id>.jsonl`）或复用 episodes 表
-- 对话时加载最近 N 条历史（可配置 `session.history_window`）
+**性质：** 当天的原始日志，不需要精炼。
 
-**Auto-Compaction（借鉴 OpenClaw）：**
+**内容示例：**
+```markdown
+# 2026-02-13
 
+## nanocrab 架构 Review
+- 完成 message flow 审查，确认主路径是 Gateway→Orchestrator 直接调用
+- Bus 定位为 sidecar 广播，不在主路径上
+- 记忆系统从双轨制改为 OpenClaw 模式（Markdown 为 source of truth）
+
+## 设计决策
+- 放弃 episodes/concepts/links 图模型
+- 采用 Markdown + sqlite-vec/FTS5 检索
 ```
-Session 对话持续进行
-  │
-  │  估算 token 数接近 context window 上限
-  ▼
-Memory Flush（静默 agentic turn）
-  │  提醒 Orchestrator 将重要信息写入 concepts
-  ▼
-Auto-Compaction
-  │  调 LLM 总结旧对话为摘要
-  │  保留：摘要 + 近期消息 + concepts
-  │  删除：旧的完整消息
-  ▼
-继续对话（摘要 + 近期消息 + 记忆召回）
-```
+
+**写入时机：** 随时。LLM 在对话过程中记录值得保留的内容。
+
+**兜底机制：** 如果一个 session 结束时 LLM 没有写入任何内容，触发兜底摘要——用 LLM 对整段对话生成一条总结，写入当天的 daily file。
 
 ---
 
-## 3. 检索策略
+## 3. 检索系统
 
-### 3.1 三级并行检索
+### 3.1 索引构建
+
+Markdown 文件变化时（启动时全量 + 运行时增量），构建 SQLite 检索索引：
 
 ```
-用户发消息
+Markdown 文件
   │
-  ▼  并行检索三个来源
+  ├── 按 heading 分块（## 级别切分）
+  │   └── 超长段落退化为固定窗口（~512 tokens）
   │
-  ├── 1. Concepts 精确查询
-  │   → type/key/status 过滤
-  │   → 返回结构化知识 + confidence
+  ├── 每个 chunk 生成 embedding → sqlite-vec
   │
-  ├── 2. Episodes 混合搜索
-  │   → 向量相似度（sqlite-vec）70%
-  │   → BM25 关键词（FTS5）30%
-  │   → 时间窗口过滤（默认 7 天）
+  └── 每个 chunk 文本 → FTS5 全文索引
+```
+
+**chunks 表：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| file_path | TEXT | 来源文件路径 |
+| heading | TEXT | 所属 heading |
+| content | TEXT | chunk 文本 |
+| embedding | BLOB | 向量（sqlite-vec） |
+| char_offset | INTEGER | 在文件中的字符偏移 |
+| updated_at | INTEGER | 最后索引时间 |
+
+### 3.2 混合检索（Hybrid Search）
+
+```
+用户发消息 / Orchestrator 需要记忆
   │
-  └── 3. Concepts 向量搜索
-      → embedding 语义匹配
-      → 返回语义相关的 concepts
+  ▼  并行两路检索
+  │
+  ├── 向量搜索（sqlite-vec）
+  │   query_embedding vs chunk embeddings
+  │   → cosine similarity
+  │
+  └── 全文搜索（FTS5 BM25）
+      query_text vs chunk content
+      → BM25 rank score
   │
   ▼  融合重排
-  confidence × relevance × recency 加权
+  │
+  finalScore = vectorScore × 0.5
+             + bm25Score × 0.3
+             + recencyScore × 0.2
+  │
+  ▼  返回 top-K chunks
 ```
 
-### 3.2 混合搜索实现
+**融合细节：**
+- `vectorScore`：cosine similarity，归一化到 0-1
+- `bm25Score`：`1.0 / (1.0 + max(0, bm25_rank))`，归一化
+- `recencyScore`：基于文件日期衰减（MEMORY.md 永远为 1.0，daily files 按天数衰减）
+- candidatePool = maxResults × 4（先取多再排）
 
-```
-candidatePool = maxResults × 4
+### 3.3 Prompt 注入
 
-// 向量搜索
-vectorHits = sqlite_vec_search(query_embedding, candidatePool)
-
-// BM25 搜索
-bm25Hits = fts5_search(query_text, candidatePool)
-
-// 融合
-for each candidate in union(vectorHits, bm25Hits):
-    textScore = 1.0 / (1.0 + max(0, bm25_rank))
-    finalScore = 0.7 * vectorScore + 0.3 * textScore
-
-// 返回 top-K
-return sorted(candidates, by=finalScore, limit=maxResults)
-```
-
-### 3.3 Prompt 注入格式
+检索到的 chunks 注入到 LLM prompt 的 system message 中：
 
 ```
 [Memory Context]
 
-## Known Facts (high confidence)
-- db.choice: SQLite + sqlite-vec [confidence: 0.95]
-- lang.primary: Rust [confidence: 0.90]
+From MEMORY.md:
+- 开发语言：Rust，偏好极简设计
+- 数据库：SQLite + sqlite-vec，零外部依赖
 
-## Recent Conversation
-- [02-13 09:10] user: 数据库方案确定了吗？
-- [02-13 09:11] nanocrab-main: 是的，已确认使用 SQLite + sqlite-vec...
+From memory/2026-02-13.md:
+- 记忆系统从双轨制改为 OpenClaw 模式
+- Bus 定位为 sidecar 广播
 
-## Related Context
-- [02-12] 讨论了 Milvus vs sqlite-vec 的选型...
+From memory/2026-02-12.md:
+- 讨论了 Milvus vs sqlite-vec 选型，确认 sqlite-vec
 ```
 
 ---
 
-## 4. Consolidation 流程（增强版）
+## 4. Consolidation（定期整理）
+
+> 产出与人手写内容混合在同一文件中，但 commit message 标注来源。
 
 ```
-每日低峰 Cron 触发（或 Heartbeat 触发）
+定时 Cron 触发（每日低峰 / 可配置）
   │
-  ├── 1. 读取近 24h episodes（importance ≥ 0.6）
+  ├── 1. 读取近期 daily files（如近 7 天）
   │
-  ├── 2. 调 LLM 提取 concept 候选（JSON）
+  ├── 2. 读取当前 MEMORY.md
   │
-  ├── 3. LLM 同时看到新 episodes + 已有 concepts，自然处理冲突
-  │       ├── 一致 → 更新 last_verified，提高 confidence
-  │       ├── 矛盾 → 更新为新值（LLM 判断），保留旧 evidence
-  │       └── 全新 → 创建新 concept
+  ├── 3. 调 LLM：
+  │      prompt 包含新旧内容，要求：
+  │      - 提炼值得长期保留的知识
+  │      - 发现矛盾时以新内容为准
+  │      - 删除过时信息
+  │      - 输出更新后的 MEMORY.md
   │
-  │   > 不设独立冲突检测系统。Consolidation LLM prompt 中包含
-  │   > 新旧内容，由 LLM 在提取过程中自然识别和解决冲突。
+  ├── 4. 写入 MEMORY.md
   │
-  ├── 4. 建立 episode → concept links
+  └── 5. 重建索引（增量）
+```
+
+**设计要点：**
+- LLM 同时看到新旧内容，自然处理冲突，不需要独立冲突检测
+- Consolidation 是"整理"不是"提取"——像人复习笔记一样
+- 频率可配置（默认每日一次）
+
+---
+
+## 5. Auto-Compaction（上下文压缩）
+
+当 session 对话 token 数接近 context window 上限时：
+
+```
+对话持续进行，token 逼近上限
   │
-  ├── 5. 维护
-  │   ├── 标记 >30 天未验证 concept 为 Stale
-  │   └── 清理 >90 天低重要性 episodes
+  ▼  Memory Flush
+  │  Orchestrator 提醒 LLM：
+  │  "context 即将压缩，请将重要信息写入 MEMORY.md 或 daily file"
+  │  LLM 执行写入（agentic turn，对用户静默）
   │
-  ├── 6. 导出 Markdown（正向同步）
-  │   ├── concepts → MEMORY.md
-  │   ├── 当日 episodes → memory/YYYY-MM-DD.md
-  │   └── Entity concepts → entities/*.md
+  ▼  Compaction
+  │  调 LLM 将旧对话压缩为摘要
+  │  保留：摘要 + 近期消息 + 记忆召回结果
+  │  丢弃：旧的完整消息
   │
-  └── 7. 重建向量索引（增量）
+  ▼  继续对话
 ```
 
 ---
 
-## 5. 与竞品的差异定位
+## 6. Session 历史
 
-| 维度 | OpenClaw | memsearch | nanocrab |
-|------|----------|-----------|----------|
-| Source of truth | Markdown | Markdown | **SQLite + Markdown 双轨** |
-| 结构化知识 | ❌ | ❌ | **✅ concepts + confidence + evidence** |
-| 记录策略 | LLM 主动写入 | LLM 主动写入 | **LLM 写入 + 兜底摘要** |
-| 向量检索 | ✅ | ✅ (Milvus) | **✅ sqlite-vec** |
-| BM25 | ✅ FTS5 | ✅ | **✅ FTS5** |
-| 混合搜索 | ✅ 70/30 | ✅ 70/30 | **✅ 70/30** |
-| 人可编辑 | ✅ | ✅ | **✅ 双向同步** |
-| Compaction | ✅ | ✅ | **✅** |
-| 知识冲突处理 | ❌ | ❌ | **✅ Consolidation LLM 自然处理** |
-| 置信度演化 | ❌ | ❌ | **✅** |
-| 证据溯源 | ❌ | ❌ | **✅ links 表** |
-| 外部依赖 | Node.js | Python + Milvus | **零依赖（Rust + SQLite）** |
+每条消息持久化到 JSONL 文件（`sessions/<session_id>.jsonl`），用于：
+- 对话开始时加载最近 N 条历史
+- Compaction 后保留完整原始记录（可审计）
+- 不同于 memory 文件——这是原始对话记录，不是记忆
 
 ---
 
-## 6. 落地节奏
+## 7. Embedding 策略
 
-### MVP（当前阶段）
+### MVP
+- 远程 API（OpenAI `text-embedding-3-small` 或同类）
+- 预留 `EmbeddingProvider` trait 接口
 
-- [x] episodes LLM 写入（非自动全量记录）
-- [x] concepts + links 数据模型
-- [x] Consolidator 定时提取（LLM 同时看新旧内容，自然处理冲突）
-- [ ] 兜底摘要（session 结束时 LLM 未写 episode → 自动总结）
-- [ ] sqlite-vec 向量索引（episodes + concepts）
-- [ ] FTS5 全文索引
-- [ ] 混合搜索（向量 70% + BM25 30%）
-- [ ] Session 历史加载（conversation history 注入）
+### vNext
+- 本地模型（`ort` + ONNX，如 `all-MiniLM-L6-v2`）
+- 消除对远程 API 的依赖
+
+---
+
+## 8. 落地节奏
+
+### MVP
+
+- [ ] MEMORY.md + memory/YYYY-MM-DD.md 文件读写
+- [ ] LLM 主动写入记忆（tool/system prompt 指导）
+- [ ] 兜底摘要（session 结束时未写入 → 自动总结）
+- [ ] SQLite 索引层（chunks 表 + sqlite-vec + FTS5）
+- [ ] Hybrid search（向量 50% + BM25 30% + 新近性 20%）
+- [ ] 检索结果注入 prompt
+- [ ] Session 历史加载（conversation history）
 
 ### vNext 第一步
 
-- [ ] Markdown 可读层导出（正向同步）
-- [ ] Watch + 反向同步
 - [ ] Auto-Compaction + Memory Flush
+- [ ] Consolidation 定时任务
+- [ ] 语义感知分块（heading 切分 + 超长退化）
+- [ ] 索引增量更新（watch 文件变化）
 
 ### vNext 第二步
 
-- [ ] Entity 页面自动生成
-- [ ] 跨 agent 记忆共享/隔离策略
-- [ ] 记忆 API（CLI 查询/管理）
+- [ ] 本地 Embedding 模型
+- [ ] 跨 agent 记忆隔离策略
+- [ ] 记忆 CLI（查询/管理/调试）
 - [ ] TUI 记忆面板
