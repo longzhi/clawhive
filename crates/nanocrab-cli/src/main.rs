@@ -12,7 +12,7 @@ use nanocrab_channels::telegram::TelegramBot;
 use nanocrab_channels::ChannelBot;
 use nanocrab_core::*;
 use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
-use nanocrab_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
+use nanocrab_memory::embedding::{EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider};
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{
@@ -361,7 +361,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
     let session_writer = nanocrab_memory::SessionWriter::new(&workspace_dir);
     let session_reader = nanocrab_memory::SessionReader::new(&workspace_dir);
     let search_index = SearchIndex::new(memory.db());
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+    let embedding_provider = build_embedding_provider(&config);
 
     let orchestrator = Arc::new(Orchestrator::new(
         router,
@@ -458,6 +458,45 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
         .or_insert_with(|| "anthropic/claude-opus-4-6".to_string());
 
     LlmRouter::new(registry, aliases, vec![])
+}
+
+fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvider> {
+    let embedding_config = &config.main.embedding;
+
+    // Check if embedding is disabled or provider is not openai
+    if !embedding_config.enabled || embedding_config.provider != "openai" {
+        tracing::info!(
+            "Embedding provider disabled or not openai (provider: {}), using stub",
+            embedding_config.provider
+        );
+        return Arc::new(StubEmbeddingProvider::new(8));
+    }
+
+    // Read API key from environment
+    let api_key = std::env::var(&embedding_config.api_key_env).unwrap_or_default();
+    if api_key.is_empty() {
+        tracing::warn!(
+            "OpenAI embedding API key not set (env: {}), using stub provider",
+            embedding_config.api_key_env
+        );
+        return Arc::new(StubEmbeddingProvider::new(8));
+    }
+
+    // Create OpenAI embedding provider with configured model and dimensions
+    let provider = OpenAiEmbeddingProvider::with_model(
+        api_key,
+        embedding_config.model.clone(),
+        embedding_config.dimensions,
+    )
+    .with_base_url(embedding_config.base_url.clone());
+
+    tracing::info!(
+        "OpenAI embedding provider initialized (model: {}, dimensions: {})",
+        embedding_config.model,
+        embedding_config.dimensions
+    );
+
+    Arc::new(provider)
 }
 
 async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
