@@ -7,6 +7,7 @@ pub mod router;
 pub mod session;
 pub mod skill;
 pub mod subagent;
+pub mod subagent_tool;
 pub mod tool;
 
 pub use config::*;
@@ -18,6 +19,7 @@ pub use router::*;
 pub use session::*;
 pub use skill::*;
 pub use subagent::*;
+pub use subagent_tool::*;
 pub use tool::*;
 
 use serde::{Deserialize, Serialize};

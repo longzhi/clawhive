@@ -21,7 +21,7 @@ use super::skill::SkillRegistry;
 use super::tool::ToolRegistry;
 
 pub struct Orchestrator {
-    router: LlmRouter,
+    router: Arc<LlmRouter>,
     agents: HashMap<String, FullAgentConfig>,
     personas: HashMap<String, Persona>,
     session_mgr: SessionManager,
@@ -56,10 +56,12 @@ impl Orchestrator {
         search_index: SearchIndex,
         embedding_provider: Arc<dyn EmbeddingProvider>,
     ) -> Self {
-        let agents_map = agents
+        let router = Arc::new(router);
+        let agents_map: HashMap<String, FullAgentConfig> = agents
             .into_iter()
             .map(|a| (a.agent_id.clone(), a))
             .collect();
+        let personas_for_subagent = personas.clone();
 
         let mut tool_registry = ToolRegistry::new();
         tool_registry.register(Box::new(MemorySearchTool::new(
@@ -67,6 +69,17 @@ impl Orchestrator {
             embedding_provider.clone(),
         )));
         tool_registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
+        let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
+            router.clone(),
+            agents_map.clone(),
+            personas_for_subagent,
+            3,
+            vec![],
+        ));
+        tool_registry.register(Box::new(super::subagent_tool::SubAgentTool::new(
+            sub_agent_runner,
+            30,
+        )));
 
         Self {
             router,
