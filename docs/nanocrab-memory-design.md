@@ -10,35 +10,38 @@
 
 **Markdown 是 source of truth，SQLite 是搜索引擎。**
 
-直接采用 OpenClaw 验证过的记忆模型：LLM 像人一样直接读写 Markdown 文件，不引入额外的结构化数据库层。SQLite + sqlite-vec + FTS5 纯粹作为检索加速层，不持有权威数据。
+采用 OpenClaw 验证过的记忆模型：LLM 像人一样直接读写 Markdown 文件，不引入额外的结构化数据库层。SQLite + sqlite-vec + FTS5 纯粹作为检索加速层，不持有权威数据。
+
+### 1.1 三层记忆架构
+
+借鉴神经科学的记忆模型，nanocrab 的记忆体系有三个层次：
+
+```
+┌──────────────────────────────────────────────────┐
+│                nanocrab 记忆系统                    │
+│                                                    │
+│  ① Session JSONL（感觉记忆 / 工作记忆）            │
+│     sessions/<id>.jsonl                            │
+│     ↓ 原始对话流，完整保留                          │
+│                                                    │
+│  ② Daily Files（短期记忆）                         │
+│     memory/YYYY-MM-DD.md                           │
+│     ↓ LLM 主动记录 + 兜底摘要                      │
+│                                                    │
+│  ③ MEMORY.md（长期记忆）                           │
+│     ↓ 海马体（Consolidation）整合                   │
+│                                                    │
+│  🔍 SQLite 检索层（只读索引）                       │
+│     sqlite-vec + FTS5 + chunks 表                  │
+└──────────────────────────────────────────────────┘
+```
+
+**海马体（Hippocampus）= Consolidation 进程**：定期从短期记忆（daily files）中提炼知识，整合到长期记忆（MEMORY.md）——与神经科学中海马体将短期记忆巩固为长期记忆的过程一致。
 
 **为什么放弃双轨制：**
 - 双向同步增加了大量复杂度（conflict resolution、watch、debounce），收益有限
 - Concepts/Links 图结构过度设计——LLM 直接读 Markdown 比查结构化数据库更自然
 - OpenClaw 的实践证明：Markdown + 向量索引已经足够好
-
-```
-┌─────────────────────────────────────┐
-│        nanocrab 记忆系统             │
-│                                     │
-│  Source of Truth:                   │
-│  ┌───────────────────────────┐     │
-│  │  Markdown 文件             │     │
-│  │  ├── MEMORY.md（长期记忆）  │     │
-│  │  └── memory/               │     │
-│  │      ├── 2026-02-13.md     │     │
-│  │      └── 2026-02-12.md     │     │
-│  └───────────────────────────┘     │
-│           │ 索引                    │
-│           ▼                         │
-│  ┌───────────────────────────┐     │
-│  │  SQLite 检索层（只读索引）  │     │
-│  │  ├── sqlite-vec（向量）    │     │
-│  │  ├── FTS5（全文）          │     │
-│  │  └── chunks 表（分块元数据）│     │
-│  └───────────────────────────┘     │
-└─────────────────────────────────────┘
-```
 
 ---
 
@@ -192,18 +195,19 @@ From memory/2026-02-12.md:
 
 ---
 
-## 4. Consolidation（定期整理）
+## 4. 海马体：Consolidation（记忆整合）
 
-> 产出与人手写内容混合在同一文件中，但 commit message 标注来源。
+> **海马体（Hippocampus）** 是 nanocrab 记忆系统的核心进程——定期将短期记忆（daily files + session JSONL）整合为长期记忆（MEMORY.md），如同大脑中海马体在睡眠期间巩固当天经历。
 
 ```
 定时 Cron 触发（每日低峰 / 可配置）
   │
   ├── 1. 读取近期 daily files（如近 7 天）
+  │      └── 可选：扫描 session JSONL 提取 highlights
   │
   ├── 2. 读取当前 MEMORY.md
   │
-  ├── 3. 调 LLM：
+  ├── 3. 调 LLM（"海马体"）：
   │      prompt 包含新旧内容，要求：
   │      - 提炼值得长期保留的知识
   │      - 发现矛盾时以新内容为准
@@ -217,8 +221,9 @@ From memory/2026-02-12.md:
 
 **设计要点：**
 - LLM 同时看到新旧内容，自然处理冲突，不需要独立冲突检测
-- Consolidation 是"整理"不是"提取"——像人复习笔记一样
+- 海马体是"整理"不是"提取"——像人睡觉时大脑复习当天经历一样
 - 频率可配置（默认每日一次）
+- 海马体也可以读 session JSONL 来补充 daily files 遗漏的内容（可选，vNext）
 
 ---
 
@@ -244,12 +249,72 @@ From memory/2026-02-12.md:
 
 ---
 
-## 6. Session 历史
+## 6. Session JSONL（感觉记忆 / 工作记忆）
 
-每条消息持久化到 JSONL 文件（`sessions/<session_id>.jsonl`），用于：
-- 对话开始时加载最近 N 条历史
-- Compaction 后保留完整原始记录（可审计）
-- 不同于 memory 文件——这是原始对话记录，不是记忆
+> 参考 OpenClaw Session 设计：每个 session 一个 JSONL 文件，append-only，完整记录对话流。
+
+### 6.1 文件布局
+
+```
+workspace/sessions/
+├── <session_id>.jsonl      ← 一个 session 一个文件
+├── <session_id>.jsonl
+└── ...
+```
+
+### 6.2 JSONL 行类型
+
+每行一个 JSON 对象，`type` 字段区分类型：
+
+```jsonl
+{"type":"session","version":1,"id":"<uuid>","timestamp":"...","agent_id":"main"}
+{"type":"message","id":"<id>","timestamp":"...","message":{"role":"user","content":"你好"}}
+{"type":"message","id":"<id>","timestamp":"...","message":{"role":"assistant","content":"你好！"}}
+{"type":"tool_call","id":"<id>","timestamp":"...","tool":"search","input":{...}}
+{"type":"tool_result","id":"<id>","timestamp":"...","tool":"search","output":{...}}
+{"type":"compaction","id":"<id>","timestamp":"...","summary":"...","dropped_before":"<msg_id>"}
+{"type":"model_change","id":"<id>","timestamp":"...","model":"claude-sonnet-4-5"}
+```
+
+**核心行类型：**
+
+| type | 说明 |
+|------|------|
+| `session` | 文件首行，记录 session 元数据（version, agent_id, created_at） |
+| `message` | 用户或 agent 消息（role: user / assistant / system） |
+| `tool_call` | 工具调用请求 |
+| `tool_result` | 工具调用结果 |
+| `compaction` | 上下文压缩事件（记录摘要 + 丢弃位置） |
+| `model_change` | 模型切换 |
+
+### 6.3 用途
+
+1. **对话恢复**：session 开始时加载最近 N 条 message 行，恢复上下文
+2. **审计追溯**：完整原始记录，即使 compaction 压缩了 context，JSONL 保留全部
+3. **兜底摘要来源**：session 结束时如果 LLM 没写 memory，从 JSONL 生成摘要
+4. **Consolidation 数据源**：海马体读取 JSONL 提取 highlights（补充 daily files）
+
+### 6.4 与记忆文件的关系
+
+```
+Session JSONL（原始对话流，自动写入，不删除）
+      │
+      ├──→ LLM 主动写入 daily file（选择性记录）
+      │
+      └──→ 兜底摘要写入 daily file（session 结束时）
+              │
+              └──→ 海马体整合到 MEMORY.md（Consolidation）
+```
+
+- **JSONL ≠ 记忆**：JSONL 是原始记录，memory 文件是经过筛选/提炼的
+- **JSONL 不参与检索**：不索引到 SQLite 检索层（避免噪声）
+- **JSONL 可配置保留期**：默认 30 天，过期归档或删除
+
+### 6.5 Append-only 写入
+
+- 每条消息实时 append 到 JSONL，不修改已有行
+- Compaction 不删除 JSONL 内容，只追加一条 `compaction` 类型记录
+- 这保证了完整的审计链
 
 ---
 
