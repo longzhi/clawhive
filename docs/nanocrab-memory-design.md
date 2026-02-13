@@ -12,6 +12,10 @@
 
 采用 OpenClaw 验证过的记忆模型：LLM 像人一样直接读写 Markdown 文件，不引入额外的结构化数据库层。SQLite + sqlite-vec + FTS5 纯粹作为检索加速层，不持有权威数据。
 
+**依赖版本：**
+- `rusqlite` = 0.32（features: `bundled`, `vtab`）
+- `sqlite-vec` = 0.1.6（crates.io 稳定版，静态链接，零运行时依赖）
+
 ### 1.1 三层记忆架构
 
 借鉴神经科学的记忆模型，nanocrab 的记忆体系有三个层次：
@@ -474,7 +478,7 @@ Session JSONL（原始对话流，自动写入，不删除）
 - [ ] MEMORY.md + memory/YYYY-MM-DD.md 文件读写
 - [ ] LLM 主动写入记忆（tool/system prompt 指导）
 - [ ] 兜底摘要（session 结束时未写入 → 自动总结）
-- [ ] SQLite 索引层（chunks 表 + sqlite-vec + FTS5）
+- [ ] SQLite 索引层（chunks 表 + sqlite-vec 0.1.6 + FTS5）
 - [ ] Hybrid search（向量 70% + BM25 30%）
 - [ ] 检索结果被动注入 prompt
 - [ ] `memory_search` + `memory_get` LLM tools（主动检索）
