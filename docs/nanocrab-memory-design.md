@@ -372,15 +372,34 @@ Session JSONL（原始对话流，自动写入，不删除）
 
 ---
 
-## 7. Embedding 策略
+## 7. Embedding 策略（对齐 OpenClaw）
 
-### MVP
-- 远程 API（OpenAI `text-embedding-3-small` 或同类）
-- 预留 `EmbeddingProvider` trait 接口
+### 7.1 Provider 架构
 
-### vNext
-- 本地模型（`ort` + ONNX，如 `all-MiniLM-L6-v2`）
-- 消除对远程 API 的依赖
+`EmbeddingProvider` trait，默认 `auto` 模式，按可用性自动选择：
+
+| Provider | 默认模型 | 说明 |
+|---|---|---|
+| `openai` | `text-embedding-3-small` | OpenAI API |
+| `gemini` | `gemini-embedding-001` | Gemini API |
+| `voyage` | `voyage-4-large` | Voyage AI |
+| `local` | `embeddinggemma-300M` (GGUF) | 本地推理，零 API 依赖 |
+| `auto` | 自动选择 | 有远程 API key → 用远程；都没有 → fallback local |
+
+### 7.2 落地节奏
+
+**MVP：**
+- 实现 `EmbeddingProvider` trait + `openai` provider（最通用）
+- `auto` 模式：检测到 OpenAI API key 就用，否则报错提示配置
+
+**vNext 第一步：**
+- 加 `gemini` + `voyage` provider
+- 加 `local` provider（`ort` + GGUF 模型，如 `embeddinggemma-300M`）
+- `auto` 完整 fallback 链：远程 → local
+
+**vNext 第二步：**
+- Embedding 缓存（`embedding_cache` 表，避免重复调用 API）
+- Batch API 支持（大量索引时降本）
 
 ---
 

@@ -194,9 +194,9 @@ Prompt 注入（top-K chunks）
 ### 5.5 MVP 不做的（vNext）
 
 - Auto-Compaction + Memory Flush（context 压缩）
-- Consolidation 定时任务（从 daily files 提炼到 MEMORY.md）
+- 海马体定时任务（从 daily files 提炼到 MEMORY.md）
 - 语义感知分块（heading 切分）
-- 本地 Embedding 模型（MVP 用远程 API，预留 trait 接口）
+- 本地 Embedding 模型 + auto fallback（MVP 用 OpenAI API，预留 `EmbeddingProvider` trait）
 
 ---
 
