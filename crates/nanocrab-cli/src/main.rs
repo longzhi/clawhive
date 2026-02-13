@@ -506,6 +506,30 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
     let file_store_for_consolidation = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let consolidation_search_index = nanocrab_memory::search_index::SearchIndex::new(memory.db());
     let consolidation_embedding_provider = build_embedding_provider(&config);
+
+    {
+        let startup_index = consolidation_search_index.clone();
+        let startup_fs = file_store_for_consolidation.clone();
+        let startup_ep = consolidation_embedding_provider.clone();
+        tokio::task::spawn(async move {
+            if let Err(e) = startup_index.ensure_vec_table(startup_ep.dimensions()) {
+                tracing::warn!("Failed to ensure vec table at startup: {e}");
+                return;
+            }
+            match startup_index
+                .index_all(&startup_fs, startup_ep.as_ref())
+                .await
+            {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!("Startup indexing: {count} chunks indexed");
+                    }
+                }
+                Err(e) => tracing::warn!("Startup indexing failed: {e}"),
+            }
+        });
+    }
+
     let consolidator = Arc::new(HippocampusConsolidator::new(
         file_store_for_consolidation.clone(),
         Arc::new(build_router_from_config(&config)),
