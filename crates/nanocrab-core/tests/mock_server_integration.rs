@@ -97,6 +97,7 @@ fn make_orchestrator_with_provider(
             search_index,
             embedding_provider,
             tmp.path().to_path_buf(),
+            None,
         )
         .with_react_config(WeakReActConfig {
             max_steps: 1,

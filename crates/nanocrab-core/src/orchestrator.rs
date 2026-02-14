@@ -23,6 +23,7 @@ use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
 use super::tool::ToolRegistry;
+use super::web_search_tool::WebSearchTool;
 
 pub struct Orchestrator {
     router: Arc<LlmRouter>,
@@ -60,6 +61,7 @@ impl Orchestrator {
         search_index: SearchIndex,
         embedding_provider: Arc<dyn EmbeddingProvider>,
         workspace_root: std::path::PathBuf,
+        brave_api_key: Option<String>,
     ) -> Self {
         let router = Arc::new(router);
         let agents_map: HashMap<String, FullAgentConfig> = agents
@@ -89,6 +91,11 @@ impl Orchestrator {
         tool_registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root, 30)));
+        if let Some(api_key) = brave_api_key {
+            if !api_key.is_empty() {
+                tool_registry.register(Box::new(WebSearchTool::new(api_key)));
+            }
+        }
 
         Self {
             router,

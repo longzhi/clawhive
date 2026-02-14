@@ -365,6 +365,15 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
     let search_index = SearchIndex::new(memory.db());
     let embedding_provider = build_embedding_provider(&config);
 
+    let brave_api_key = config
+        .main
+        .tools
+        .web_search
+        .as_ref()
+        .filter(|ws| ws.enabled)
+        .and_then(|ws| ws.api_key.clone())
+        .filter(|k| !k.is_empty());
+
     let orchestrator = Arc::new(Orchestrator::new(
         router,
         config.agents.clone(),
@@ -380,6 +389,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         search_index,
         embedding_provider,
         workspace_dir.clone(),
+        brave_api_key,
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());

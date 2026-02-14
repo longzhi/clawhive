@@ -1595,6 +1595,7 @@ dependencies = [
  "nanocrab-provider",
  "nanocrab-runtime",
  "nanocrab-schema",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",

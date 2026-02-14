@@ -21,10 +21,10 @@ nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-nanocrab-runtime = { path = "../nanocrab-runtime" }
 nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-schema = { path = "../nanocrab-schema" }

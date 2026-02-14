@@ -94,6 +94,22 @@ pub struct ChannelsConfig {
     pub discord: Option<DiscordChannelConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebSearchConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub web_search: Option<WebSearchConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MainConfig {
     pub app: AppConfig,
@@ -102,6 +118,8 @@ pub struct MainConfig {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +474,7 @@ mod tests {
                     discord: None,
                 },
                 embedding: EmbeddingConfig::default(),
+                tools: ToolsConfig::default(),
             },
             routing: RoutingConfig {
                 default_agent_id: "nonexistent".into(),

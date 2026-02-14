@@ -30,3 +30,9 @@ embedding:
   model: text-embedding-3-small
   dimensions: 1536
   base_url: https://api.openai.com/v1
+
+tools:
+  web_search:
+    enabled: true
+    provider: brave
+    api_key: ""

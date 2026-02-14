@@ -10,7 +10,7 @@ model_policy:
   fallbacks: [haiku]
 
 tool_policy:
-  allow: [read, write, edit, exec]
+  allow: [read, write, edit, exec, web]
 
 memory_policy:
   mode: hippocampus_cortex
