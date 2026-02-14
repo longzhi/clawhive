@@ -1,10 +1,12 @@
 pub mod config;
 pub mod consolidation;
+pub mod file_tools;
 pub mod memory_tools;
 pub mod orchestrator;
 pub mod persona;
 pub mod router;
 pub mod session;
+pub mod shell_tool;
 pub mod skill;
 pub mod subagent;
 pub mod subagent_tool;
@@ -12,11 +14,13 @@ pub mod tool;
 
 pub use config::*;
 pub use consolidation::*;
+pub use file_tools::*;
 pub use memory_tools::*;
 pub use orchestrator::*;
 pub use persona::*;
 pub use router::*;
 pub use session::*;
+pub use shell_tool::*;
 pub use skill::*;
 pub use subagent::*;
 pub use subagent_tool::*;

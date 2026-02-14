@@ -96,6 +96,7 @@ fn make_orchestrator_with_provider(
             session_reader,
             search_index,
             embedding_provider,
+            tmp.path().to_path_buf(),
         )
         .with_react_config(WeakReActConfig {
             max_steps: 1,

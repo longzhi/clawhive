@@ -15,10 +15,12 @@ use nanocrab_runtime::TaskExecutor;
 use nanocrab_schema::*;
 
 use super::config::FullAgentConfig;
+use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::memory_tools::{MemoryGetTool, MemorySearchTool};
 use super::persona::Persona;
 use super::router::LlmRouter;
 use super::session::SessionManager;
+use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
 use super::tool::ToolRegistry;
 
@@ -57,6 +59,7 @@ impl Orchestrator {
         session_reader: SessionReader,
         search_index: SearchIndex,
         embedding_provider: Arc<dyn EmbeddingProvider>,
+        workspace_root: std::path::PathBuf,
     ) -> Self {
         let router = Arc::new(router);
         let agents_map: HashMap<String, FullAgentConfig> = agents
@@ -82,6 +85,10 @@ impl Orchestrator {
             sub_agent_runner,
             30,
         )));
+        tool_registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
+        tool_registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
+        tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
+        tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root, 30)));
 
         Self {
             router,
@@ -180,6 +187,7 @@ impl Orchestrator {
             self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
+        let allowed = agent.tool_policy.as_ref().map(|tp| tp.allow.clone());
         let (resp, _messages) = self
             .tool_use_loop(
                 &agent.model_policy.primary,
@@ -187,6 +195,7 @@ impl Orchestrator {
                 Some(system_prompt),
                 messages,
                 2048,
+                allowed.as_deref(),
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
@@ -325,6 +334,7 @@ impl Orchestrator {
             self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
+        let allowed_stream = agent.tool_policy.as_ref().map(|tp| tp.allow.clone());
         let (_resp, final_messages) = self
             .tool_use_loop(
                 &agent.model_policy.primary,
@@ -332,6 +342,7 @@ impl Orchestrator {
                 Some(system_prompt.clone()),
                 messages,
                 2048,
+                allowed_stream.as_deref(),
             )
             .await?;
 
@@ -382,9 +393,18 @@ impl Orchestrator {
         system: Option<String>,
         initial_messages: Vec<LlmMessage>,
         max_tokens: u32,
+        allowed_tools: Option<&[String]>,
     ) -> Result<(nanocrab_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
-        let tool_defs = self.tool_registry.tool_defs();
+        let tool_defs: Vec<_> = match allowed_tools {
+            Some(allow_list) => self
+                .tool_registry
+                .tool_defs()
+                .into_iter()
+                .filter(|t| allow_list.iter().any(|a| t.name.starts_with(a)))
+                .collect(),
+            None => self.tool_registry.tool_defs(),
+        };
         let max_iterations = 10;
 
         for _iteration in 0..max_iterations {

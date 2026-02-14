@@ -153,6 +153,7 @@ fn make_orchestrator(
             session_reader,
             search_index,
             embedding_provider,
+            tmp.path().to_path_buf(),
         ),
         tmp,
     )
@@ -202,6 +203,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         session_reader,
         search_index,
         Arc::clone(&embedding_provider),
+        tmp.path().to_path_buf(),
     );
 
     let out = orch
@@ -343,6 +345,7 @@ async fn orchestrator_creates_session() {
         session_reader,
         SearchIndex::new(memory.db()),
         Arc::new(StubEmbeddingProvider::new(8)),
+        tmp.path().to_path_buf(),
     );
 
     let inbound = test_inbound("hello");
@@ -435,6 +438,7 @@ async fn orchestrator_publishes_reply_ready() {
         session_reader,
         search_index,
         Arc::new(StubEmbeddingProvider::new(8)),
+        tmp.path().to_path_buf(),
     );
 
     let _ = orch

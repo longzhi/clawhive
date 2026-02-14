@@ -379,6 +379,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         session_reader,
         search_index,
         embedding_provider,
+        workspace_dir.clone(),
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());
