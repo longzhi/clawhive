@@ -12,6 +12,7 @@ members = [
   "crates/nanocrab-channels",
   "crates/nanocrab-cli",
   "crates/nanocrab-tui",
+  "crates/nanocrab-server",
 ]
 
 [workspace.package]
@@ -39,7 +40,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 sqlite-vec = "0.1.6"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 teloxide = { version = "0.13", features = ["macros"] }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
 log = "0.4"
@@ -47,3 +48,6 @@ ratatui = "0.29"
 crossterm = "0.28"
 tempfile = "3"
 wiremock = "0.6"
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }

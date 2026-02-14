@@ -133,6 +133,8 @@ pub struct ProviderConfig {
     pub api_base: String,
     pub api_key_env: String,
     #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
     pub models: Vec<String>,
 }
 

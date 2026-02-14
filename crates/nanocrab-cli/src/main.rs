@@ -400,7 +400,11 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
         }
         match provider_config.provider_id.as_str() {
             "anthropic" => {
-                let api_key = std::env::var(&provider_config.api_key_env).unwrap_or_default();
+                let api_key = provider_config
+                    .api_key
+                    .clone()
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or_else(|| std::env::var(&provider_config.api_key_env).unwrap_or_default());
                 if !api_key.is_empty() {
                     let provider = Arc::new(AnthropicProvider::new(
                         api_key,
@@ -413,7 +417,11 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                 }
             }
             "openai" => {
-                let api_key = std::env::var(&provider_config.api_key_env).unwrap_or_default();
+                let api_key = provider_config
+                    .api_key
+                    .clone()
+                    .filter(|k| !k.is_empty())
+                    .unwrap_or_else(|| std::env::var(&provider_config.api_key_env).unwrap_or_default());
                 if !api_key.is_empty() {
                     let provider = Arc::new(OpenAiProvider::new(
                         api_key,

@@ -89,7 +89,57 @@ prompts/<agent_id>/             # Per-agent persona prompts (system.md, style.md
 skills/                         # Skill definitions (SKILL.md with frontmatter)
 ```
 
-## Quick Start
+## Installation (End Users)
+
+Download prebuilt binaries from [GitHub Releases](https://github.com/longzhi/nanocrab/releases).
+
+### macOS (Intel)
+
+```bash
+curl -LO https://github.com/longzhi/nanocrab/releases/download/vX.Y.Z/nanocrab-vX.Y.Z-x86_64-apple-darwin.tar.gz
+tar -xzf nanocrab-vX.Y.Z-x86_64-apple-darwin.tar.gz
+chmod +x nanocrab
+sudo mv nanocrab /usr/local/bin/
+```
+
+### macOS (Apple Silicon)
+
+```bash
+curl -LO https://github.com/longzhi/nanocrab/releases/download/vX.Y.Z/nanocrab-vX.Y.Z-aarch64-apple-darwin.tar.gz
+tar -xzf nanocrab-vX.Y.Z-aarch64-apple-darwin.tar.gz
+chmod +x nanocrab
+sudo mv nanocrab /usr/local/bin/
+```
+
+### Ubuntu (x86_64)
+
+```bash
+curl -LO https://github.com/longzhi/nanocrab/releases/download/vX.Y.Z/nanocrab-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf nanocrab-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+chmod +x nanocrab
+sudo mv nanocrab /usr/local/bin/
+```
+
+### Run
+
+```bash
+# Validate configuration
+nanocrab validate
+
+# Chat mode (local REPL)
+export ANTHROPIC_API_KEY=your-key
+nanocrab chat --agent nanocrab-main
+
+# Start Telegram bot
+export TELEGRAM_BOT_TOKEN=your-token
+export ANTHROPIC_API_KEY=your-key
+nanocrab start
+
+# Start with TUI dashboard
+nanocrab start --tui
+```
+
+## Quick Start (Developers)
 
 Prerequisites: Rust 1.75+
 

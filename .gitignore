@@ -7,3 +7,11 @@
 /sessions
 /memory
 /.worktrees
+
+# Web frontend
+web/node_modules/
+web/.next/
+web/.env*.local
+
+# Sisyphus plans
+.sisyphus/

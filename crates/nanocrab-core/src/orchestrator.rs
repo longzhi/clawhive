@@ -239,7 +239,7 @@ impl Orchestrator {
         }
         if let Err(e) = self
             .session_writer
-            .append_message(&session_key.0, agent_id, &outbound.text)
+            .append_message(&session_key.0, "assistant", &outbound.text)
             .await
         {
             tracing::warn!("Failed to write assistant session entry: {e}");
