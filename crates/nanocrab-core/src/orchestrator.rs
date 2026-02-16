@@ -23,6 +23,7 @@ use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
 use super::tool::ToolRegistry;
+use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 
 pub struct Orchestrator {
@@ -91,6 +92,7 @@ impl Orchestrator {
         tool_registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root, 30)));
+        tool_registry.register(Box::new(WebFetchTool::new()));
         if let Some(api_key) = brave_api_key {
             if !api_key.is_empty() {
                 tool_registry.register(Box::new(WebSearchTool::new(api_key)));
@@ -468,7 +470,21 @@ impl Orchestrator {
             });
         }
 
-        Err(anyhow!("tool use loop exceeded max iterations"))
+        // Loop exhausted — ask the LLM for a final answer without tools
+        // so the user gets a response instead of an opaque error.
+        tracing::warn!("tool_use_loop exhausted {max_iterations} iterations, requesting final answer without tools");
+        let final_req = LlmRequest {
+            model: primary.into(),
+            system: system.clone(),
+            messages: messages.clone(),
+            max_tokens,
+            tools: vec![],
+        };
+        let resp = self
+            .router
+            .chat_with_tools(primary, fallbacks, final_req)
+            .await?;
+        Ok((resp, messages))
     }
 
     #[allow(dead_code)]

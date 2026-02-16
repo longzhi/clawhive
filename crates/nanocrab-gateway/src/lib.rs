@@ -222,6 +222,8 @@ mod tests {
             session_reader,
             search_index,
             embedding_provider,
+            tmp.path().to_path_buf(),
+            None,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),
@@ -283,6 +285,8 @@ mod tests {
             session_reader,
             search_index,
             embedding_provider,
+            tmp.path().to_path_buf(),
+            None,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),

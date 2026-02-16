@@ -24,3 +24,4 @@ nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-gateway = { path = "../nanocrab-gateway" }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }

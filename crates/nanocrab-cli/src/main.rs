@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
@@ -117,8 +119,21 @@ enum TaskCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    let log_dir = cli.config_root.join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "nanocrab.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(non_blocking))
+        .init();
 
     match cli.command {
         Commands::Validate => {
@@ -473,7 +488,7 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
         .or_insert_with(|| "anthropic/claude-sonnet-4-5".to_string());
     aliases
         .entry("haiku".to_string())
-        .or_insert_with(|| "anthropic/claude-3-5-haiku-latest".to_string());
+        .or_insert_with(|| "anthropic/claude-3-haiku-20240307".to_string());
     aliases
         .entry("opus".to_string())
         .or_insert_with(|| "anthropic/claude-opus-4-6".to_string());

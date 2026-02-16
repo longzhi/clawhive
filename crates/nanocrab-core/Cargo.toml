@@ -22,6 +22,7 @@ nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
 reqwest.workspace = true
+htmd = "0.5"
 
 [dev-dependencies]
 tempfile.workspace = true
