@@ -148,13 +148,11 @@ impl ToolExecutor for WebFetchTool {
             body
         };
 
-        // Truncate
-        let mut output = text;
-        let truncated = if output.len() > max_chars {
-            output.truncate(max_chars);
-            true
+        let truncated = text.chars().count() > max_chars;
+        let output: String = if truncated {
+            text.chars().take(max_chars).collect()
         } else {
-            false
+            text
         };
 
         // Wrap with metadata
