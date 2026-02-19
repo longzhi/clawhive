@@ -405,6 +405,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         embedding_provider,
         workspace_dir.clone(),
         brave_api_key,
+        Some(root.to_path_buf()),
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());

@@ -25,6 +25,16 @@ use super::skill::SkillRegistry;
 use super::tool::ToolRegistry;
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
+use super::workspace::Workspace;
+
+/// Per-agent workspace runtime state: file store, session I/O, search index.
+struct AgentWorkspaceState {
+    workspace: Workspace,
+    file_store: MemoryFileStore,
+    session_writer: SessionWriter,
+    session_reader: SessionReader,
+    search_index: SearchIndex,
+}
 
 pub struct Orchestrator {
     router: Arc<LlmRouter>,
@@ -35,6 +45,9 @@ pub struct Orchestrator {
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     runtime: Arc<dyn TaskExecutor>,
+    /// Per-agent workspace state, keyed by agent_id
+    agent_workspaces: HashMap<String, AgentWorkspaceState>,
+    /// Fallback for agents without a dedicated workspace
     file_store: MemoryFileStore,
     session_writer: SessionWriter,
     session_reader: SessionReader,
@@ -63,6 +76,7 @@ impl Orchestrator {
         embedding_provider: Arc<dyn EmbeddingProvider>,
         workspace_root: std::path::PathBuf,
         brave_api_key: Option<String>,
+        project_root: Option<std::path::PathBuf>,
     ) -> Self {
         let router = Arc::new(router);
         let agents_map: HashMap<String, FullAgentConfig> = agents
@@ -70,6 +84,26 @@ impl Orchestrator {
             .map(|a| (a.agent_id.clone(), a))
             .collect();
         let personas_for_subagent = personas.clone();
+
+        // Build per-agent workspace states
+        let effective_project_root = project_root.unwrap_or_else(|| workspace_root.clone());
+        let mut agent_workspaces = HashMap::new();
+        for (agent_id, agent_cfg) in &agents_map {
+            let ws = Workspace::resolve(
+                &effective_project_root,
+                agent_id,
+                agent_cfg.workspace.as_deref(),
+            );
+            let ws_root = ws.root().to_path_buf();
+            let state = AgentWorkspaceState {
+                workspace: ws,
+                file_store: MemoryFileStore::new(&ws_root),
+                session_writer: SessionWriter::new(&ws_root),
+                session_reader: SessionReader::new(&ws_root),
+                search_index: SearchIndex::new(memory.db()),
+            };
+            agent_workspaces.insert(agent_id.clone(), state);
+        }
 
         let mut tool_registry = ToolRegistry::new();
         tool_registry.register(Box::new(MemorySearchTool::new(
@@ -108,6 +142,7 @@ impl Orchestrator {
             memory,
             bus,
             runtime,
+            agent_workspaces,
             file_store,
             session_writer,
             session_reader,
@@ -117,6 +152,46 @@ impl Orchestrator {
             react_max_steps: 4,
             react_repeat_guard: 2,
         }
+    }
+
+    /// Get file store for a specific agent (falls back to global)
+    fn file_store_for(&self, agent_id: &str) -> &MemoryFileStore {
+        self.agent_workspaces
+            .get(agent_id)
+            .map(|ws| &ws.file_store)
+            .unwrap_or(&self.file_store)
+    }
+
+    /// Get session writer for a specific agent (falls back to global)
+    fn session_writer_for(&self, agent_id: &str) -> &SessionWriter {
+        self.agent_workspaces
+            .get(agent_id)
+            .map(|ws| &ws.session_writer)
+            .unwrap_or(&self.session_writer)
+    }
+
+    /// Get session reader for a specific agent (falls back to global)
+    fn session_reader_for(&self, agent_id: &str) -> &SessionReader {
+        self.agent_workspaces
+            .get(agent_id)
+            .map(|ws| &ws.session_reader)
+            .unwrap_or(&self.session_reader)
+    }
+
+    /// Get search index for a specific agent (falls back to global)
+    fn search_index_for(&self, agent_id: &str) -> &SearchIndex {
+        self.agent_workspaces
+            .get(agent_id)
+            .map(|ws| &ws.search_index)
+            .unwrap_or(&self.search_index)
+    }
+
+    /// Ensure workspace directories exist for all agents
+    pub async fn ensure_workspaces(&self) -> Result<()> {
+        for state in self.agent_workspaces.values() {
+            state.workspace.ensure_dirs().await?;
+        }
+        Ok(())
     }
 
     pub fn with_react_config(mut self, react: super::WeakReActConfig) -> Self {
@@ -142,7 +217,7 @@ impl Orchestrator {
             .await?;
 
         if session_result.expired_previous {
-            self.try_fallback_summary(&session_key, agent).await;
+            self.try_fallback_summary(agent_id, &session_key, agent).await;
         }
 
         // Save inbound data before it's moved
@@ -162,11 +237,11 @@ impl Orchestrator {
         };
 
         let memory_context = self
-            .build_memory_context(&session_key, &inbound.text)
+            .build_memory_context(agent_id, &session_key, &inbound.text)
             .await?;
 
         let history_messages = match self
-            .session_reader
+            .session_reader_for(agent_id)
             .load_recent_messages(&session_key.0, 10)
             .await
         {
@@ -234,7 +309,7 @@ impl Orchestrator {
             tracing::warn!("Failed to record user episode: {e}");
         }
         if let Err(e) = self
-            .session_writer
+            .session_writer_for(agent_id)
             .append_message(&session_key.0, "user", &inbound_text)
             .await
         {
@@ -256,7 +331,7 @@ impl Orchestrator {
             tracing::warn!("Failed to record assistant episode: {e}");
         }
         if let Err(e) = self
-            .session_writer
+            .session_writer_for(agent_id)
             .append_message(&session_key.0, "assistant", &outbound.text)
             .await
         {
@@ -293,7 +368,7 @@ impl Orchestrator {
             .await?;
 
         if session_result.expired_previous {
-            self.try_fallback_summary(&session_key, agent).await;
+            self.try_fallback_summary(agent_id, &session_key, agent).await;
         }
 
         let system_prompt = self
@@ -309,11 +384,11 @@ impl Orchestrator {
         };
 
         let memory_context = self
-            .build_memory_context(&session_key, &inbound.text)
+            .build_memory_context(agent_id, &session_key, &inbound.text)
             .await?;
 
         let history_messages = match self
-            .session_reader
+            .session_reader_for(agent_id)
             .load_recent_messages(&session_key.0, 10)
             .await
         {
@@ -531,9 +606,9 @@ impl Orchestrator {
         Ok(last_reply)
     }
 
-    async fn try_fallback_summary(&self, session_key: &SessionKey, agent: &FullAgentConfig) {
+    async fn try_fallback_summary(&self, agent_id: &str, session_key: &SessionKey, agent: &FullAgentConfig) {
         let messages = match self
-            .session_reader
+            .session_reader_for(agent_id)
             .load_recent_messages(&session_key.0, 20)
             .await
         {
@@ -542,7 +617,7 @@ impl Orchestrator {
         };
 
         let today = chrono::Utc::now().date_naive();
-        if let Ok(Some(_)) = self.file_store.read_daily(today).await {
+        if let Ok(Some(_)) = self.file_store_for(agent_id).read_daily(today).await {
             return;
         }
 
@@ -571,7 +646,7 @@ impl Orchestrator {
             .await
         {
             Ok(resp) => {
-                if let Err(e) = self.file_store.append_daily(today, &resp.text).await {
+                if let Err(e) = self.file_store_for(agent_id).append_daily(today, &resp.text).await {
                     tracing::warn!("Failed to write fallback summary: {e}");
                 } else {
                     tracing::info!("Wrote fallback summary for expired session");
@@ -583,9 +658,9 @@ impl Orchestrator {
         }
     }
 
-    async fn build_memory_context(&self, _session_key: &SessionKey, query: &str) -> Result<String> {
+    async fn build_memory_context(&self, agent_id: &str, _session_key: &SessionKey, query: &str) -> Result<String> {
         let results = self
-            .search_index
+            .search_index_for(agent_id)
             .search(query, self.embedding_provider.as_ref(), 6, 0.25)
             .await;
 
@@ -600,7 +675,7 @@ impl Orchestrator {
                 }
                 Ok(context)
             }
-            _ => self.file_store.build_memory_context().await,
+            _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
 }

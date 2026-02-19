@@ -99,6 +99,7 @@ fn make_orchestrator_with_provider(
             embedding_provider,
             tmp.path().to_path_buf(),
             None,
+            None,
         )
         .with_react_config(WeakReActConfig {
             max_steps: 1,
@@ -440,7 +441,9 @@ async fn mock_server_includes_session_history() {
     let _ = orch.handle_inbound(second, "nanocrab-main").await.unwrap();
 
     // Verify: the session JSONL should have 4 messages (user+assistant x2)
-    let reader = SessionReader::new(tmp.path());
+    // Sessions are written to the agent's workspace directory
+    let agent_ws = tmp.path().join("workspaces").join("nanocrab-main");
+    let reader = SessionReader::new(&agent_ws);
     let key_str = "telegram:tg_main:chat:1:user:1";
     let messages = reader.load_recent_messages(key_str, 20).await.unwrap();
     assert_eq!(

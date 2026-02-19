@@ -156,6 +156,7 @@ fn make_orchestrator(
             embedding_provider,
             tmp.path().to_path_buf(),
             None,
+            None,
         ),
         tmp,
     )
@@ -206,6 +207,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         search_index,
         Arc::clone(&embedding_provider),
         tmp.path().to_path_buf(),
+        None,
         None,
     );
 
@@ -350,6 +352,7 @@ async fn orchestrator_creates_session() {
         Arc::new(StubEmbeddingProvider::new(8)),
         tmp.path().to_path_buf(),
         None,
+        None,
     );
 
     let inbound = test_inbound("hello");
@@ -443,6 +446,7 @@ async fn orchestrator_publishes_reply_ready() {
         search_index,
         Arc::new(StubEmbeddingProvider::new(8)),
         tmp.path().to_path_buf(),
+        None,
         None,
     );
 
