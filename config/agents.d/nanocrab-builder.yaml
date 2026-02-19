@@ -1,5 +1,6 @@
 agent_id: nanocrab-builder
 enabled: true
+workspace: ./workspaces/nanocrab-builder
 
 identity:
   name: nanocrab-builder

@@ -13,6 +13,7 @@ pub mod web_fetch_tool;
 pub mod subagent;
 pub mod subagent_tool;
 pub mod tool;
+pub mod workspace;
 
 pub use config::*;
 pub use consolidation::*;
@@ -29,6 +30,7 @@ pub use web_fetch_tool::*;
 pub use subagent::*;
 pub use subagent_tool::*;
 pub use tool::*;
+pub use workspace::*;
 
 use serde::{Deserialize, Serialize};
 

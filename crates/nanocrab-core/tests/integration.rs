@@ -118,6 +118,7 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
         tool_policy: None,
         memory_policy: None,
         sub_agent: None,
+        workspace: None,
     }
 }
 

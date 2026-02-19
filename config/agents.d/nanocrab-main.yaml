@@ -1,5 +1,6 @@
 agent_id: nanocrab-main
 enabled: true
+workspace: ./workspaces/nanocrab-main
 
 identity:
   name: nanocrab

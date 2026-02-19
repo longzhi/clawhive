@@ -75,6 +75,7 @@ fn make_orchestrator_with_provider(
         tool_policy: None,
         memory_policy: None,
         sub_agent: None,
+        workspace: None,
     }];
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());

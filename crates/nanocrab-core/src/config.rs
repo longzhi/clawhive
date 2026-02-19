@@ -183,6 +183,8 @@ pub struct SubAgentPolicyConfig {
 pub struct FullAgentConfig {
     pub agent_id: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub workspace: Option<String>,
     pub identity: Option<IdentityConfig>,
     pub model_policy: ModelPolicy,
     pub tool_policy: Option<ToolPolicyConfig>,
@@ -492,6 +494,7 @@ mod tests {
                 tool_policy: None,
                 memory_policy: None,
                 sub_agent: None,
+                workspace: None,
             }],
         };
         let err = validate_config(&config).unwrap_err();

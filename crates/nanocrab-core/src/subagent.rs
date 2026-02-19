@@ -211,6 +211,7 @@ mod tests {
             tool_policy: None,
             memory_policy: None,
             sub_agent: None,
+                workspace: None,
         };
 
         let mut agents = HashMap::new();
