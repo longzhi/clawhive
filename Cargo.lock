@@ -427,6 +427,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "corral-core"
+version = "0.1.0"
+source = "git+https://github.com/longzhi/corral#264114e3d4047b2e47a40c003356394b20518be4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "glob",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,6 +914,12 @@ dependencies = [
  "wasip2",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "h2"
@@ -1677,6 +1697,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "corral-core",
  "futures-core",
  "htmd",
  "nanocrab-bus",

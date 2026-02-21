@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use corral_core::SandboxBuilder;
 use nanocrab_provider::ToolDef;
 
 use super::tool::{ToolExecutor, ToolOutput};
@@ -22,12 +23,36 @@ impl ExecuteCommandTool {
     }
 }
 
+fn sandbox_for_workspace(workspace: &Path, timeout_secs: u64) -> Result<corral_core::Sandbox> {
+    let mut builder = SandboxBuilder::new()
+        .work_dir(workspace)
+        .fs_read([workspace.to_string_lossy().to_string()])
+        .fs_write([workspace.to_string_lossy().to_string()])
+        .exec_allow(["sh"])
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        .network_deny();
+
+    if let Ok(path) = std::env::var("PATH") {
+        builder = builder.env("PATH", &path);
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        builder = builder.env("HOME", &home);
+    }
+
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        builder = builder.env("TMPDIR", &tmpdir);
+    }
+
+    builder.build()
+}
+
 #[async_trait]
 impl ToolExecutor for ExecuteCommandTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "execute_command".into(),
-            description: "Execute a shell command in the workspace directory. Returns stdout and stderr. Use for running builds, tests, scripts, or inspecting the system.".into(),
+            description: "Execute a shell command in a Corral sandbox scoped to the workspace directory. Returns stdout and stderr. Use for running builds, tests, scripts, or inspecting the system.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -55,33 +80,23 @@ impl ToolExecutor for ExecuteCommandTool {
 
         let workspace = self.workspace.clone();
         let command = command.to_string();
+        let sandbox = sandbox_for_workspace(&workspace, timeout_secs)?;
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .current_dir(&workspace)
-                .output(),
-        )
-        .await;
+        let result = sandbox.execute(&command).await;
 
         match result {
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let mut combined = String::new();
 
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                if !stdout.is_empty() {
-                    combined.push_str(&stdout);
+                if !output.stdout.is_empty() {
+                    combined.push_str(&output.stdout);
                 }
-                if !stderr.is_empty() {
+                if !output.stderr.is_empty() {
                     if !combined.is_empty() {
                         combined.push('\n');
                     }
                     combined.push_str("[stderr]\n");
-                    combined.push_str(&stderr);
+                    combined.push_str(&output.stderr);
                 }
 
                 if combined.len() > MAX_OUTPUT_BYTES {
@@ -89,8 +104,18 @@ impl ToolExecutor for ExecuteCommandTool {
                     combined.push_str("\n...(output truncated)");
                 }
 
-                let exit_code = output.status.code().unwrap_or(-1);
-                if !output.status.success() {
+                let exit_code = output.exit_code;
+                let mut is_error = !output.exit_code.eq(&0);
+
+                if output.was_killed {
+                    is_error = true;
+                    if !combined.is_empty() {
+                        combined.push('\n');
+                    }
+                    combined.push_str("[killed: timeout exceeded]");
+                }
+
+                if exit_code != 0 {
                     combined.push_str(&format!("\n[exit code: {exit_code}]"));
                 }
 
@@ -100,15 +125,11 @@ impl ToolExecutor for ExecuteCommandTool {
                     } else {
                         combined
                     },
-                    is_error: !output.status.success(),
+                    is_error,
                 })
             }
-            Ok(Err(e)) => Ok(ToolOutput {
+            Err(e) => Ok(ToolOutput {
                 content: format!("Failed to execute command: {e}"),
-                is_error: true,
-            }),
-            Err(_) => Ok(ToolOutput {
-                content: format!("Command timed out after {timeout_secs}s"),
                 is_error: true,
             }),
         }
@@ -153,7 +174,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("timed out"));
+        assert!(result.content.contains("killed") || result.content.contains("Timeout"));
     }
 
     #[tokio::test]
@@ -167,5 +188,17 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("found"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn denies_network_by_default_on_linux() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let result = tool
+            .execute(serde_json::json!({"command": "curl -sS https://example.com", "timeout_seconds": 5}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
     }
 }

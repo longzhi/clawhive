@@ -23,6 +23,7 @@ nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
 reqwest.workspace = true
 htmd = "0.5"
+corral-core = { git = "https://github.com/longzhi/corral", package = "corral-core", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true
