@@ -429,7 +429,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "corral-core"
 version = "0.1.0"
-source = "git+https://github.com/longzhi/corral#264114e3d4047b2e47a40c003356394b20518be4"
+source = "git+https://github.com/longzhi/corral#efefcb59674b382189a676484c363da7e2d8860b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1217,7 +1217,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -2185,7 +2185,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.36",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2222,7 +2222,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
