@@ -105,6 +105,100 @@ impl ServiceHandler for RemindersHandler {
                 let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
                 Ok(value)
             }
+            "update" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("reminders.update requires 'id'"))?;
+
+                policy.check_service_result("reminders", "update", params)?;
+                if let Some(list_name) = params.get("list").and_then(|v| v.as_str()) {
+                    policy.check_reminders_scope_result(list_name)?;
+                }
+
+                let mut cmd = tokio::process::Command::new("remindctl");
+                cmd.arg("edit").arg(id).arg("--json").arg("--no-input");
+
+                if let Some(title) = params.get("title").and_then(|v| v.as_str()) {
+                    cmd.arg("--title").arg(title);
+                }
+                if let Some(list_name) = params.get("list").and_then(|v| v.as_str()) {
+                    cmd.arg("--list").arg(list_name);
+                }
+                if let Some(due) = params.get("dueDate").and_then(|v| v.as_str()) {
+                    cmd.arg("--due").arg(due);
+                }
+                if params.get("clearDue").and_then(|v| v.as_bool()) == Some(true) {
+                    cmd.arg("--clear-due");
+                }
+                if let Some(notes) = params.get("notes").and_then(|v| v.as_str()) {
+                    cmd.arg("--notes").arg(notes);
+                }
+                if let Some(priority) = params.get("priority").and_then(|v| v.as_str()) {
+                    cmd.arg("--priority").arg(priority);
+                }
+
+                let output = cmd.output().await?;
+                if !output.status.success() {
+                    return Err(anyhow!(
+                        "remindctl edit failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                Ok(value)
+            }
+            "complete" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("reminders.complete requires 'id'"))?;
+
+                policy.check_service_result("reminders", "complete", params)?;
+
+                let output = tokio::process::Command::new("remindctl")
+                    .arg("complete")
+                    .arg(id)
+                    .arg("--json")
+                    .arg("--no-input")
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    return Err(anyhow!(
+                        "remindctl complete failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                Ok(value)
+            }
+            "delete" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("reminders.delete requires 'id'"))?;
+
+                policy.check_service_result("reminders", "delete", params)?;
+
+                let output = tokio::process::Command::new("remindctl")
+                    .arg("delete")
+                    .arg(id)
+                    .arg("--force")
+                    .arg("--json")
+                    .arg("--no-input")
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    return Err(anyhow!(
+                        "remindctl delete failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                Ok(value)
+            }
             _ => Err(anyhow!("Unknown reminders method: {method}")),
         }
     }
