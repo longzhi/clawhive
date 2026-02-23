@@ -14,6 +14,7 @@ tracing-appender.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 serde_yaml.workspace = true
+reqwest.workspace = true
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-memory = { path = "../nanocrab-memory" }
@@ -23,6 +24,7 @@ nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-channels = { path = "../nanocrab-channels" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
 nanocrab-tui = { path = "../nanocrab-tui" }
+nanocrab-auth = { path = "../nanocrab-auth" }
 
 [[bin]]
 name = "nanocrab"

@@ -8,6 +8,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod commands;
+
+use commands::auth::{handle_auth_command, AuthCommands};
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
 use nanocrab_channels::telegram::TelegramBot;
@@ -63,6 +66,8 @@ enum Commands {
     Session(SessionCommands),
     #[command(subcommand, about = "Task management")]
     Task(TaskCommands),
+    #[command(subcommand, about = "Auth management")]
+    Auth(AuthCommands),
 }
 
 #[derive(Subcommand)]
@@ -311,6 +316,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::Auth(cmd) => {
+            handle_auth_command(cmd).await?;
         }
     }
 
@@ -797,6 +805,24 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Agent(AgentCommands::Enable { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_auth_status_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "auth", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Auth(AuthCommands::Status)
+        ));
+    }
+
+    #[test]
+    fn parses_auth_login_openai_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "auth", "login", "openai"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Auth(AuthCommands::Login { .. })
         ));
     }
 }
