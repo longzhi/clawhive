@@ -98,7 +98,7 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
 
         match actions[selected].0 {
             SetupAction::AddProvider => {
-                handle_add_provider(config_root, &theme, &state, force).await?;
+                handle_add_provider(config_root, &term, &theme, &state, force).await?;
             }
             SetupAction::AddAgent => {
                 handle_add_agent(config_root, &theme, &state, force)?;
@@ -143,11 +143,35 @@ fn build_action_labels(state: &ConfigState) -> Vec<(SetupAction, String)> {
 }
 
 async fn handle_add_provider(
-    _config_root: &Path,
-    _theme: &ColorfulTheme,
-    _state: &ConfigState,
-    _force: bool,
+    config_root: &Path,
+    term: &Term,
+    theme: &ColorfulTheme,
+    state: &ConfigState,
+    force: bool,
 ) -> Result<()> {
+    let provider = prompt_provider(theme)?;
+
+    let already_configured = state
+        .providers
+        .iter()
+        .any(|item| item.provider_id == provider.as_str());
+    if already_configured && !force {
+        let should_reconfigure = Confirm::with_theme(theme)
+            .with_prompt(format!("{} already configured. Reconfigure?", provider.as_str()))
+            .default(false)
+            .interact()?;
+        if !should_reconfigure {
+            term.write_line("Provider unchanged.")?;
+            return Ok(());
+        }
+    }
+
+    let auth = prompt_auth_choice(theme, provider).await?;
+    let path = write_provider_config_unchecked(config_root, provider, &auth)?;
+    print_done(
+        term,
+        &format!("Provider configuration saved: {}", display_rel(config_root, &path)),
+    );
     Ok(())
 }
 
@@ -383,6 +407,21 @@ fn write_provider_config(config_root: &Path, provider: ProviderId, auth: &AuthCh
     Ok(target)
 }
 
+fn write_provider_config_unchecked(
+    config_root: &Path,
+    provider: ProviderId,
+    auth: &AuthChoice,
+) -> Result<PathBuf> {
+    let providers_dir = config_root.join("config/providers.d");
+    fs::create_dir_all(&providers_dir)
+        .with_context(|| format!("failed to create {}", providers_dir.display()))?;
+
+    let target = providers_dir.join(format!("{}.yaml", provider.as_str()));
+    let yaml = generate_provider_yaml(provider, auth);
+    fs::write(&target, yaml).with_context(|| format!("failed to write {}", target.display()))?;
+    Ok(target)
+}
+
 fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Result<(PathBuf, PathBuf)> {
     let agents_dir = config_root.join("config/agents.d");
     fs::create_dir_all(&agents_dir)
@@ -563,7 +602,8 @@ mod tests {
     use super::{
         build_action_labels, default_system_prompt, ensure_required_dirs, generate_agent_yaml,
         generate_main_yaml, generate_provider_yaml, generate_routing_yaml, provider_models,
-        validate_generated_config, AuthChoice, ChannelConfig, ProviderId, SetupAction,
+        validate_generated_config, write_provider_config_unchecked, AuthChoice, ChannelConfig,
+        ProviderId, SetupAction,
     };
     use crate::setup_scan::ConfigState;
 
@@ -734,5 +774,27 @@ mod tests {
         assert!(matches!(labels[3].0, SetupAction::Modify));
         assert!(matches!(labels[4].0, SetupAction::Remove));
         assert!(matches!(labels[5].0, SetupAction::Done));
+    }
+
+    #[test]
+    fn write_provider_config_unchecked_overwrites_existing_file() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        ensure_required_dirs(temp.path()).expect("create required directories");
+
+        let target = temp.path().join("config/providers.d/openai.yaml");
+        std::fs::write(&target, "old: value\n").expect("write old provider file");
+
+        write_provider_config_unchecked(
+            temp.path(),
+            ProviderId::OpenAi,
+            &AuthChoice::ApiKey {
+                env_var: "OPENAI_API_KEY".to_string(),
+            },
+        )
+        .expect("write provider config");
+
+        let updated = std::fs::read_to_string(&target).expect("read updated provider file");
+        assert!(updated.contains("provider_id: openai"));
+        assert!(!updated.contains("old: value"));
     }
 }
