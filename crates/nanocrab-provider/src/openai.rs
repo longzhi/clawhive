@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_core::Stream;
+use nanocrab_auth::AuthProfile;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -13,6 +14,7 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     api_key: String,
     api_base: String,
+    auth_profile: Option<AuthProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +45,14 @@ impl ProviderErrorKind {
 
 impl OpenAiProvider {
     pub fn new(api_key: impl Into<String>, api_base: impl Into<String>) -> Self {
+        Self::new_with_auth(api_key, api_base, None)
+    }
+
+    pub fn new_with_auth(
+        api_key: impl Into<String>,
+        api_base: impl Into<String>,
+        auth_profile: Option<AuthProfile>,
+    ) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
@@ -50,13 +60,30 @@ impl OpenAiProvider {
                 .unwrap_or_default(),
             api_key: api_key.into(),
             api_base: api_base.into().trim_end_matches('/').to_string(),
+            auth_profile,
         }
     }
 
     pub fn from_env(api_key_env: &str, api_base: impl Into<String>) -> Result<Self> {
+        Self::from_env_with_auth(api_key_env, api_base, None)
+    }
+
+    pub fn from_env_with_auth(
+        api_key_env: &str,
+        api_base: impl Into<String>,
+        auth_profile: Option<AuthProfile>,
+    ) -> Result<Self> {
         let api_key =
             std::env::var(api_key_env).map_err(|_| anyhow!("{api_key_env} is not set"))?;
-        Ok(Self::new(api_key, api_base))
+        Ok(Self::new_with_auth(api_key, api_base, auth_profile))
+    }
+
+    fn auth_bearer_token(&self) -> &str {
+        match &self.auth_profile {
+            Some(AuthProfile::OpenAiOAuth { access_token, .. }) => access_token,
+            Some(AuthProfile::ApiKey { api_key, .. }) => api_key,
+            _ => &self.api_key,
+        }
     }
 
     pub(crate) fn to_api_request(request: LlmRequest, stream: bool) -> ApiRequest {
@@ -105,7 +132,7 @@ impl LlmProvider for OpenAiProvider {
         let resp = match self
             .client
             .post(url)
-            .header("authorization", format!("Bearer {}", self.api_key))
+            .header("authorization", format!("Bearer {}", self.auth_bearer_token()))
             .header("content-type", "application/json")
             .json(&payload)
             .send()
@@ -144,7 +171,7 @@ impl LlmProvider for OpenAiProvider {
         let resp = match self
             .client
             .post(url)
-            .header("authorization", format!("Bearer {}", self.api_key))
+            .header("authorization", format!("Bearer {}", self.auth_bearer_token()))
             .header("content-type", "application/json")
             .json(&payload)
             .send()
@@ -766,6 +793,21 @@ mod tests {
             normalize_finish_reason(Some("stop".into())).as_deref(),
             Some("end_turn")
         );
+    }
+
+    #[test]
+    fn oauth_profile_token_takes_precedence() {
+        let provider = OpenAiProvider::new_with_auth(
+            "api-key-fallback",
+            "https://api.openai.com/v1",
+            Some(AuthProfile::OpenAiOAuth {
+                access_token: "oauth-at".into(),
+                refresh_token: "oauth-rt".into(),
+                expires_at: 0,
+            }),
+        );
+
+        assert_eq!(provider.auth_bearer_token(), "oauth-at");
     }
 
     #[test]

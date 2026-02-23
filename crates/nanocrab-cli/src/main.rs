@@ -11,6 +11,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod commands;
 
 use commands::auth::{handle_auth_command, AuthCommands};
+use nanocrab_auth::{AuthProfile, TokenManager};
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
 use nanocrab_channels::telegram::TelegramBot;
@@ -428,6 +429,21 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
 }
 
 fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
+    let active_profile = TokenManager::new()
+        .ok()
+        .and_then(|m| m.get_active_profile().ok().flatten());
+
+    let openai_profile = active_profile.as_ref().and_then(|p| match p {
+        AuthProfile::OpenAiOAuth { .. } => Some(p.clone()),
+        AuthProfile::ApiKey { provider_id, .. } if provider_id == "openai" => Some(p.clone()),
+        _ => None,
+    });
+    let anthropic_profile = active_profile.as_ref().and_then(|p| match p {
+        AuthProfile::AnthropicSession { .. } => Some(p.clone()),
+        AuthProfile::ApiKey { provider_id, .. } if provider_id == "anthropic" => Some(p.clone()),
+        _ => None,
+    });
+
     let mut registry = ProviderRegistry::new();
     for provider_config in &config.providers {
         if !provider_config.enabled {
@@ -441,9 +457,10 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     .filter(|k| !k.is_empty())
                     .unwrap_or_else(|| std::env::var(&provider_config.api_key_env).unwrap_or_default());
                 if !api_key.is_empty() {
-                    let provider = Arc::new(AnthropicProvider::new(
+                    let provider = Arc::new(AnthropicProvider::new_with_auth(
                         api_key,
                         provider_config.api_base.clone(),
+                        anthropic_profile.clone(),
                     ));
                     registry.register("anthropic", provider);
                 } else {
@@ -458,9 +475,10 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     .filter(|k| !k.is_empty())
                     .unwrap_or_else(|| std::env::var(&provider_config.api_key_env).unwrap_or_default());
                 if !api_key.is_empty() {
-                    let provider = Arc::new(OpenAiProvider::new(
+                    let provider = Arc::new(OpenAiProvider::new_with_auth(
                         api_key,
                         provider_config.api_base.clone(),
+                        openai_profile.clone(),
                     ));
                     registry.register("openai", provider);
                 } else {

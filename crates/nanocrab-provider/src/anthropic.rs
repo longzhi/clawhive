@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_core::Stream;
+use nanocrab_auth::AuthProfile;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -13,6 +14,7 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
     api_base: String,
+    auth_profile: Option<AuthProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +45,14 @@ impl ProviderErrorKind {
 
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>, api_base: impl Into<String>) -> Self {
+        Self::new_with_auth(api_key, api_base, None)
+    }
+
+    pub fn new_with_auth(
+        api_key: impl Into<String>,
+        api_base: impl Into<String>,
+        auth_profile: Option<AuthProfile>,
+    ) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
@@ -50,13 +60,29 @@ impl AnthropicProvider {
                 .unwrap_or_default(),
             api_key: api_key.into(),
             api_base: api_base.into().trim_end_matches('/').to_string(),
+            auth_profile,
         }
     }
 
     pub fn from_env(api_base: impl Into<String>) -> Result<Self> {
+        Self::from_env_with_auth(api_base, None)
+    }
+
+    pub fn from_env_with_auth(
+        api_base: impl Into<String>,
+        auth_profile: Option<AuthProfile>,
+    ) -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| anyhow!("ANTHROPIC_API_KEY is not set"))?;
-        Ok(Self::new(api_key, api_base))
+        Ok(Self::new_with_auth(api_key, api_base, auth_profile))
+    }
+
+    fn use_session_auth(&self) -> Option<&str> {
+        match &self.auth_profile {
+            Some(AuthProfile::AnthropicSession { session_token }) => Some(session_token.as_str()),
+            Some(AuthProfile::ApiKey { api_key, .. }) => Some(api_key.as_str()),
+            _ => None,
+        }
     }
 
     pub(crate) fn to_api_request(request: LlmRequest) -> ApiRequest {
@@ -128,16 +154,18 @@ impl LlmProvider for AnthropicProvider {
         let url = format!("{}/v1/messages", self.api_base);
         let payload = Self::to_api_request(request);
 
-        let resp = match self
+        let mut req = self
             .client
             .post(url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-        {
+            .json(&payload);
+        req = match self.use_session_auth() {
+            Some(session) => req.header("authorization", format!("Bearer {session}")),
+            None => req.header("x-api-key", &self.api_key),
+        };
+
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) if e.is_timeout() => {
                 return Err(anyhow::anyhow!(
@@ -204,16 +232,18 @@ impl LlmProvider for AnthropicProvider {
         let mut payload = Self::to_api_request(request);
         payload.stream = true;
 
-        let resp = match self
+        let mut req = self
             .client
             .post(url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-        {
+            .json(&payload);
+        req = match self.use_session_auth() {
+            Some(session) => req.header("authorization", format!("Bearer {session}")),
+            None => req.header("x-api-key", &self.api_key),
+        };
+
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) if e.is_timeout() => {
                 return Err(anyhow::anyhow!(
@@ -441,6 +471,19 @@ mod tests {
 
         assert_eq!(provider.api_key, "test-key");
         assert_eq!(provider.api_base, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn anthropic_session_profile_uses_bearer_session_token() {
+        let provider = AnthropicProvider::new_with_auth(
+            "test-key",
+            "https://api.anthropic.com",
+            Some(AuthProfile::AnthropicSession {
+                session_token: "session-xyz".to_string(),
+            }),
+        );
+
+        assert_eq!(provider.use_session_auth(), Some("session-xyz"));
     }
 
     #[test]
