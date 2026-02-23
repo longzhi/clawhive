@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Bot, MessageSquare, Radio, Brain, GitBranch, Settings } from 'lucide-react';
+import { LayoutDashboard, Bot, MessageSquare, Radio, Brain, GitBranch, CalendarClock, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
 
@@ -10,6 +10,7 @@ const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/agents', label: 'Agents', icon: Bot },
   { href: '/sessions', label: 'Sessions', icon: MessageSquare },
+  { href: '/schedules', label: 'Schedules', icon: CalendarClock },
   { href: '/channels', label: 'Channels', icon: Radio },
   { href: '/providers', label: 'Providers', icon: Brain },
   { href: '/routing', label: 'Routing', icon: GitBranch },

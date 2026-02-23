@@ -19,10 +19,11 @@ use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::memory_tools::{MemoryGetTool, MemorySearchTool};
 use super::persona::Persona;
 use super::router::LlmRouter;
+use super::schedule_tool::ScheduleTool;
 use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
-use super::tool::{ToolContext, ToolRegistry};
+use super::tool::{ConversationMessage, ToolContext, ToolRegistry};
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
@@ -78,6 +79,7 @@ impl Orchestrator {
         workspace_root: std::path::PathBuf,
         brave_api_key: Option<String>,
         project_root: Option<std::path::PathBuf>,
+        schedule_manager: Arc<nanocrab_scheduler::ScheduleManager>,
     ) -> Self {
         let router = Arc::new(router);
         let agents_map: HashMap<String, FullAgentConfig> = agents
@@ -128,6 +130,7 @@ impl Orchestrator {
         tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root.clone(), 30)));
         tool_registry.register(Box::new(WebFetchTool::new()));
+        tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
         if let Some(api_key) = brave_api_key {
             if !api_key.is_empty() {
                 tool_registry.register(Box::new(WebSearchTool::new(api_key)));
@@ -525,10 +528,12 @@ impl Orchestrator {
             });
 
             let mut tool_results = Vec::new();
+            let recent_messages = collect_recent_messages(&messages, 20);
             let ctx = match self.skill_registry.merged_permissions() {
                 Some(perms) => ToolContext::new(corral_core::PolicyEngine::new(perms)),
                 None => ToolContext::default_policy(&self.workspace_root),
-            };
+            }
+            .with_recent_messages(recent_messages);
             for (id, name, input) in tool_uses {
                 let result = match self.tool_registry.execute(&name, input, &ctx).await {
                     Ok(output) => ContentBlock::ToolResult {
@@ -684,4 +689,33 @@ impl Orchestrator {
             _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
+}
+
+fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {
+    let mut collected = Vec::new();
+
+    for message in messages.iter().rev() {
+        let mut parts = Vec::new();
+        for block in &message.content {
+            if let ContentBlock::Text { text } = block {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+        }
+
+        if !parts.is_empty() {
+            collected.push(ConversationMessage {
+                role: message.role.clone(),
+                content: parts.join("\n"),
+            });
+            if collected.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    collected.reverse();
+    collected
 }

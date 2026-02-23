@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use chrono::TimeZone;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -17,7 +18,7 @@ use nanocrab_channels::discord::DiscordBot;
 use nanocrab_channels::telegram::TelegramBot;
 use nanocrab_channels::ChannelBot;
 use nanocrab_core::*;
-use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
+use nanocrab_gateway::{spawn_scheduled_task_listener, Gateway, RateLimitConfig, RateLimiter};
 use nanocrab_memory::embedding::{
     EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
 };
@@ -27,6 +28,7 @@ use nanocrab_provider::{
     register_builtin_providers, AnthropicProvider, OpenAiProvider, ProviderRegistry,
 };
 use nanocrab_runtime::NativeExecutor;
+use nanocrab_scheduler::{ScheduleManager, ScheduleType};
 use nanocrab_schema::InboundMessage;
 
 #[derive(Parser)]
@@ -69,6 +71,8 @@ enum Commands {
     Task(TaskCommands),
     #[command(subcommand, about = "Auth management")]
     Auth(AuthCommands),
+    #[command(subcommand, about = "Manage scheduled tasks")]
+    Schedule(ScheduleCommands),
 }
 
 #[derive(Subcommand)]
@@ -120,6 +124,34 @@ enum TaskCommands {
         agent: String,
         #[arg(help = "Task description")]
         task: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommands {
+    #[command(about = "List all scheduled tasks with status")]
+    List,
+    #[command(about = "Trigger a scheduled task immediately")]
+    Run {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+    },
+    #[command(about = "Enable a disabled schedule")]
+    Enable {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+    },
+    #[command(about = "Disable a schedule")]
+    Disable {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+    },
+    #[command(about = "Show recent run history for a schedule")]
+    History {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
     },
 }
 
@@ -280,7 +312,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Session(cmd) => {
-            let (_bus, memory, _gateway, _config) = bootstrap(&cli.config_root)?;
+            let (_bus, memory, _gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
             let session_mgr = SessionManager::new(memory, 1800);
             match cmd {
                 SessionCommands::Reset { session_key } => {
@@ -293,7 +325,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config) = bootstrap(&cli.config_root)?;
+            let (_bus, _memory, gateway, _config, _schedule_manager) =
+                bootstrap(&cli.config_root)?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -321,6 +354,63 @@ async fn main() -> Result<()> {
         Commands::Auth(cmd) => {
             handle_auth_command(cmd).await?;
         }
+        Commands::Schedule(cmd) => {
+            let (_bus, _memory, _gateway, _config, schedule_manager) =
+                bootstrap(&cli.config_root)?;
+            match cmd {
+                ScheduleCommands::List => {
+                    let entries = schedule_manager.list().await;
+                    println!(
+                        "{:<24} {:<8} {:<24} {:<26} {:<8}",
+                        "ID", "ENABLED", "SCHEDULE", "NEXT RUN", "ERRORS"
+                    );
+                    println!("{}", "-".repeat(96));
+                        let next_run = entry
+                            .state
+                            .next_run_at_ms
+                            .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single())
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_else(|| "-".to_string());
+                        println!(
+                            "{:<24} {:<8} {:<24} {:<26} {:<8}",
+                            entry.config.schedule_id,
+                            if entry.config.enabled { "yes" } else { "no" },
+                            format_schedule_type(&entry.config.schedule),
+                            next_run,
+                            entry.state.consecutive_errors,
+                        );
+                    }
+                }
+                ScheduleCommands::Run { schedule_id } => {
+                    schedule_manager.trigger_now(&schedule_id).await?;
+                    println!("Triggered schedule '{schedule_id}'.");
+                }
+                ScheduleCommands::Enable { schedule_id } => {
+                    schedule_manager.set_enabled(&schedule_id, true).await?;
+                    println!("Enabled schedule '{schedule_id}'.");
+                }
+                ScheduleCommands::Disable { schedule_id } => {
+                    schedule_manager.set_enabled(&schedule_id, false).await?;
+                    println!("Disabled schedule '{schedule_id}'.");
+                }
+                ScheduleCommands::History { schedule_id, limit } => {
+                    let records = schedule_manager.recent_history(&schedule_id, limit).await?;
+                    if records.is_empty() {
+                        println!("No history for schedule '{schedule_id}'.");
+                    } else {
+                        for record in records {
+                            println!(
+                                "{} | {:>6}ms | {:?} | {}",
+                                record.started_at.to_rfc3339(),
+                                record.duration_ms,
+                                record.status,
+                                record.error.as_deref().unwrap_or("-"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -344,7 +434,29 @@ fn toggle_agent(agents_dir: &std::path::Path, agent_id: &str, enabled: bool) -> 
     Ok(())
 }
 
-fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, NanocrabConfig)> {
+fn format_schedule_type(schedule: &ScheduleType) -> String {
+    match schedule {
+        ScheduleType::Cron { expr, tz } => format!("cron({expr} @ {tz})"),
+        ScheduleType::At { at } => format!("at({at})"),
+        ScheduleType::Every {
+            interval_ms,
+            anchor_ms,
+        } => match anchor_ms {
+            Some(anchor) => format!("every({interval_ms}ms, anchor={anchor})"),
+            None => format!("every({interval_ms}ms)"),
+        },
+    }
+}
+
+fn bootstrap(
+    root: &Path,
+) -> Result<(
+    Arc<EventBus>,
+    Arc<MemoryStore>,
+    Arc<Gateway>,
+    NanocrabConfig,
+    Arc<ScheduleManager>,
+)> {
     let config = load_config(&root.join("config"))?;
 
     let db_path = root.join("data/nanocrab.db");
@@ -375,8 +487,13 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         }
     }
 
-    let bus = EventBus::new(256);
+    let bus = Arc::new(EventBus::new(256));
     let publisher = bus.publisher();
+    let schedule_manager = Arc::new(ScheduleManager::new(
+        &root.join("config/schedules.d"),
+        &root.join("data/schedules"),
+        Arc::clone(&bus),
+    )?);
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let skill_registry = SkillRegistry::load_from_dir(&root.join("skills")).unwrap_or_else(|e| {
         tracing::warn!("Failed to load skills: {e}");
@@ -415,6 +532,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         workspace_dir.clone(),
         brave_api_key,
         Some(root.to_path_buf()),
+        Arc::clone(&schedule_manager),
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());
@@ -425,7 +543,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         rate_limiter,
     ));
 
-    Ok((bus, memory, gateway, config))
+    Ok((bus, memory, gateway, config, schedule_manager))
 }
 
 fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
@@ -563,7 +681,7 @@ fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvide
 }
 
 async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
-    let (bus, memory, gateway, config) = bootstrap(root)?;
+    let (bus, memory, gateway, config, schedule_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store_for_consolidation =
@@ -609,8 +727,17 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
     let _consolidation_handle = scheduler.start();
     tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
 
+    let schedule_manager_for_loop = Arc::clone(&schedule_manager);
+    let _schedule_handle = tokio::spawn(async move {
+        schedule_manager_for_loop.run().await;
+    });
+    tracing::info!("Schedule manager started");
+
+    let _schedule_listener_handle = spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
+    tracing::info!("Scheduled task gateway listener started");
+
     let _tui_handle = if with_tui {
-        let receivers = nanocrab_tui::subscribe_all(&bus).await;
+        let receivers = nanocrab_tui::subscribe_all(bus.as_ref()).await;
         Some(tokio::spawn(async move {
             if let Err(err) = nanocrab_tui::run_tui_from_receivers(receivers).await {
                 tracing::error!("TUI exited with error: {err}");
@@ -699,7 +826,7 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config) = bootstrap(root)?;
+    let (_bus, memory, _gateway, config, _schedule_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
@@ -729,7 +856,7 @@ async fn run_consolidate(root: &Path) -> Result<()> {
 }
 
 async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
-    let (_bus, _memory, gateway, _config) = bootstrap(root)?;
+    let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(root)?;
 
     println!("nanocrab REPL. Type 'quit' to exit.");
     println!("---");

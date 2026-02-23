@@ -14,6 +14,7 @@ export function Topbar() {
     if (path === '/') return 'Dashboard';
     if (path.startsWith('/agents')) return 'Agents';
     if (path.startsWith('/sessions')) return 'Sessions';
+    if (path.startsWith('/schedules')) return 'Schedules';
     if (path.startsWith('/channels')) return 'Channels';
     if (path.startsWith('/providers')) return 'Providers';
     if (path.startsWith('/routing')) return 'Routing';

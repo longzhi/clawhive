@@ -25,6 +25,7 @@ nanocrab-channels = { path = "../nanocrab-channels" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
 nanocrab-tui = { path = "../nanocrab-tui" }
 nanocrab-auth = { path = "../nanocrab-auth" }
+nanocrab-scheduler = { path = "../nanocrab-scheduler" }
 
 [[bin]]
 name = "nanocrab"

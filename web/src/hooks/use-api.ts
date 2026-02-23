@@ -67,18 +67,43 @@ export interface ConnectorConfig {
   connector_id: string;
   token: string;
 }
-
 export interface ChannelConfig {
   enabled: boolean;
   connectors: ConnectorConfig[];
 }
 
 export type ChannelsResponse = Record<string, ChannelConfig>;
-
 export interface ConnectorStatus {
   kind: string;
   connector_id: string;
   status: "connected" | "error" | "inactive";
+}
+export interface ScheduleListItem {
+  schedule_id: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  schedule: {
+    kind: "cron" | "at" | "every";
+    expr?: string;
+    tz?: string;
+    at?: string;
+    interval_ms?: number;
+    anchor_ms?: number;
+  };
+  agent_id: string;
+  session_mode: "main" | "isolated";
+  next_run_at: string | null;
+  last_run_status: "ok" | "error" | "skipped" | null;
+  last_run_at: string | null;
+  consecutive_errors: number;
+}
+export interface ScheduleRunHistoryItem {
+  started_at: string;
+  ended_at: string;
+  status: "ok" | "error" | "skipped";
+  error: string | null;
+  duration_ms: number;
 }
 
 // Hooks
@@ -194,4 +219,41 @@ export function useSessionMessages(key: string) {
 
 export function useMetrics() {
   return useQuery({ queryKey: ["metrics"], queryFn: () => apiFetch<Metrics>("/api/events/metrics"), refetchInterval: 10000 });
+}
+
+export function useSchedules() {
+  return useQuery({
+    queryKey: ["schedules"],
+    queryFn: () => apiFetch<ScheduleListItem[]>("/api/schedules"),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useRunSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scheduleId: string) =>
+      apiFetch<void>(`/api/schedules/${scheduleId}/run`, { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+  });
+}
+
+export function useToggleSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      apiFetch<void>(`/api/schedules/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+  });
+}
+
+export function useScheduleHistory(scheduleId: string, limit = 10) {
+  return useQuery({
+    queryKey: ["schedules", scheduleId, "history", limit],
+    queryFn: () => apiFetch<ScheduleRunHistoryItem[]>(`/api/schedules/${scheduleId}/history?limit=${limit}`),
+    enabled: !!scheduleId,
+  });
 }

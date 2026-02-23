@@ -19,7 +19,7 @@ export function MobileNav() {
   return (
     <div className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-background border-t border-border flex items-center justify-around px-2 z-40">
       {mobileTabs.map((tab) => {
-        const isActive = pathname === tab.href || (tab.label === 'Config' && ['/channels', '/providers', '/routing'].includes(pathname));
+        const isActive = pathname === tab.href || (tab.label === 'Config' && ['/channels', '/providers', '/routing', '/schedules'].includes(pathname));
         return (
           <Link
             key={tab.href}

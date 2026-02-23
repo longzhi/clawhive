@@ -11,14 +11,22 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConversationMessage {
+    pub role: String,
+    pub content: String,
+}
+
 pub struct ToolContext {
     policy: Option<PolicyEngine>,
+    recent_messages: Vec<ConversationMessage>,
 }
 
 impl ToolContext {
     pub fn new(policy: PolicyEngine) -> Self {
         Self {
             policy: Some(policy),
+            recent_messages: Vec::new(),
         }
     }
 
@@ -33,7 +41,22 @@ impl ToolContext {
             .build();
         Self {
             policy: Some(PolicyEngine::new(perms)),
+            recent_messages: Vec::new(),
         }
+    }
+
+    pub fn with_recent_messages(mut self, recent_messages: Vec<ConversationMessage>) -> Self {
+        self.recent_messages = recent_messages;
+        self
+    }
+
+    pub fn recent_messages(&self, limit: usize) -> Vec<ConversationMessage> {
+        if limit == 0 || self.recent_messages.is_empty() {
+            return Vec::new();
+        }
+
+        let start = self.recent_messages.len().saturating_sub(limit);
+        self.recent_messages[start..].to_vec()
     }
 
     pub fn check_read(&self, path: &str) -> bool {

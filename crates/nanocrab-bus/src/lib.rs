@@ -18,6 +18,8 @@ pub enum Topic {
     MemoryReadRequested,
     ConsolidationCompleted,
     StreamDelta,
+    ScheduledTaskTriggered,
+    ScheduledTaskCompleted,
 }
 
 impl Topic {
@@ -34,6 +36,8 @@ impl Topic {
             BusMessage::MemoryReadRequested { .. } => Topic::MemoryReadRequested,
             BusMessage::ConsolidationCompleted { .. } => Topic::ConsolidationCompleted,
             BusMessage::StreamDelta { .. } => Topic::StreamDelta,
+            BusMessage::ScheduledTaskTriggered { .. } => Topic::ScheduledTaskTriggered,
+            BusMessage::ScheduledTaskCompleted { .. } => Topic::ScheduledTaskCompleted,
         }
     }
 }
@@ -304,6 +308,30 @@ mod tests {
                     is_final: false,
                 },
                 Topic::StreamDelta,
+            ),
+            (
+                BusMessage::ScheduledTaskTriggered {
+                    schedule_id: "daily-report".into(),
+                    agent_id: "nanocrab-main".into(),
+                    task: "run report".into(),
+                    session_mode: nanocrab_schema::ScheduledSessionMode::Isolated,
+                    delivery_mode: nanocrab_schema::ScheduledDeliveryMode::None,
+                    delivery_channel: None,
+                    delivery_connector_id: None,
+                    triggered_at: Utc::now(),
+                },
+                Topic::ScheduledTaskTriggered,
+            ),
+            (
+                BusMessage::ScheduledTaskCompleted {
+                    schedule_id: "daily-report".into(),
+                    status: nanocrab_schema::ScheduledRunStatus::Ok,
+                    error: None,
+                    started_at: Utc::now(),
+                    ended_at: Utc::now(),
+                    response: Some("ok".into()),
+                },
+                Topic::ScheduledTaskCompleted,
             ),
         ];
 

@@ -9,6 +9,7 @@ use nanocrab_memory::MemoryStore;
 use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
 use nanocrab_provider::{AnthropicProvider, LlmMessage, LlmProvider, LlmRequest, ProviderRegistry};
 use nanocrab_runtime::NativeExecutor;
+use nanocrab_scheduler::ScheduleManager;
 use nanocrab_schema::{BusMessage, InboundMessage, SessionKey};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -82,6 +83,14 @@ fn make_orchestrator_with_provider(
     let session_reader = SessionReader::new(tmp.path());
     let search_index = SearchIndex::new(memory.db());
     let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+    let schedule_manager = Arc::new(
+        ScheduleManager::new(
+            &tmp.path().join("config/schedules.d"),
+            &tmp.path().join("data/schedules"),
+            Arc::new(EventBus::new(16)),
+        )
+        .unwrap(),
+    );
     (
         Orchestrator::new(
             router,
@@ -100,6 +109,7 @@ fn make_orchestrator_with_provider(
             tmp.path().to_path_buf(),
             None,
             None,
+            schedule_manager,
         )
         .with_react_config(WeakReActConfig {
             max_steps: 1,

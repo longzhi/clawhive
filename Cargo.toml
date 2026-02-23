@@ -14,6 +14,7 @@ members = [
   "crates/nanocrab-cli",
   "crates/nanocrab-tui",
   "crates/nanocrab-server",
+  "crates/nanocrab-scheduler",
 ]
 
 [workspace.package]

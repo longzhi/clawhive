@@ -2,10 +2,11 @@ use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use nanocrab_bus::BusPublisher;
+use nanocrab_bus::{BusPublisher, EventBus, Topic};
 use nanocrab_core::{Orchestrator, RoutingConfig};
 use nanocrab_schema::*;
 use tokio::sync::Mutex as TokioMutex;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
@@ -160,6 +161,77 @@ impl Gateway {
     }
 }
 
+pub fn spawn_scheduled_task_listener(
+    gateway: Arc<Gateway>,
+    bus: Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = bus.subscribe(Topic::ScheduledTaskTriggered).await;
+        while let Some(msg) = rx.recv().await {
+            let BusMessage::ScheduledTaskTriggered {
+                schedule_id,
+                agent_id: _,
+                task,
+                session_mode,
+                delivery_mode: _,
+                delivery_channel: _,
+                delivery_connector_id: _,
+                triggered_at,
+            } = msg
+            else {
+                continue;
+            };
+
+            let conversation_scope = match session_mode {
+                ScheduledSessionMode::Isolated => {
+                    format!("schedule:{}:{}", schedule_id, Uuid::new_v4())
+                }
+                ScheduledSessionMode::Main => format!("schedule:{}", schedule_id),
+            };
+
+            let inbound = InboundMessage {
+                trace_id: Uuid::new_v4(),
+                channel_type: "scheduler".into(),
+                connector_id: schedule_id.clone(),
+                conversation_scope,
+                user_scope: "user:scheduler".into(),
+                text: task,
+                at: triggered_at,
+                thread_id: None,
+                is_mention: false,
+                mention_target: None,
+            };
+
+            match gateway.handle_inbound(inbound).await {
+                Ok(outbound) => {
+                    let _ = bus
+                        .publish(BusMessage::ScheduledTaskCompleted {
+                            schedule_id,
+                            status: ScheduledRunStatus::Ok,
+                            error: None,
+                            started_at: triggered_at,
+                            ended_at: chrono::Utc::now(),
+                            response: Some(outbound.text),
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = bus
+                        .publish(BusMessage::ScheduledTaskCompleted {
+                            schedule_id,
+                            status: ScheduledRunStatus::Error,
+                            error: Some(e.to_string()),
+                            started_at: triggered_at,
+                            ended_at: chrono::Utc::now(),
+                            response: None,
+                        })
+                        .await;
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -173,6 +245,7 @@ mod tests {
     use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
     use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
     use nanocrab_runtime::NativeExecutor;
+    use nanocrab_scheduler::ScheduleManager;
     use nanocrab_schema::{BusMessage, InboundMessage};
 
     use super::*;
@@ -189,6 +262,14 @@ mod tests {
         let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
         let bus = EventBus::new(16);
         let publisher = bus.publisher();
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                &tmp.path().join("config/schedules.d"),
+                &tmp.path().join("data/schedules"),
+                Arc::new(EventBus::new(16)),
+            )
+            .unwrap(),
+        );
         let session_mgr = SessionManager::new(memory.clone(), 1800);
         let file_store = MemoryFileStore::new(tmp.path());
         let session_writer = SessionWriter::new(tmp.path());
@@ -226,6 +307,7 @@ mod tests {
             tmp.path().to_path_buf(),
             None,
             None,
+            schedule_manager,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),
@@ -254,6 +336,14 @@ mod tests {
         let handle_incoming_rx = bus.subscribe(Topic::HandleIncomingMessage).await;
         let message_accepted_rx = bus.subscribe(Topic::MessageAccepted).await;
         let publisher = bus.publisher();
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                &tmp.path().join("config/schedules.d"),
+                &tmp.path().join("data/schedules"),
+                Arc::new(EventBus::new(16)),
+            )
+            .unwrap(),
+        );
         let session_mgr = SessionManager::new(memory.clone(), 1800);
         let file_store = MemoryFileStore::new(tmp.path());
         let session_writer = SessionWriter::new(tmp.path());
@@ -291,6 +381,7 @@ mod tests {
             tmp.path().to_path_buf(),
             None,
             None,
+            schedule_manager,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),

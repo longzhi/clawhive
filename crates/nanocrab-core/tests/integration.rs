@@ -14,6 +14,7 @@ use nanocrab_provider::{
     ProviderRegistry,
 };
 use nanocrab_runtime::NativeExecutor;
+use nanocrab_scheduler::ScheduleManager;
 use nanocrab_schema::{BusMessage, InboundMessage, SessionKey};
 use uuid::Uuid;
 
@@ -132,6 +133,14 @@ fn make_orchestrator(
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let publisher = bus.publisher();
+    let schedule_manager = Arc::new(
+        ScheduleManager::new(
+            &tmp.path().join("config/schedules.d"),
+            &tmp.path().join("data/schedules"),
+            Arc::new(EventBus::new(16)),
+        )
+        .unwrap(),
+    );
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
@@ -157,6 +166,7 @@ fn make_orchestrator(
             tmp.path().to_path_buf(),
             None,
             None,
+            schedule_manager,
         ),
         tmp,
     )
@@ -180,6 +190,14 @@ async fn orchestrator_uses_search_index_for_memory_context() {
 
     let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
     let search_index = SearchIndex::new(memory.db());
+    let schedule_manager = Arc::new(
+        ScheduleManager::new(
+            &tmp.path().join("config/schedules.d"),
+            &tmp.path().join("data/schedules"),
+            Arc::new(EventBus::new(16)),
+        )
+        .unwrap(),
+    );
     let memory_text = "# Plans\n\ncobalt migration architecture details";
     file_store.write_long_term(memory_text).await.unwrap();
     search_index
@@ -209,6 +227,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         tmp.path().to_path_buf(),
         None,
         None,
+        schedule_manager,
     );
 
     let out = orch
@@ -336,6 +355,14 @@ async fn orchestrator_creates_session() {
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
     let session_reader = SessionReader::new(tmp.path());
+    let schedule_manager = Arc::new(
+        ScheduleManager::new(
+            &tmp.path().join("config/schedules.d"),
+            &tmp.path().join("data/schedules"),
+            Arc::new(EventBus::new(16)),
+        )
+        .unwrap(),
+    );
     let orch = Orchestrator::new(
         router,
         agents,
@@ -353,6 +380,7 @@ async fn orchestrator_creates_session() {
         tmp.path().to_path_buf(),
         None,
         None,
+        schedule_manager,
     );
 
     let inbound = test_inbound("hello");
@@ -431,6 +459,14 @@ async fn orchestrator_publishes_reply_ready() {
     let session_writer = SessionWriter::new(tmp.path());
     let session_reader = SessionReader::new(tmp.path());
     let search_index = SearchIndex::new(memory.db());
+    let schedule_manager = Arc::new(
+        ScheduleManager::new(
+            &tmp.path().join("config/schedules.d"),
+            &tmp.path().join("data/schedules"),
+            Arc::new(EventBus::new(16)),
+        )
+        .unwrap(),
+    );
     let orch = Orchestrator::new(
         router,
         agents,
@@ -448,6 +484,7 @@ async fn orchestrator_publishes_reply_ready() {
         tmp.path().to_path_buf(),
         None,
         None,
+        schedule_manager,
     );
 
     let _ = orch
