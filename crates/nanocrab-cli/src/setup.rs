@@ -176,11 +176,68 @@ async fn handle_add_provider(
 }
 
 fn handle_add_agent(
-    _config_root: &Path,
-    _theme: &ColorfulTheme,
-    _state: &ConfigState,
-    _force: bool,
+    config_root: &Path,
+    theme: &ColorfulTheme,
+    state: &ConfigState,
+    force: bool,
 ) -> Result<()> {
+    let agent_id: String = Input::with_theme(theme)
+        .with_prompt("Agent ID")
+        .default("nanocrab-main".to_string())
+        .interact_text()?;
+    let agent_id = agent_id.trim().to_string();
+    if agent_id.is_empty() {
+        anyhow::bail!("agent id cannot be empty");
+    }
+
+    let existing = state.agents.iter().any(|a| a.agent_id == agent_id);
+    if existing && !force {
+        let reconfigure = Confirm::with_theme(theme)
+            .with_prompt(format!("{agent_id} already configured. Reconfigure?"))
+            .default(false)
+            .interact()?;
+        if !reconfigure {
+            return Ok(());
+        }
+    }
+
+    let name: String = Input::with_theme(theme)
+        .with_prompt("Display name")
+        .default("Nanocrab".to_string())
+        .interact_text()?;
+    let emoji: String = Input::with_theme(theme)
+        .with_prompt("Emoji")
+        .default("🦀".to_string())
+        .interact_text()?;
+
+    let mut models = Vec::new();
+    for p in &state.providers {
+        for m in provider_models_for_id(&p.provider_id) {
+            models.push(m);
+        }
+    }
+    if models.is_empty() {
+        models.push("sonnet".to_string());
+    }
+    models.push("Custom…".to_string());
+
+    let model_labels: Vec<&str> = models.iter().map(String::as_str).collect();
+    let selected = Select::with_theme(theme)
+        .with_prompt("Primary model")
+        .items(&model_labels)
+        .default(0)
+        .interact()?;
+
+    let primary_model = if models[selected] == "Custom…" {
+        Input::with_theme(theme)
+            .with_prompt("Model ID (provider/model)")
+            .interact_text()?
+    } else {
+        models[selected].clone()
+    };
+
+    write_agent_files_unchecked(config_root, &agent_id, &name, &emoji, &primary_model)?;
+    print_done(&Term::stdout(), &format!("Agent {agent_id} configured."));
     Ok(())
 }
 
@@ -451,6 +508,27 @@ fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Res
     Ok((agent_yaml_path, prompt_path))
 }
 
+fn write_agent_files_unchecked(
+    config_root: &Path,
+    agent_id: &str,
+    name: &str,
+    emoji: &str,
+    primary_model: &str,
+) -> Result<()> {
+    let agents_dir = config_root.join("config/agents.d");
+    fs::create_dir_all(&agents_dir)?;
+    let yaml = generate_agent_yaml(agent_id, name, emoji, primary_model);
+    fs::write(agents_dir.join(format!("{agent_id}.yaml")), yaml)?;
+
+    let prompt_dir = config_root.join("prompts").join(agent_id);
+    fs::create_dir_all(&prompt_dir)?;
+    let prompt_path = prompt_dir.join("system.md");
+    if !prompt_path.exists() {
+        fs::write(&prompt_path, default_system_prompt(name))?;
+    }
+    Ok(())
+}
+
 fn write_main_and_routing(
     config_root: &Path,
     default_agent_id: &str,
@@ -590,6 +668,17 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
     }
 }
 
+fn provider_models_for_id(provider_id: &str) -> Vec<String> {
+    match provider_id {
+        "anthropic" => vec![
+            "anthropic/claude-sonnet-4-5".to_string(),
+            "anthropic/claude-3-haiku-20240307".to_string(),
+        ],
+        "openai" => vec!["openai/gpt-4o-mini".to_string(), "openai/gpt-4o".to_string()],
+        _ => vec![],
+    }
+}
+
 fn unix_timestamp() -> Result<i64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -602,8 +691,8 @@ mod tests {
     use super::{
         build_action_labels, default_system_prompt, ensure_required_dirs, generate_agent_yaml,
         generate_main_yaml, generate_provider_yaml, generate_routing_yaml, provider_models,
-        validate_generated_config, write_provider_config_unchecked, AuthChoice, ChannelConfig,
-        ProviderId, SetupAction,
+        provider_models_for_id, validate_generated_config, write_agent_files_unchecked,
+        write_provider_config_unchecked, AuthChoice, ChannelConfig, ProviderId, SetupAction,
     };
     use crate::setup_scan::ConfigState;
 
@@ -660,6 +749,26 @@ mod tests {
 
         assert!(anthropic_models.iter().all(|m| m.starts_with("anthropic/")));
         assert!(openai_models.iter().all(|m| m.starts_with("openai/")));
+    }
+
+    #[test]
+    fn provider_models_for_id_returns_known_provider_models() {
+        let anthropic = provider_models_for_id("anthropic");
+        let openai = provider_models_for_id("openai");
+        let unknown = provider_models_for_id("other");
+
+        assert_eq!(
+            anthropic,
+            vec![
+                "anthropic/claude-sonnet-4-5".to_string(),
+                "anthropic/claude-3-haiku-20240307".to_string(),
+            ]
+        );
+        assert_eq!(
+            openai,
+            vec!["openai/gpt-4o-mini".to_string(), "openai/gpt-4o".to_string()]
+        );
+        assert!(unknown.is_empty());
     }
 
     #[test]
@@ -796,5 +905,35 @@ mod tests {
         let updated = std::fs::read_to_string(&target).expect("read updated provider file");
         assert!(updated.contains("provider_id: openai"));
         assert!(!updated.contains("old: value"));
+    }
+
+    #[test]
+    fn write_agent_files_unchecked_overwrites_yaml_and_keeps_existing_prompt() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        ensure_required_dirs(temp.path()).expect("create required directories");
+
+        let yaml_path = temp.path().join("config/agents.d/nanocrab-main.yaml");
+        std::fs::write(&yaml_path, "old: value\n").expect("write old agent yaml");
+
+        let prompt_dir = temp.path().join("prompts/nanocrab-main");
+        std::fs::create_dir_all(&prompt_dir).expect("create prompt dir");
+        let prompt_path = prompt_dir.join("system.md");
+        std::fs::write(&prompt_path, "keep this prompt").expect("write existing prompt");
+
+        write_agent_files_unchecked(
+            temp.path(),
+            "nanocrab-main",
+            "Nanocrab",
+            "🦀",
+            "openai/gpt-4o-mini",
+        )
+        .expect("write agent files");
+
+        let yaml = std::fs::read_to_string(&yaml_path).expect("read yaml");
+        let prompt = std::fs::read_to_string(&prompt_path).expect("read prompt");
+
+        assert!(yaml.contains("agent_id: nanocrab-main"));
+        assert!(!yaml.contains("old: value"));
+        assert_eq!(prompt, "keep this prompt");
     }
 }
