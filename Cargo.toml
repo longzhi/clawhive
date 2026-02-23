@@ -9,6 +9,7 @@ members = [
   "crates/nanocrab-memory",
   "crates/nanocrab-runtime",
   "crates/nanocrab-provider",
+  "crates/nanocrab-auth",
   "crates/nanocrab-channels",
   "crates/nanocrab-cli",
   "crates/nanocrab-tui",

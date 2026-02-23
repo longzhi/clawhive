@@ -1635,6 +1635,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocrab-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "nanocrab-bus"
 version = "0.1.0"
 dependencies = [
