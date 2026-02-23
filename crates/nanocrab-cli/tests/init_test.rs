@@ -37,8 +37,10 @@ channels:
       - connector_id: main
         token: "7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   discord:
-    enabled: false
-    connectors: []
+    enabled: true
+    connectors:
+      - connector_id: dc-main
+        token: "discord-raw-token"
 
 embedding:
   enabled: false
@@ -89,6 +91,11 @@ bindings:
     match:
       kind: dm
     agent_id: nanocrab-main
+  - channel_type: discord
+    connector_id: dc-main
+    match:
+      kind: dm
+    agent_id: nanocrab-main
 "#,
     )?;
 
@@ -105,6 +112,11 @@ bindings:
         config.main.channels.telegram.as_ref().unwrap().connectors[0].token,
         "7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     );
+    assert_eq!(
+        config.main.channels.discord.as_ref().unwrap().connectors[0].token,
+        "discord-raw-token"
+    );
+    assert_eq!(config.routing.bindings.len(), 2);
 
     fs::remove_dir_all(root)?;
     Ok(())
