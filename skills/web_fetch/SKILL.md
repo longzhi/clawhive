@@ -5,6 +5,13 @@ requires:
   bins:
     - curl
   env: []
+permissions:
+  network:
+    allow: ["*:443", "*:80"]
+  exec: [curl, sh, sed, awk, grep, head]
+  fs:
+    read: ["$SKILL_DIR/**"]
+    write: ["$WORK_DIR/**"]
 ---
 
 # Web Fetch - URL Content Retrieval
