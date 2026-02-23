@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 nanocrab-schema = { path = "../nanocrab-schema" }
+anyhow.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
+chrono-tz = "0.9"
 cron = "0.12"
 uuid.workspace = true
