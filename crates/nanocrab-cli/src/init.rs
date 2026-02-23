@@ -111,6 +111,16 @@ fn prompt_agent_setup(theme: &ColorfulTheme, provider: ProviderId) -> Result<Age
         .default(0)
         .interact()?;
 
+    let agent_id = agent_id.trim().to_string();
+    let name = name.trim().to_string();
+    let emoji = emoji.trim().to_string();
+    if agent_id.is_empty() {
+        anyhow::bail!("agent id cannot be empty");
+    }
+    if name.is_empty() {
+        anyhow::bail!("agent display name cannot be empty");
+    }
+
     Ok(AgentSetup {
         agent_id,
         name,
@@ -297,7 +307,8 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_system_prompt, generate_agent_yaml, generate_provider_yaml, AuthChoice, ProviderId,
+        default_system_prompt, generate_agent_yaml, generate_provider_yaml, provider_models,
+        AuthChoice, ProviderId,
     };
 
     #[test]
@@ -344,5 +355,14 @@ mod tests {
         let prompt = default_system_prompt("Nanocrab");
         assert!(prompt.contains("You are Nanocrab"));
         assert!(prompt.contains("helpful AI assistant"));
+    }
+
+    #[test]
+    fn provider_model_aliases_are_fully_qualified() {
+        let anthropic_models = provider_models(ProviderId::Anthropic);
+        let openai_models = provider_models(ProviderId::OpenAi);
+
+        assert!(anthropic_models.iter().all(|m| m.starts_with("anthropic/")));
+        assert!(openai_models.iter().all(|m| m.starts_with("openai/")));
     }
 }
