@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use nanocrab_provider::ToolDef;
 use serde::Deserialize;
 
-use super::tool::{ToolExecutor, ToolOutput};
+use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_COUNT: u64 = 5;
@@ -76,7 +76,7 @@ impl ToolExecutor for WebSearchTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let query = input["query"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'query' field"))?;

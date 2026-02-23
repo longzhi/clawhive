@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use nanocrab_provider::ToolDef;
 
-use super::tool::{ToolExecutor, ToolOutput};
+use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 fn validate_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
     if requested.is_empty() {
@@ -82,7 +82,7 @@ impl ToolExecutor for ReadFileTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -187,7 +187,7 @@ impl ToolExecutor for WriteFileTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -264,7 +264,7 @@ impl ToolExecutor for EditFileTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -335,8 +335,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("hello.txt"), "line1\nline2\nline3").unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "hello.txt"}))
+            .execute(serde_json::json!({"path": "hello.txt"}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -349,8 +350,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "a\nb\nc\nd\ne").unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "f.txt", "offset": 3, "limit": 2}))
+            .execute(
+                serde_json::json!({"path": "f.txt", "offset": 3, "limit": 2}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -365,8 +370,9 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("subdir")).unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "."}))
+            .execute(serde_json::json!({"path": "."}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -378,8 +384,9 @@ mod tests {
     async fn path_escape_blocked() {
         let tmp = TempDir::new().unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "../../../etc/passwd"}))
+            .execute(serde_json::json!({"path": "../../../etc/passwd"}), &ctx)
             .await
             .unwrap();
         assert!(result.is_error);
@@ -390,8 +397,12 @@ mod tests {
     async fn write_file_basic() {
         let tmp = TempDir::new().unwrap();
         let tool = WriteFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "new.txt", "content": "hello world"}))
+            .execute(
+                serde_json::json!({"path": "new.txt", "content": "hello world"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -403,8 +414,12 @@ mod tests {
     async fn write_file_creates_dirs() {
         let tmp = TempDir::new().unwrap();
         let tool = WriteFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "sub/deep/file.txt", "content": "nested"}))
+            .execute(
+                serde_json::json!({"path": "sub/deep/file.txt", "content": "nested"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -416,8 +431,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "foo bar baz").unwrap();
         let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "e.txt", "old_text": "bar", "new_text": "qux"}))
+            .execute(
+                serde_json::json!({"path": "e.txt", "old_text": "bar", "new_text": "qux"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -430,8 +449,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "foo bar").unwrap();
         let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "e.txt", "old_text": "missing", "new_text": "x"}))
+            .execute(
+                serde_json::json!({"path": "e.txt", "old_text": "missing", "new_text": "x"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(result.is_error);
@@ -443,8 +466,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "aaa aaa").unwrap();
         let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"path": "e.txt", "old_text": "aaa", "new_text": "bbb"}))
+            .execute(
+                serde_json::json!({"path": "e.txt", "old_text": "aaa", "new_text": "bbb"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(result.is_error);

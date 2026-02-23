@@ -12,7 +12,7 @@ use corral_core::{
 use nanocrab_provider::ToolDef;
 use tokio::sync::OnceCell;
 
-use super::tool::{ToolExecutor, ToolOutput};
+use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const MAX_OUTPUT_BYTES: usize = 50_000;
 
@@ -314,7 +314,7 @@ impl ToolExecutor for ExecuteCommandTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let command = input["command"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'command' field"))?;
@@ -407,8 +407,9 @@ mod tests {
     async fn echo_command() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}))
+            .execute(serde_json::json!({"command": "echo hello"}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -419,8 +420,9 @@ mod tests {
     async fn failing_command() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"command": "exit 1"}))
+            .execute(serde_json::json!({"command": "exit 1"}), &ctx)
             .await
             .unwrap();
         assert!(result.is_error);
@@ -431,8 +433,12 @@ mod tests {
     async fn timeout_command() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 1);
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"command": "sleep 10", "timeout_seconds": 1}))
+            .execute(
+                serde_json::json!({"command": "sleep 10", "timeout_seconds": 1}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(result.is_error);
@@ -444,8 +450,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("marker.txt"), "found").unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"command": "cat marker.txt"}))
+            .execute(serde_json::json!({"command": "cat marker.txt"}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -457,8 +464,12 @@ mod tests {
     async fn denies_network_by_default_on_linux() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let ctx = ToolContext::default_policy(tmp.path());
         let result = tool
-            .execute(serde_json::json!({"command": "curl -sS https://example.com", "timeout_seconds": 5}))
+            .execute(
+                serde_json::json!({"command": "curl -sS https://example.com", "timeout_seconds": 5}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(result.is_error);

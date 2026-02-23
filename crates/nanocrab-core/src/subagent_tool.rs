@@ -6,7 +6,7 @@ use nanocrab_provider::ToolDef;
 use uuid::Uuid;
 
 use super::subagent::{SubAgentRequest, SubAgentRunner};
-use super::tool::{ToolExecutor, ToolOutput};
+use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 pub struct SubAgentTool {
     runner: Arc<SubAgentRunner>,
@@ -50,7 +50,7 @@ impl ToolExecutor for SubAgentTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let target_agent_id = input["target_agent_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'target_agent_id' field"))?
@@ -150,11 +150,12 @@ mod tests {
     #[tokio::test]
     async fn delegate_to_valid_agent() {
         let tool = make_sub_agent_tool();
+        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
             .execute(serde_json::json!({
                 "target_agent_id": "helper",
                 "task": "Say hello"
-            }))
+            }), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -164,11 +165,12 @@ mod tests {
     #[tokio::test]
     async fn delegate_to_unknown_agent() {
         let tool = make_sub_agent_tool();
+        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
             .execute(serde_json::json!({
                 "target_agent_id": "nonexistent",
                 "task": "Do something"
-            }))
+            }), &ctx)
             .await
             .unwrap();
         assert!(result.is_error);
@@ -178,10 +180,11 @@ mod tests {
     #[tokio::test]
     async fn missing_required_field() {
         let tool = make_sub_agent_tool();
+        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
             .execute(serde_json::json!({
                 "target_agent_id": "helper"
-            }))
+            }), &ctx)
             .await;
         assert!(result.is_err());
     }

@@ -22,7 +22,7 @@ use super::router::LlmRouter;
 use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
-use super::tool::ToolRegistry;
+use super::tool::{ToolContext, ToolRegistry};
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
@@ -45,6 +45,7 @@ pub struct Orchestrator {
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     runtime: Arc<dyn TaskExecutor>,
+    workspace_root: std::path::PathBuf,
     /// Per-agent workspace state, keyed by agent_id
     agent_workspaces: HashMap<String, AgentWorkspaceState>,
     /// Fallback for agents without a dedicated workspace
@@ -125,7 +126,7 @@ impl Orchestrator {
         tool_registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
-        tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root, 30)));
+        tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root.clone(), 30)));
         tool_registry.register(Box::new(WebFetchTool::new()));
         if let Some(api_key) = brave_api_key {
             if !api_key.is_empty() {
@@ -142,6 +143,7 @@ impl Orchestrator {
             memory,
             bus,
             runtime,
+            workspace_root,
             agent_workspaces,
             file_store,
             session_writer,
@@ -523,8 +525,9 @@ impl Orchestrator {
             });
 
             let mut tool_results = Vec::new();
+            let ctx = ToolContext::default_policy(&self.workspace_root);
             for (id, name, input) in tool_uses {
-                let result = match self.tool_registry.execute(&name, input).await {
+                let result = match self.tool_registry.execute(&name, input, &ctx).await {
                     Ok(output) => ContentBlock::ToolResult {
                         tool_use_id: id,
                         content: output.content,

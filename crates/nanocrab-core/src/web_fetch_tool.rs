@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use nanocrab_provider::ToolDef;
 
-use super::tool::{ToolExecutor, ToolOutput};
+use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MAX_CHARS: usize = 20_000;
@@ -54,7 +54,7 @@ impl ToolExecutor for WebFetchTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let url = input["url"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'url' field"))?;
@@ -313,8 +313,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_scheme() {
         let tool = WebFetchTool::new();
+        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
-            .execute(serde_json::json!({"url": "ftp://example.com"}))
+            .execute(serde_json::json!({"url": "ftp://example.com"}), &ctx)
             .await
             .unwrap();
         assert!(result.is_error);

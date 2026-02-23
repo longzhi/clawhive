@@ -7,7 +7,7 @@ use nanocrab_memory::file_store::MemoryFileStore;
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_provider::ToolDef;
 
-use super::tool::{ToolExecutor, ToolOutput};
+use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 pub struct MemorySearchTool {
     search_index: SearchIndex,
@@ -47,7 +47,7 @@ impl ToolExecutor for MemorySearchTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let query = input["query"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'query' field"))?;
@@ -112,7 +112,7 @@ impl ToolExecutor for MemoryGetTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let key = input["key"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'key' field"))?;
@@ -192,8 +192,9 @@ mod tests {
     #[tokio::test]
     async fn memory_search_returns_results() {
         let (_tmp, tool, _) = setup();
+        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
-            .execute(serde_json::json!({"query": "test query"}))
+            .execute(serde_json::json!({"query": "test query"}), &ctx)
             .await
             .unwrap();
         // With empty index, should return empty but not error
@@ -203,6 +204,7 @@ mod tests {
     #[tokio::test]
     async fn memory_get_long_term() {
         let (tmp, _, tool) = setup();
+        let ctx = ToolContext::default_policy(tmp.path());
         let file_store = MemoryFileStore::new(tmp.path());
         file_store
             .write_long_term("# Long term memory")
@@ -210,7 +212,7 @@ mod tests {
             .unwrap();
 
         let result = tool
-            .execute(serde_json::json!({"key": "MEMORY.md"}))
+            .execute(serde_json::json!({"key": "MEMORY.md"}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
