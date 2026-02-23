@@ -242,11 +242,62 @@ fn handle_add_agent(
 }
 
 fn handle_add_channel(
-    _config_root: &Path,
-    _theme: &ColorfulTheme,
-    _state: &ConfigState,
+    config_root: &Path,
+    theme: &ColorfulTheme,
+    state: &ConfigState,
     _force: bool,
 ) -> Result<()> {
+    let channel_types = ["Telegram", "Discord"];
+    let selected = Select::with_theme(theme)
+        .with_prompt("Channel type")
+        .items(&channel_types)
+        .default(0)
+        .interact()?;
+    let channel_type = match selected {
+        0 => "telegram",
+        _ => "discord",
+    };
+    let default_id = match channel_type {
+        "telegram" => "tg-main",
+        _ => "dc-main",
+    };
+
+    let connector_id: String = Input::with_theme(theme)
+        .with_prompt("Connector ID")
+        .default(default_id.to_string())
+        .interact_text()?;
+
+    let token = Password::with_theme(theme)
+        .with_prompt("Bot token")
+        .allow_empty_password(false)
+        .interact()?;
+
+    if !state.agents.is_empty() {
+        let agent_labels: Vec<&str> = state.agents.iter().map(|a| a.agent_id.as_str()).collect();
+        let agent_idx = Select::with_theme(theme)
+            .with_prompt("Route messages to which agent?")
+            .items(&agent_labels)
+            .default(0)
+            .interact()?;
+        add_routing_binding(
+            config_root,
+            channel_type,
+            &connector_id,
+            &state.agents[agent_idx].agent_id,
+        )?;
+    } else {
+        println!("  No agents configured yet. Routing will need to be set up later.");
+    }
+
+    let cfg = ChannelConfig {
+        connector_id: connector_id.clone(),
+        token,
+    };
+    add_channel_to_config(config_root, channel_type, &cfg)?;
+    print_done(
+        &Term::stdout(),
+        &format!("Channel {connector_id} ({channel_type}) configured."),
+    );
     Ok(())
 }
 
@@ -265,6 +316,126 @@ fn handle_remove(
     _state: &ConfigState,
     _force: bool,
 ) -> Result<()> {
+    Ok(())
+}
+
+fn add_channel_to_config(config_root: &Path, channel_type: &str, cfg: &ChannelConfig) -> Result<()> {
+    let main_path = config_root.join("config/main.yaml");
+    if !main_path.exists() {
+        let tg = if channel_type == "telegram" {
+            Some(cfg.clone())
+        } else {
+            None
+        };
+        let dc = if channel_type == "discord" {
+            Some(cfg.clone())
+        } else {
+            None
+        };
+        let yaml = generate_main_yaml("nanocrab", tg, dc);
+        fs::write(&main_path, yaml)?;
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&main_path)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
+    let channels = doc
+        .get_mut("channels")
+        .and_then(|c| c.as_mapping_mut())
+        .ok_or_else(|| anyhow!("main.yaml missing channels section"))?;
+
+    let mut connector_map = serde_yaml::Mapping::new();
+    connector_map.insert(
+        serde_yaml::Value::String("connector_id".into()),
+        serde_yaml::Value::String(cfg.connector_id.clone()),
+    );
+    connector_map.insert(
+        serde_yaml::Value::String("token".into()),
+        serde_yaml::Value::String(cfg.token.clone()),
+    );
+    let connector_value = serde_yaml::Value::Mapping(connector_map);
+
+    let channel_key = serde_yaml::Value::String(channel_type.to_string());
+    match channels.get_mut(&channel_key) {
+        Some(section) => {
+            section["enabled"] = serde_yaml::Value::Bool(true);
+            if let Some(seq) = section
+                .get_mut("connectors")
+                .and_then(|connectors| connectors.as_sequence_mut())
+            {
+                seq.retain(|connector| {
+                    connector
+                        .get("connector_id")
+                        .and_then(|v| v.as_str())
+                        != Some(&cfg.connector_id)
+                });
+                seq.push(connector_value);
+            } else {
+                section["connectors"] = serde_yaml::Value::Sequence(vec![connector_value]);
+            }
+        }
+        None => {
+            let mut section = serde_yaml::Mapping::new();
+            section.insert("enabled".into(), serde_yaml::Value::Bool(true));
+            section.insert(
+                "connectors".into(),
+                serde_yaml::Value::Sequence(vec![connector_value]),
+            );
+            channels.insert(channel_key, serde_yaml::Value::Mapping(section));
+        }
+    }
+
+    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+    Ok(())
+}
+
+fn add_routing_binding(
+    config_root: &Path,
+    channel_type: &str,
+    connector_id: &str,
+    agent_id: &str,
+) -> Result<()> {
+    let routing_path = config_root.join("config/routing.yaml");
+    if !routing_path.exists() {
+        let yaml = generate_routing_yaml(agent_id, None, None);
+        fs::write(&routing_path, yaml)?;
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&routing_path)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
+
+    let mut match_map = serde_yaml::Mapping::new();
+    match_map.insert("kind".into(), serde_yaml::Value::String("dm".into()));
+    let mut binding_map = serde_yaml::Mapping::new();
+    binding_map.insert(
+        "channel_type".into(),
+        serde_yaml::Value::String(channel_type.into()),
+    );
+    binding_map.insert(
+        "connector_id".into(),
+        serde_yaml::Value::String(connector_id.into()),
+    );
+    binding_map.insert("match".into(), serde_yaml::Value::Mapping(match_map));
+    binding_map.insert("agent_id".into(), serde_yaml::Value::String(agent_id.into()));
+    let new_binding = serde_yaml::Value::Mapping(binding_map);
+
+    if let Some(seq) = doc
+        .get_mut("bindings")
+        .and_then(|bindings| bindings.as_sequence_mut())
+    {
+        seq.retain(|binding| {
+            binding
+                .get("connector_id")
+                .and_then(|v| v.as_str())
+                != Some(connector_id)
+        });
+        seq.push(new_binding);
+    } else {
+        doc["bindings"] = serde_yaml::Value::Sequence(vec![new_binding]);
+    }
+
+    fs::write(&routing_path, serde_yaml::to_string(&doc)?)?;
     Ok(())
 }
 
@@ -689,7 +860,7 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_action_labels, default_system_prompt, ensure_required_dirs, generate_agent_yaml,
+        add_channel_to_config, build_action_labels, default_system_prompt, ensure_required_dirs, generate_agent_yaml,
         generate_main_yaml, generate_provider_yaml, generate_routing_yaml, provider_models,
         provider_models_for_id, validate_generated_config, write_agent_files_unchecked,
         write_provider_config_unchecked, AuthChoice, ChannelConfig, ProviderId, SetupAction,
@@ -788,6 +959,33 @@ mod tests {
         assert!(yaml.contains("token: \"123:telegram-token\""));
         assert!(yaml.contains("token: \"discord-token\""));
         assert!(!yaml.contains("${"));
+    }
+
+    #[test]
+    fn add_channel_to_existing_main_yaml_preserves_other_channels() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        let initial = generate_main_yaml(
+            "nanocrab",
+            Some(ChannelConfig {
+                connector_id: "tg-main".into(),
+                token: "tok1".into(),
+            }),
+            None,
+        );
+        std::fs::write(temp.path().join("config/main.yaml"), &initial).unwrap();
+        add_channel_to_config(
+            temp.path(),
+            "discord",
+            &ChannelConfig {
+                connector_id: "dc-main".into(),
+                token: "tok2".into(),
+            },
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(temp.path().join("config/main.yaml")).unwrap();
+        assert!(content.contains("tg-main"));
+        assert!(content.contains("dc-main"));
     }
 
     #[test]
