@@ -246,6 +246,19 @@ fn default_sandbox(workspace: &Path) -> Result<Sandbox> {
     Sandbox::new(config)
 }
 
+fn sandbox_from_policy(workspace: &Path, policy: &PolicyEngine) -> Result<Sandbox> {
+    let config = SandboxConfig {
+        permissions: policy.permissions().clone(),
+        work_dir: workspace.to_path_buf(),
+        data_dir: None,
+        timeout: Duration::from_secs(30),
+        max_memory_mb: Some(512),
+        env_vars: collect_env_vars(),
+        broker_socket: None,
+    };
+    Sandbox::new(config)
+}
+
 async fn sandbox_with_broker(
     workspace: &Path,
     timeout_secs: u64,
@@ -314,7 +327,7 @@ impl ToolExecutor for ExecuteCommandTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let command = input["command"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'command' field"))?;
@@ -337,6 +350,9 @@ impl ToolExecutor for ExecuteCommandTool {
         let result = if enable_reminders_service {
             let sandbox =
                 sandbox_with_broker(&self.workspace, timeout_secs, &reminders_lists).await?;
+            sandbox.execute_with_timeout(command, timeout).await
+        } else if let Some(policy) = ctx.policy() {
+            let sandbox = sandbox_from_policy(&self.workspace, policy)?;
             sandbox.execute_with_timeout(command, timeout).await
         } else {
             let sandbox = self
@@ -457,6 +473,27 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("found"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_uses_policy_from_context() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("data.txt"), "hello from policy").unwrap();
+
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+
+        let perms = corral_core::Permissions::builder()
+            .fs_read([format!("{}/**", tmp.path().display())])
+            .exec_allow(["sh", "cat"])
+            .build();
+        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+
+        let result = tool
+            .execute(serde_json::json!({"command": "cat data.txt"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("hello from policy"));
     }
 
     #[cfg(target_os = "linux")]
