@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use corral_core::{
     ServicePermission,
 };
 use nanocrab_provider::ToolDef;
+use tokio::sync::OnceCell;
 
 use super::tool::{ToolExecutor, ToolOutput};
 
@@ -17,6 +19,7 @@ const MAX_OUTPUT_BYTES: usize = 50_000;
 pub struct ExecuteCommandTool {
     workspace: PathBuf,
     default_timeout: u64,
+    default_sandbox: OnceCell<Sandbox>,
 }
 
 impl ExecuteCommandTool {
@@ -24,6 +27,7 @@ impl ExecuteCommandTool {
         Self {
             workspace,
             default_timeout,
+            default_sandbox: OnceCell::new(),
         }
     }
 }
@@ -208,61 +212,70 @@ impl ServiceHandler for RemindersHandler {
     }
 }
 
-async fn sandbox_for_workspace(
-    workspace: &Path,
-    timeout_secs: u64,
-    enable_reminders_service: bool,
-    reminders_lists: &[String],
-) -> Result<Sandbox> {
-    let workspace_pattern = format!("{}/**", workspace.display());
+fn collect_env_vars() -> HashMap<String, String> {
+    let mut env_vars = HashMap::new();
+    for key in ["PATH", "HOME", "TMPDIR"] {
+        if let Ok(val) = std::env::var(key) {
+            env_vars.insert(key.to_string(), val);
+        }
+    }
+    env_vars
+}
 
-    let mut permissions_builder = Permissions::builder()
+fn base_permissions(workspace: &Path) -> Permissions {
+    let workspace_pattern = format!("{}/**", workspace.display());
+    Permissions::builder()
         .fs_read([workspace_pattern.clone()])
         .fs_write([workspace_pattern])
         .exec_allow(["sh"])
         .network_deny()
-        .env_allow(["PATH", "HOME", "TMPDIR"]);
+        .env_allow(["PATH", "HOME", "TMPDIR"])
+        .build()
+}
 
-    if enable_reminders_service {
-        let mut scope = HashMap::new();
-        if !reminders_lists.is_empty() {
-            scope.insert("lists".to_string(), serde_json::json!(reminders_lists));
-        }
-        permissions_builder = permissions_builder.service(
-            "reminders",
-            ServicePermission {
-                access: "readwrite".to_string(),
-                scope,
-            },
-        );
-    }
+fn default_sandbox(workspace: &Path) -> Result<Sandbox> {
+    let config = SandboxConfig {
+        permissions: base_permissions(workspace),
+        work_dir: workspace.to_path_buf(),
+        data_dir: None,
+        timeout: Duration::from_secs(30),
+        max_memory_mb: Some(512),
+        env_vars: collect_env_vars(),
+        broker_socket: None,
+    };
+    Sandbox::new(config)
+}
 
-    let permissions = permissions_builder.build();
+async fn sandbox_with_broker(
+    workspace: &Path,
+    timeout_secs: u64,
+    reminders_lists: &[String],
+) -> Result<Sandbox> {
+    let mut permissions = base_permissions(workspace);
 
-    let mut env_vars = HashMap::new();
-    if let Ok(path) = std::env::var("PATH") {
-        env_vars.insert("PATH".to_string(), path);
+    let mut scope = HashMap::new();
+    if !reminders_lists.is_empty() {
+        scope.insert("lists".to_string(), serde_json::json!(reminders_lists));
     }
-    if let Ok(home) = std::env::var("HOME") {
-        env_vars.insert("HOME".to_string(), home);
-    }
-    if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        env_vars.insert("TMPDIR".to_string(), tmpdir);
-    }
+    permissions.services.insert(
+        "reminders".to_string(),
+        ServicePermission {
+            access: "readwrite".to_string(),
+            scope,
+        },
+    );
 
     let mut broker_config = BrokerConfig::new(PolicyEngine::new(permissions.clone()));
-    if enable_reminders_service {
-        broker_config.register_handler(Arc::new(RemindersHandler));
-    }
+    broker_config.register_handler(Arc::new(RemindersHandler));
     let broker_handle = start_broker(broker_config).await?;
 
     let config = SandboxConfig {
         permissions,
         work_dir: workspace.to_path_buf(),
         data_dir: None,
-        timeout: std::time::Duration::from_secs(timeout_secs.max(1)),
+        timeout: Duration::from_secs(timeout_secs.max(1)),
         max_memory_mb: Some(512),
-        env_vars,
+        env_vars: collect_env_vars(),
         broker_socket: Some(broker_handle.socket_path.clone()),
     };
 
@@ -319,17 +332,19 @@ impl ToolExecutor for ExecuteCommandTool {
             })
             .unwrap_or_default();
 
-        let workspace = self.workspace.clone();
-        let command = command.to_string();
-        let sandbox = sandbox_for_workspace(
-            &workspace,
-            timeout_secs,
-            enable_reminders_service,
-            &reminders_lists,
-        )
-        .await?;
+        let timeout = Duration::from_secs(timeout_secs.max(1));
 
-        let result = sandbox.execute(&command).await;
+        let result = if enable_reminders_service {
+            let sandbox =
+                sandbox_with_broker(&self.workspace, timeout_secs, &reminders_lists).await?;
+            sandbox.execute_with_timeout(command, timeout).await
+        } else {
+            let sandbox = self
+                .default_sandbox
+                .get_or_try_init(|| async { default_sandbox(&self.workspace) })
+                .await?;
+            sandbox.execute_with_timeout(command, timeout).await
+        };
 
         match result {
             Ok(output) => {
