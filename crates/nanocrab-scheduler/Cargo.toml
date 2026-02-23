@@ -16,3 +16,4 @@ chrono-tz = "0.9"
 cron = "0.12"
 uuid.workspace = true
 tokio.workspace = true
+tracing.workspace = true
