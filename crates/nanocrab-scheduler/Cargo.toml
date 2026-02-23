@@ -1,0 +1,13 @@
+[package]
+name = "nanocrab-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nanocrab-schema = { path = "../nanocrab-schema" }
+serde.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+cron = "0.12"
+uuid.workspace = true
