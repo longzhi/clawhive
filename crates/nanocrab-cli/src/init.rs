@@ -54,6 +54,14 @@ enum AuthChoice {
     ApiKey { env_var: String },
 }
 
+#[derive(Debug, Clone)]
+struct AgentSetup {
+    agent_id: String,
+    name: String,
+    emoji: String,
+    primary_model: String,
+}
+
 pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
     let term = Term::stdout();
     let theme = ColorfulTheme::default();
@@ -67,12 +75,48 @@ pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
     write_provider_config(config_root, provider, &auth, force)?;
 
     print_done(&term, "Provider configuration generated.");
+
+    print_step(&term, 2, TOTAL_STEPS, "Agent Identity");
+    let agent_setup = prompt_agent_setup(&theme, provider)?;
+    write_agent_files(config_root, &agent_setup, force)?;
+    print_done(&term, "Agent configuration and default persona generated.");
+
     term.write_line(&format!(
         "{} Remaining wizard steps will be implemented in the next tasks.",
         CRAB
     ))?;
 
     Ok(())
+}
+
+fn prompt_agent_setup(theme: &ColorfulTheme, provider: ProviderId) -> Result<AgentSetup> {
+    let agent_id: String = dialoguer::Input::with_theme(theme)
+        .with_prompt("Agent ID")
+        .default("nanocrab-main".to_string())
+        .interact_text()?;
+    let name: String = dialoguer::Input::with_theme(theme)
+        .with_prompt("Agent display name")
+        .default("Nanocrab".to_string())
+        .interact_text()?;
+    let emoji: String = dialoguer::Input::with_theme(theme)
+        .with_prompt("Agent emoji")
+        .default("🦀".to_string())
+        .interact_text()?;
+
+    let models = provider_models(provider);
+    let model_labels: Vec<&str> = models.iter().map(String::as_str).collect();
+    let selected = Select::with_theme(theme)
+        .with_prompt("Primary model")
+        .items(&model_labels)
+        .default(0)
+        .interact()?;
+
+    Ok(AgentSetup {
+        agent_id,
+        name,
+        emoji,
+        primary_model: models[selected].clone(),
+    })
 }
 
 fn prompt_provider(theme: &ColorfulTheme) -> Result<ProviderId> {
@@ -172,6 +216,35 @@ fn write_provider_config(config_root: &Path, provider: ProviderId, auth: &AuthCh
     Ok(target)
 }
 
+fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Result<()> {
+    let agents_dir = config_root.join("config/agents.d");
+    fs::create_dir_all(&agents_dir)
+        .with_context(|| format!("failed to create {}", agents_dir.display()))?;
+
+    let agent_yaml_path = agents_dir.join(format!("{}.yaml", agent.agent_id));
+    if agent_yaml_path.exists() && !force {
+        anyhow::bail!(
+            "agent config already exists: {} (use --force to overwrite)",
+            agent_yaml_path.display()
+        );
+    }
+
+    let yaml = generate_agent_yaml(&agent.agent_id, &agent.name, &agent.emoji, &agent.primary_model);
+    fs::write(&agent_yaml_path, yaml)
+        .with_context(|| format!("failed to write {}", agent_yaml_path.display()))?;
+
+    let prompt_dir = config_root.join("prompts").join(&agent.agent_id);
+    fs::create_dir_all(&prompt_dir)
+        .with_context(|| format!("failed to create {}", prompt_dir.display()))?;
+    let prompt_path = prompt_dir.join("system.md");
+    if !prompt_path.exists() || force {
+        fs::write(&prompt_path, default_system_prompt(&agent.name))
+            .with_context(|| format!("failed to write {}", prompt_path.display()))?;
+    }
+
+    Ok(())
+}
+
 fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
     match auth {
         AuthChoice::OAuth { profile_name } => format!(
@@ -189,6 +262,28 @@ fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
             env = env_var,
             model = provider.default_model(),
         ),
+    }
+}
+
+fn generate_agent_yaml(agent_id: &str, name: &str, emoji: &str, primary_model: &str) -> String {
+    format!(
+        "agent_id: {agent_id}\nenabled: true\nidentity:\n  name: \"{name}\"\n  emoji: \"{emoji}\"\nmodel_policy:\n  primary: \"{primary_model}\"\n  fallbacks: []\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n"
+    )
+}
+
+fn default_system_prompt(agent_name: &str) -> String {
+    format!(
+        "You are {agent_name}, a helpful AI assistant powered by nanocrab.\n\nYou are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.\n"
+    )
+}
+
+fn provider_models(provider: ProviderId) -> Vec<String> {
+    match provider {
+        ProviderId::Anthropic => vec![
+            "anthropic/claude-sonnet-4-5".to_string(),
+            "anthropic/claude-3-haiku-20240307".to_string(),
+        ],
+        ProviderId::OpenAi => vec!["openai/gpt-4o-mini".to_string(), "openai/gpt-4o".to_string()],
     }
 }
 
