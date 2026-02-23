@@ -63,6 +63,24 @@ export interface Metrics {
   providers_total: number;
 }
 
+export interface ConnectorConfig {
+  connector_id: string;
+  token: string;
+}
+
+export interface ChannelConfig {
+  enabled: boolean;
+  connectors: ConnectorConfig[];
+}
+
+export type ChannelsResponse = Record<string, ChannelConfig>;
+
+export interface ConnectorStatus {
+  kind: string;
+  connector_id: string;
+  status: "connected" | "error" | "inactive";
+}
+
 // Hooks
 export function useAgents() {
   return useQuery({ queryKey: ["agents"], queryFn: () => apiFetch<AgentSummary[]>("/api/agents") });
@@ -107,25 +125,61 @@ export function useSetProviderKey() {
 }
 
 export function useChannels() {
-  return useQuery({ queryKey: ["channels"], queryFn: () => apiFetch<Record<string, any>>("/api/channels") });
+  return useQuery({ queryKey: ["channels"], queryFn: () => apiFetch<ChannelsResponse>("/api/channels") });
+}
+
+export function useChannelStatus() {
+  return useQuery({
+    queryKey: ["channel-status"],
+    queryFn: () => apiFetch<ConnectorStatus[]>("/api/channels/status"),
+    refetchInterval: 5000,
+  });
 }
 
 export function useRouting() {
-  return useQuery({ queryKey: ["routing"], queryFn: () => apiFetch<Record<string, any>>("/api/routing") });
+  return useQuery({ queryKey: ["routing"], queryFn: () => apiFetch<Record<string, unknown>>("/api/routing") });
 }
 
 export function useUpdateChannels() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: Record<string, any>) => apiFetch<Record<string, any>>("/api/channels", { method: "PUT", body: JSON.stringify(data) }),
+    mutationFn: (data: ChannelsResponse) => apiFetch<ChannelsResponse>("/api/channels", { method: "PUT", body: JSON.stringify(data) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["channels"] }),
+  });
+}
+
+export function useAddConnector() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ kind, connectorId, token }: { kind: string; connectorId: string; token: string }) =>
+      apiFetch(`/api/channels/${kind}/connectors`, {
+        method: "POST",
+        body: JSON.stringify({ connector_id: connectorId, token }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["channels"] });
+      qc.invalidateQueries({ queryKey: ["channel-status"] });
+    },
+  });
+}
+
+export function useRemoveConnector() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ kind, connectorId }: { kind: string; connectorId: string }) =>
+      apiFetch(`/api/channels/${kind}/connectors/${connectorId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["channels"] });
+      qc.invalidateQueries({ queryKey: ["channel-status"] });
+    },
   });
 }
 
 export function useUpdateRouting() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: any) => apiFetch<any>("/api/routing", { method: "PUT", body: JSON.stringify(data) }),
+    mutationFn: (data: Record<string, unknown>) =>
+      apiFetch<Record<string, unknown>>("/api/routing", { method: "PUT", body: JSON.stringify(data) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["routing"] }),
   });
 }
