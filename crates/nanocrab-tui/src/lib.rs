@@ -297,6 +297,29 @@ impl App {
                     ));
                 }
             }
+            BusMessage::ScheduledTaskTriggered {
+                ref schedule_id,
+                ref agent_id,
+                ..
+            } => {
+                self.push_event(format!(
+                    "[{ts}] ScheduledTaskTriggered schedule={schedule_id} agent={agent_id}"
+                ));
+                self.push_agent_run(format!("[{ts}] schedule={schedule_id} running"));
+            }
+            BusMessage::ScheduledTaskCompleted {
+                ref schedule_id,
+                ref status,
+                ref error,
+                ..
+            } => {
+                self.push_event(format!(
+                    "[{ts}] ScheduledTaskCompleted schedule={schedule_id} status={status:?}"
+                ));
+                if let Some(err) = error {
+                    self.push_log(format!("[{ts}] schedule={schedule_id} error={err}"));
+                }
+            }
         }
     }
 }
@@ -313,6 +336,8 @@ pub struct BusReceivers {
     memory_read: mpsc::Receiver<BusMessage>,
     consolidation_completed: mpsc::Receiver<BusMessage>,
     stream_delta: mpsc::Receiver<BusMessage>,
+    schedule_triggered: mpsc::Receiver<BusMessage>,
+    schedule_completed: mpsc::Receiver<BusMessage>,
 }
 
 impl BusReceivers {
@@ -350,6 +375,12 @@ impl BusReceivers {
         while let Ok(msg) = self.stream_delta.try_recv() {
             app.handle_bus_message(msg);
         }
+        while let Ok(msg) = self.schedule_triggered.try_recv() {
+            app.handle_bus_message(msg);
+        }
+        while let Ok(msg) = self.schedule_completed.try_recv() {
+            app.handle_bus_message(msg);
+        }
     }
 }
 
@@ -366,6 +397,8 @@ pub async fn subscribe_all(bus: &EventBus) -> BusReceivers {
         memory_read: bus.subscribe(Topic::MemoryReadRequested).await,
         consolidation_completed: bus.subscribe(Topic::ConsolidationCompleted).await,
         stream_delta: bus.subscribe(Topic::StreamDelta).await,
+        schedule_triggered: bus.subscribe(Topic::ScheduledTaskTriggered).await,
+        schedule_completed: bus.subscribe(Topic::ScheduledTaskCompleted).await,
     }
 }
 

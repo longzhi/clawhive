@@ -30,6 +30,32 @@ pub struct OutboundMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ScheduledSessionMode {
+    #[serde(rename = "isolated")]
+    Isolated,
+    #[serde(rename = "main")]
+    Main,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ScheduledDeliveryMode {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "announce")]
+    Announce,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ScheduledRunStatus {
+    #[serde(rename = "ok")]
+    Ok,
+    #[serde(rename = "error")]
+    Error,
+    #[serde(rename = "skipped")]
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     Inbound(InboundMessage),
     Outbound(OutboundMessage),
@@ -78,6 +104,24 @@ pub enum BusMessage {
         trace_id: Uuid,
         delta: String,
         is_final: bool,
+    },
+    ScheduledTaskTriggered {
+        schedule_id: String,
+        agent_id: String,
+        task: String,
+        session_mode: ScheduledSessionMode,
+        delivery_mode: ScheduledDeliveryMode,
+        delivery_channel: Option<String>,
+        delivery_connector_id: Option<String>,
+        triggered_at: DateTime<Utc>,
+    },
+    ScheduledTaskCompleted {
+        schedule_id: String,
+        status: ScheduledRunStatus,
+        error: Option<String>,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+        response: Option<String>,
     },
 }
 

@@ -13,7 +13,7 @@ use nanocrab_channels::discord::DiscordBot;
 use nanocrab_channels::telegram::TelegramBot;
 use nanocrab_channels::ChannelBot;
 use nanocrab_core::*;
-use nanocrab_gateway::{Gateway, RateLimitConfig, RateLimiter};
+use nanocrab_gateway::{spawn_scheduled_task_listener, Gateway, RateLimitConfig, RateLimiter};
 use nanocrab_memory::embedding::{
     EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
 };
@@ -594,6 +594,9 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
         schedule_manager_for_loop.run().await;
     });
     tracing::info!("Schedule manager started");
+
+    let _schedule_listener_handle = spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
+    tracing::info!("Scheduled task gateway listener started");
 
     let _tui_handle = if with_tui {
         let receivers = nanocrab_tui::subscribe_all(bus.as_ref()).await;
