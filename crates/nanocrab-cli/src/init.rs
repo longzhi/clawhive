@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use console::Term;
-use dialoguer::{theme::ColorfulTheme, Password, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use nanocrab_auth::oauth::{profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 use nanocrab_auth::{AuthProfile, TokenManager};
 
@@ -62,6 +62,12 @@ struct AgentSetup {
     primary_model: String,
 }
 
+#[derive(Debug, Clone)]
+struct ChannelConfig {
+    connector_id: String,
+    token: String,
+}
+
 pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
     let term = Term::stdout();
     let theme = ColorfulTheme::default();
@@ -81,12 +87,49 @@ pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
     write_agent_files(config_root, &agent_setup, force)?;
     print_done(&term, "Agent configuration and default persona generated.");
 
+    print_step(&term, 3, TOTAL_STEPS, "Channels & Routing");
+    let telegram = prompt_channel_config(&theme, "Telegram", "tg-main")?;
+    let discord = prompt_channel_config(&theme, "Discord", "dc-main")?;
+    write_main_and_routing(config_root, &agent_setup.agent_id, telegram, discord, force)?;
+    print_done(&term, "main.yaml and routing.yaml generated.");
+
     term.write_line(&format!(
         "{} Remaining wizard steps will be implemented in the next tasks.",
         CRAB
     ))?;
 
     Ok(())
+}
+
+fn prompt_channel_config(
+    theme: &ColorfulTheme,
+    channel_name: &str,
+    default_connector_id: &str,
+) -> Result<Option<ChannelConfig>> {
+    let enabled = Confirm::with_theme(theme)
+        .with_prompt(format!("Enable {channel_name}?"))
+        .default(channel_name == "Telegram")
+        .interact()?;
+    if !enabled {
+        return Ok(None);
+    }
+
+    let connector_id: String = Input::with_theme(theme)
+        .with_prompt(format!("{channel_name} connector_id"))
+        .default(default_connector_id.to_string())
+        .interact_text()?;
+    let token = Password::with_theme(theme)
+        .with_prompt(format!("{channel_name} bot token"))
+        .allow_empty_password(false)
+        .interact()?;
+    if token.trim().is_empty() {
+        anyhow::bail!("{channel_name} token cannot be empty");
+    }
+
+    Ok(Some(ChannelConfig {
+        connector_id,
+        token,
+    }))
 }
 
 fn prompt_agent_setup(theme: &ColorfulTheme, provider: ProviderId) -> Result<AgentSetup> {
@@ -255,6 +298,37 @@ fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Res
     Ok(())
 }
 
+fn write_main_and_routing(
+    config_root: &Path,
+    default_agent_id: &str,
+    telegram: Option<ChannelConfig>,
+    discord: Option<ChannelConfig>,
+    force: bool,
+) -> Result<()> {
+    let config_dir = config_root.join("config");
+    fs::create_dir_all(&config_dir)
+        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+
+    let main_path = config_dir.join("main.yaml");
+    let routing_path = config_dir.join("routing.yaml");
+    if (!force) && (main_path.exists() || routing_path.exists()) {
+        anyhow::bail!(
+            "config files already exist: {} or {} (use --force to overwrite)",
+            main_path.display(),
+            routing_path.display()
+        );
+    }
+
+    let main_yaml = generate_main_yaml("nanocrab", telegram.clone(), discord.clone());
+    let routing_yaml = generate_routing_yaml(default_agent_id, telegram, discord);
+    fs::write(&main_path, main_yaml)
+        .with_context(|| format!("failed to write {}", main_path.display()))?;
+    fs::write(&routing_path, routing_yaml)
+        .with_context(|| format!("failed to write {}", routing_path.display()))?;
+
+    Ok(())
+}
+
 fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
     match auth {
         AuthChoice::OAuth { profile_name } => format!(
@@ -287,6 +361,72 @@ fn default_system_prompt(agent_name: &str) -> String {
     )
 }
 
+fn generate_main_yaml(
+    app_name: &str,
+    telegram: Option<ChannelConfig>,
+    discord: Option<ChannelConfig>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "app:\n  name: {app_name}\n  env: dev\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n"
+    ));
+
+    match telegram {
+        Some(cfg) => {
+            out.push_str("  telegram:\n    enabled: true\n    connectors:\n");
+            out.push_str(&format!(
+                "      - connector_id: {}\n        token: \"{}\"\n",
+                cfg.connector_id, cfg.token
+            ));
+        }
+        None => {
+            out.push_str("  telegram:\n    enabled: false\n    connectors: []\n");
+        }
+    }
+
+    match discord {
+        Some(cfg) => {
+            out.push_str("  discord:\n    enabled: true\n    connectors:\n");
+            out.push_str(&format!(
+                "      - connector_id: {}\n        token: \"{}\"\n",
+                cfg.connector_id, cfg.token
+            ));
+        }
+        None => {
+            out.push_str("  discord:\n    enabled: false\n    connectors: []\n");
+        }
+    }
+
+    out.push_str(
+        "\nembedding:\n  enabled: false\n  provider: stub\n  api_key_env: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+    );
+
+    out
+}
+
+fn generate_routing_yaml(
+    default_agent_id: &str,
+    telegram: Option<ChannelConfig>,
+    discord: Option<ChannelConfig>,
+) -> String {
+    let mut out = format!("default_agent_id: {default_agent_id}\n\nbindings:\n");
+
+    if let Some(cfg) = telegram {
+        out.push_str(&format!(
+            "  - channel_type: telegram\n    connector_id: {}\n    match:\n      kind: dm\n    agent_id: {}\n",
+            cfg.connector_id, default_agent_id
+        ));
+    }
+    if let Some(cfg) = discord {
+        out.push_str(&format!(
+            "  - channel_type: discord\n    connector_id: {}\n    match:\n      kind: dm\n    agent_id: {}\n",
+            cfg.connector_id, default_agent_id
+        ));
+    }
+
+    out
+}
+
 fn provider_models(provider: ProviderId) -> Vec<String> {
     match provider {
         ProviderId::Anthropic => vec![
@@ -307,8 +447,8 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_system_prompt, generate_agent_yaml, generate_provider_yaml, provider_models,
-        AuthChoice, ProviderId,
+        default_system_prompt, generate_agent_yaml, generate_main_yaml, generate_provider_yaml,
+        generate_routing_yaml, provider_models, AuthChoice, ChannelConfig, ProviderId,
     };
 
     #[test]
@@ -364,5 +504,45 @@ mod tests {
 
         assert!(anthropic_models.iter().all(|m| m.starts_with("anthropic/")));
         assert!(openai_models.iter().all(|m| m.starts_with("openai/")));
+    }
+
+    #[test]
+    fn main_yaml_writes_plaintext_channel_tokens() {
+        let yaml = generate_main_yaml(
+            "nanocrab",
+            Some(ChannelConfig {
+                connector_id: "tg-main".to_string(),
+                token: "123:telegram-token".to_string(),
+            }),
+            Some(ChannelConfig {
+                connector_id: "dc-main".to_string(),
+                token: "discord-token".to_string(),
+            }),
+        );
+
+        assert!(yaml.contains("token: \"123:telegram-token\""));
+        assert!(yaml.contains("token: \"discord-token\""));
+        assert!(!yaml.contains("${"));
+    }
+
+    #[test]
+    fn routing_yaml_contains_bindings_for_enabled_channels() {
+        let yaml = generate_routing_yaml(
+            "nanocrab-main",
+            Some(ChannelConfig {
+                connector_id: "tg-main".to_string(),
+                token: "ignored".to_string(),
+            }),
+            Some(ChannelConfig {
+                connector_id: "dc-main".to_string(),
+                token: "ignored".to_string(),
+            }),
+        );
+
+        assert!(yaml.contains("channel_type: telegram"));
+        assert!(yaml.contains("channel_type: discord"));
+        assert!(yaml.contains("connector_id: tg-main"));
+        assert!(yaml.contains("connector_id: dc-main"));
+        assert!(yaml.contains("agent_id: nanocrab-main"));
     }
 }
