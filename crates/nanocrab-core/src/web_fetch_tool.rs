@@ -54,7 +54,7 @@ impl ToolExecutor for WebFetchTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let url = input["url"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'url' field"))?;
@@ -72,6 +72,17 @@ impl ToolExecutor for WebFetchTool {
                 content: format!("Invalid URL scheme. Only http:// and https:// are supported: {url}"),
                 is_error: true,
             });
+        }
+
+        if let Ok(parsed) = reqwest::Url::parse(url) {
+            let host = parsed.host_str().unwrap_or("");
+            let port = parsed.port_or_known_default().unwrap_or(443);
+            if !ctx.check_network(host, port) {
+                return Ok(ToolOutput {
+                    content: format!("Network access denied for {host}:{port}"),
+                    is_error: true,
+                });
+            }
         }
 
         // Fetch
@@ -320,5 +331,34 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("Invalid URL scheme"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_denied_by_policy() {
+        let tool = WebFetchTool::new();
+        let perms = corral_core::Permissions::builder()
+            .network_allow(["api.example.com:443"])
+            .build();
+        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+
+        let result = tool
+            .execute(serde_json::json!({"url": "https://evil.com/steal"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_denied_by_default_policy() {
+        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+
+        let tool = WebFetchTool::new();
+        let result = tool
+            .execute(serde_json::json!({"url": "https://example.com"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
     }
 }
