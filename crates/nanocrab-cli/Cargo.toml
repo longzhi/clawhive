@@ -32,3 +32,6 @@ nanocrab-auth = { path = "../nanocrab-auth" }
 [[bin]]
 name = "nanocrab"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

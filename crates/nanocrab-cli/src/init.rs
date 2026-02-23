@@ -118,10 +118,13 @@ pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
         term.write_line(&format!("  {} {}", crate::init_ui::CHECKMARK, rel))?;
     }
     term.write_line("")?;
-    term.write_line("Next Steps:")?;
-    term.write_line("  1. Validate: nanocrab validate")?;
-    term.write_line("  2. Start:    nanocrab start")?;
-    term.write_line("  (Optional) Edit persona: prompts/<agent_id>/system.md")?;
+    term.write_line("┌─ Next Steps ───────────────────────────┐")?;
+    term.write_line("│  1. Validate: nanocrab validate         │")?;
+    term.write_line("│  2. Start:    nanocrab start            │")?;
+    term.write_line("│                                         │")?;
+    term.write_line("│  Optional: edit your agent persona at   │")?;
+    term.write_line("│  prompts/<agent_id>/system.md            │")?;
+    term.write_line("└─────────────────────────────────────────┘")?;
 
     term.write_line(&format!("{} Setup wizard finished.", CRAB))?;
 
