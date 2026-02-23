@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use chrono::TimeZone;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -23,7 +24,7 @@ use nanocrab_provider::{
     register_builtin_providers, AnthropicProvider, OpenAiProvider, ProviderRegistry,
 };
 use nanocrab_runtime::NativeExecutor;
-use nanocrab_scheduler::ScheduleManager;
+use nanocrab_scheduler::{ScheduleManager, ScheduleType};
 use nanocrab_schema::InboundMessage;
 
 #[derive(Parser)]
@@ -64,6 +65,8 @@ enum Commands {
     Session(SessionCommands),
     #[command(subcommand, about = "Task management")]
     Task(TaskCommands),
+    #[command(subcommand, about = "Manage scheduled tasks")]
+    Schedule(ScheduleCommands),
 }
 
 #[derive(Subcommand)]
@@ -115,6 +118,34 @@ enum TaskCommands {
         agent: String,
         #[arg(help = "Task description")]
         task: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommands {
+    #[command(about = "List all scheduled tasks with status")]
+    List,
+    #[command(about = "Trigger a scheduled task immediately")]
+    Run {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+    },
+    #[command(about = "Enable a disabled schedule")]
+    Enable {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+    },
+    #[command(about = "Disable a schedule")]
+    Disable {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+    },
+    #[command(about = "Show recent run history for a schedule")]
+    History {
+        #[arg(help = "Schedule ID")]
+        schedule_id: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
     },
 }
 
@@ -288,7 +319,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
+            let (_bus, _memory, gateway, _config, _schedule_manager) =
+                bootstrap(&cli.config_root)?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -309,6 +341,65 @@ async fn main() -> Result<()> {
                     match gateway.handle_inbound(inbound).await {
                         Ok(out) => println!("{}", out.text),
                         Err(err) => eprintln!("Task failed: {err}"),
+                    }
+                }
+            }
+        }
+        Commands::Schedule(cmd) => {
+            let (_bus, _memory, _gateway, _config, schedule_manager) =
+                bootstrap(&cli.config_root)?;
+            match cmd {
+                ScheduleCommands::List => {
+                    let entries = schedule_manager.list().await;
+                    println!(
+                        "{:<24} {:<8} {:<24} {:<26} {:<8}",
+                        "ID", "ENABLED", "SCHEDULE", "NEXT RUN", "ERRORS"
+                    );
+                    println!("{}", "-".repeat(96));
+
+                    for entry in entries {
+                        let next_run = entry
+                            .state
+                            .next_run_at_ms
+                            .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single())
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_else(|| "-".to_string());
+                        println!(
+                            "{:<24} {:<8} {:<24} {:<26} {:<8}",
+                            entry.config.schedule_id,
+                            if entry.config.enabled { "yes" } else { "no" },
+                            format_schedule_type(&entry.config.schedule),
+                            next_run,
+                            entry.state.consecutive_errors,
+                        );
+                    }
+                }
+                ScheduleCommands::Run { schedule_id } => {
+                    schedule_manager.trigger_now(&schedule_id).await?;
+                    println!("Triggered schedule '{schedule_id}'.");
+                }
+                ScheduleCommands::Enable { schedule_id } => {
+                    schedule_manager.set_enabled(&schedule_id, true).await?;
+                    println!("Enabled schedule '{schedule_id}'.");
+                }
+                ScheduleCommands::Disable { schedule_id } => {
+                    schedule_manager.set_enabled(&schedule_id, false).await?;
+                    println!("Disabled schedule '{schedule_id}'.");
+                }
+                ScheduleCommands::History { schedule_id, limit } => {
+                    let records = schedule_manager.recent_history(&schedule_id, limit).await?;
+                    if records.is_empty() {
+                        println!("No history for schedule '{schedule_id}'.");
+                    } else {
+                        for record in records {
+                            println!(
+                                "{} | {:>6}ms | {:?} | {}",
+                                record.started_at.to_rfc3339(),
+                                record.duration_ms,
+                                record.status,
+                                record.error.as_deref().unwrap_or("-"),
+                            );
+                        }
                     }
                 }
             }
@@ -334,6 +425,20 @@ fn toggle_agent(agents_dir: &std::path::Path, agent_id: &str, enabled: bool) -> 
     let output = serde_yaml::to_string(&doc)?;
     std::fs::write(&path, output)?;
     Ok(())
+}
+
+fn format_schedule_type(schedule: &ScheduleType) -> String {
+    match schedule {
+        ScheduleType::Cron { expr, tz } => format!("cron({expr} @ {tz})"),
+        ScheduleType::At { at } => format!("at({at})"),
+        ScheduleType::Every {
+            interval_ms,
+            anchor_ms,
+        } => match anchor_ms {
+            Some(anchor) => format!("every({interval_ms}ms, anchor={anchor})"),
+            None => format!("every({interval_ms}ms)"),
+        },
+    }
 }
 
 fn bootstrap(
