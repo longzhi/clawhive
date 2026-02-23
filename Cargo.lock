@@ -1719,6 +1719,7 @@ dependencies = [
  "nanocrab-memory",
  "nanocrab-provider",
  "nanocrab-runtime",
+ "nanocrab-scheduler",
  "nanocrab-schema",
  "nanocrab-tui",
  "serde_yaml",
@@ -1832,9 +1833,11 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "nanocrab-bus",
  "nanocrab-schema",
  "serde",
  "serde_yaml",
+ "tokio",
  "uuid",
 ]
 

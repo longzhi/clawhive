@@ -23,6 +23,7 @@ use nanocrab_provider::{
     register_builtin_providers, AnthropicProvider, OpenAiProvider, ProviderRegistry,
 };
 use nanocrab_runtime::NativeExecutor;
+use nanocrab_scheduler::ScheduleManager;
 use nanocrab_schema::InboundMessage;
 
 #[derive(Parser)]
@@ -335,7 +336,7 @@ fn toggle_agent(agents_dir: &std::path::Path, agent_id: &str, enabled: bool) -> 
     Ok(())
 }
 
-fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, NanocrabConfig)> {
+fn bootstrap(root: &Path) -> Result<(Arc<EventBus>, Arc<MemoryStore>, Arc<Gateway>, NanocrabConfig)> {
     let config = load_config(&root.join("config"))?;
 
     let db_path = root.join("data/nanocrab.db");
@@ -366,7 +367,7 @@ fn bootstrap(root: &Path) -> Result<(EventBus, Arc<MemoryStore>, Arc<Gateway>, N
         }
     }
 
-    let bus = EventBus::new(256);
+    let bus = Arc::new(EventBus::new(256));
     let publisher = bus.publisher();
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let skill_registry = SkillRegistry::load_from_dir(&root.join("skills")).unwrap_or_else(|e| {
@@ -583,8 +584,19 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
     let _consolidation_handle = scheduler.start();
     tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
 
+    let schedule_manager = Arc::new(ScheduleManager::new(
+        &root.join("config/schedules.d"),
+        &root.join("data/schedules"),
+        Arc::clone(&bus),
+    )?);
+    let schedule_manager_for_loop = Arc::clone(&schedule_manager);
+    let _schedule_handle = tokio::spawn(async move {
+        schedule_manager_for_loop.run().await;
+    });
+    tracing::info!("Schedule manager started");
+
     let _tui_handle = if with_tui {
-        let receivers = nanocrab_tui::subscribe_all(&bus).await;
+        let receivers = nanocrab_tui::subscribe_all(bus.as_ref()).await;
         Some(tokio::spawn(async move {
             if let Err(err) = nanocrab_tui::run_tui_from_receivers(receivers).await {
                 tracing::error!("TUI exited with error: {err}");
