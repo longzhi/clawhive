@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { MessageCircle, Loader2, Key } from "lucide-react";
 import { useChannels, useUpdateChannels } from "@/hooks/use-api";
 import { toast } from "sonner";
+import { AddConnectorDialog } from "@/components/channels/add-connector-dialog";
 
 const CHANNEL_META: Record<string, { label: string; description: string; color: string }> = {
   telegram: { label: "Telegram", description: "Bot API integration", color: "text-blue-500" },
@@ -79,6 +80,7 @@ export default function ChannelsPage() {
                 <CardDescription>{meta.description}</CardDescription>
               </div>
               <div className="flex items-center gap-4">
+                <AddConnectorDialog kind={key} label={meta.label} />
                 <Switch
                   checked={enabled}
                   onCheckedChange={(checked) => handleToggle(key, checked)}
