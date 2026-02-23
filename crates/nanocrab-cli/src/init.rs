@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use console::Term;
+use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use nanocrab_auth::oauth::{profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 use nanocrab_auth::{AuthProfile, TokenManager};
@@ -73,31 +73,86 @@ pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
     let theme = ColorfulTheme::default();
 
     print_logo(&term);
+    ensure_required_dirs(config_root)?;
     print_step(&term, 1, TOTAL_STEPS, "LLM Provider");
     term.write_line(&format!("{} select provider and auth method", ARROW))?;
 
     let provider = prompt_provider(&theme)?;
     let auth = prompt_auth_choice(&theme, provider).await?;
-    write_provider_config(config_root, provider, &auth, force)?;
+    let provider_path = write_provider_config(config_root, provider, &auth, force)?;
 
     print_done(&term, "Provider configuration generated.");
 
     print_step(&term, 2, TOTAL_STEPS, "Agent Identity");
     let agent_setup = prompt_agent_setup(&theme, provider)?;
-    write_agent_files(config_root, &agent_setup, force)?;
+    let (agent_path, prompt_path) = write_agent_files(config_root, &agent_setup, force)?;
     print_done(&term, "Agent configuration and default persona generated.");
 
     print_step(&term, 3, TOTAL_STEPS, "Channels & Routing");
     let telegram = prompt_channel_config(&theme, "Telegram", "tg-main")?;
     let discord = prompt_channel_config(&theme, "Discord", "dc-main")?;
-    write_main_and_routing(config_root, &agent_setup.agent_id, telegram, discord, force)?;
+    let (main_path, routing_path) = write_main_and_routing(
+        config_root,
+        &agent_setup.agent_id,
+        telegram,
+        discord,
+        force,
+    )?;
     print_done(&term, "main.yaml and routing.yaml generated.");
 
-    term.write_line(&format!(
-        "{} Remaining wizard steps will be implemented in the next tasks.",
-        CRAB
-    ))?;
+    print_step(&term, 4, TOTAL_STEPS, "Validation");
+    validate_generated_config(config_root)?;
+    print_done(&term, "Generated configuration validated.");
 
+    print_step(&term, 5, TOTAL_STEPS, "Complete");
+    term.write_line(&format!("{}", style("Configuration complete!").green().bold()))?;
+    term.write_line("")?;
+    term.write_line("Generated files:")?;
+    for rel in [
+        display_rel(config_root, &main_path),
+        display_rel(config_root, &provider_path),
+        display_rel(config_root, &agent_path),
+        display_rel(config_root, &routing_path),
+        display_rel(config_root, &prompt_path),
+    ] {
+        term.write_line(&format!("  {} {}", crate::init_ui::CHECKMARK, rel))?;
+    }
+    term.write_line("")?;
+    term.write_line("Next Steps:")?;
+    term.write_line("  1. Validate: nanocrab validate")?;
+    term.write_line("  2. Start:    nanocrab start")?;
+    term.write_line("  (Optional) Edit persona: prompts/<agent_id>/system.md")?;
+
+    term.write_line(&format!("{} Setup wizard finished.", CRAB))?;
+
+    Ok(())
+}
+
+fn display_rel(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+fn ensure_required_dirs(config_root: &Path) -> Result<()> {
+    for rel in [
+        "config/agents.d",
+        "config/providers.d",
+        "prompts",
+        "skills",
+        "data",
+        "logs",
+    ] {
+        let dir = config_root.join(rel);
+        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn validate_generated_config(config_root: &Path) -> Result<()> {
+    let config_path = config_root.join("config");
+    nanocrab_core::load_config(&config_path)
+        .with_context(|| format!("config validation failed in {}", config_path.display()))?;
     Ok(())
 }
 
@@ -269,7 +324,7 @@ fn write_provider_config(config_root: &Path, provider: ProviderId, auth: &AuthCh
     Ok(target)
 }
 
-fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Result<()> {
+fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Result<(PathBuf, PathBuf)> {
     let agents_dir = config_root.join("config/agents.d");
     fs::create_dir_all(&agents_dir)
         .with_context(|| format!("failed to create {}", agents_dir.display()))?;
@@ -295,7 +350,7 @@ fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Res
             .with_context(|| format!("failed to write {}", prompt_path.display()))?;
     }
 
-    Ok(())
+    Ok((agent_yaml_path, prompt_path))
 }
 
 fn write_main_and_routing(
@@ -304,7 +359,7 @@ fn write_main_and_routing(
     telegram: Option<ChannelConfig>,
     discord: Option<ChannelConfig>,
     force: bool,
-) -> Result<()> {
+) -> Result<(PathBuf, PathBuf)> {
     let config_dir = config_root.join("config");
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("failed to create {}", config_dir.display()))?;
@@ -326,7 +381,7 @@ fn write_main_and_routing(
     fs::write(&routing_path, routing_yaml)
         .with_context(|| format!("failed to write {}", routing_path.display()))?;
 
-    Ok(())
+    Ok((main_path, routing_path))
 }
 
 fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
@@ -447,8 +502,9 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_system_prompt, generate_agent_yaml, generate_main_yaml, generate_provider_yaml,
-        generate_routing_yaml, provider_models, AuthChoice, ChannelConfig, ProviderId,
+        default_system_prompt, ensure_required_dirs, generate_agent_yaml, generate_main_yaml,
+        generate_provider_yaml, generate_routing_yaml, validate_generated_config, provider_models,
+        AuthChoice, ChannelConfig, ProviderId,
     };
 
     #[test]
@@ -544,5 +600,61 @@ mod tests {
         assert!(yaml.contains("connector_id: tg-main"));
         assert!(yaml.contains("connector_id: dc-main"));
         assert!(yaml.contains("agent_id: nanocrab-main"));
+    }
+
+    #[test]
+    fn ensure_required_dirs_creates_expected_paths() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        ensure_required_dirs(temp.path()).expect("create required directories");
+
+        for rel in [
+            "config/agents.d",
+            "config/providers.d",
+            "prompts",
+            "skills",
+            "data",
+            "logs",
+        ] {
+            assert!(temp.path().join(rel).exists(), "missing {rel}");
+        }
+    }
+
+    #[test]
+    fn validate_generated_config_accepts_minimal_valid_files() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        ensure_required_dirs(temp.path()).expect("create required directories");
+
+        std::fs::write(
+            temp.path().join("config/main.yaml"),
+            generate_main_yaml("nanocrab", None, None),
+        )
+        .expect("write main.yaml");
+        std::fs::write(
+            temp.path().join("config/routing.yaml"),
+            generate_routing_yaml("nanocrab-main", None, None),
+        )
+        .expect("write routing.yaml");
+        std::fs::write(
+            temp.path().join("config/providers.d/openai.yaml"),
+            generate_provider_yaml(
+                ProviderId::OpenAi,
+                &AuthChoice::ApiKey {
+                    env_var: "OPENAI_API_KEY".to_string(),
+                },
+            ),
+        )
+        .expect("write provider yaml");
+        std::fs::write(
+            temp.path().join("config/agents.d/nanocrab-main.yaml"),
+            generate_agent_yaml(
+                "nanocrab-main",
+                "Nanocrab",
+                "🦀",
+                "openai/gpt-4o-mini",
+            ),
+        )
+        .expect("write agent yaml");
+
+        validate_generated_config(temp.path()).expect("generated config should be valid");
     }
 }
