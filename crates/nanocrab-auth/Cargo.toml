@@ -10,6 +10,14 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 axum.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
+urlencoding = "2"
+webbrowser = "1"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true
