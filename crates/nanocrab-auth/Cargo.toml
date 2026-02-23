@@ -17,6 +17,7 @@ sha2 = "0.10"
 urlencoding = "2"
 webbrowser = "1"
 rand = "0.8"
+fd-lock = "4"
 
 [dev-dependencies]
 tempfile.workspace = true
