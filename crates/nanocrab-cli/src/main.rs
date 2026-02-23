@@ -10,11 +10,11 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
-mod init;
-mod init_ui;
+mod setup;
+mod setup_ui;
 
 use commands::auth::{handle_auth_command, AuthCommands};
-use init::run_init;
+use setup::run_setup;
 use nanocrab_auth::{AuthProfile, TokenManager};
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
@@ -76,9 +76,9 @@ enum Commands {
     Auth(AuthCommands),
     #[command(subcommand, about = "Manage scheduled tasks")]
     Schedule(ScheduleCommands),
-    #[command(about = "Initialize nanocrab configuration")]
-    Init {
-        #[arg(long, help = "Force overwrite existing config")]
+    #[command(about = "Interactive configuration manager")]
+    Setup {
+        #[arg(long, help = "Skip confirmation prompts on reconfigure/remove")]
         force: bool,
     },
 }
@@ -420,8 +420,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Init { force } => {
-            run_init(&cli.config_root, force).await?;
+        Commands::Setup { force } => {
+            run_setup(&cli.config_root, force).await?;
         }
     }
 
@@ -985,15 +985,15 @@ mod tests {
     }
 
     #[test]
-    fn init_ui_symbols_exist() {
-        let _ = crate::init_ui::CHECKMARK;
-        let _ = crate::init_ui::ARROW;
-        let _ = crate::init_ui::CRAB;
+    fn setup_ui_symbols_exist() {
+        let _ = crate::setup_ui::CHECKMARK;
+        let _ = crate::setup_ui::ARROW;
+        let _ = crate::setup_ui::CRAB;
     }
 
     #[test]
-    fn parses_init_force_flag() {
-        let cli = Cli::try_parse_from(["nanocrab", "init", "--force"]).unwrap();
-        assert!(matches!(cli.command, Commands::Init { force: true }));
+    fn parses_setup_force_flag() {
+        let cli = Cli::try_parse_from(["nanocrab", "setup", "--force"]).unwrap();
+        assert!(matches!(cli.command, Commands::Setup { force: true }));
     }
 }

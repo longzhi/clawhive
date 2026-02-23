@@ -8,7 +8,7 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use nanocrab_auth::oauth::{profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 use nanocrab_auth::{AuthProfile, TokenManager};
 
-use crate::init_ui::{print_done, print_logo, print_step, ARROW, CRAB};
+use crate::setup_ui::{print_done, print_logo, print_step, ARROW, CRAB};
 
 const TOTAL_STEPS: usize = 5;
 
@@ -68,7 +68,7 @@ struct ChannelConfig {
     token: String,
 }
 
-pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
+pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
     let term = Term::stdout();
     let theme = ColorfulTheme::default();
 
@@ -115,7 +115,7 @@ pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
         display_rel(config_root, &routing_path),
         display_rel(config_root, &prompt_path),
     ] {
-        term.write_line(&format!("  {} {}", crate::init_ui::CHECKMARK, rel))?;
+        term.write_line(&format!("  {} {}", crate::setup_ui::CHECKMARK, rel))?;
     }
     term.write_line("")?;
     term.write_line("┌─ Next Steps ───────────────────────────┐")?;
