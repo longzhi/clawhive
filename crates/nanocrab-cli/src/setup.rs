@@ -64,21 +64,12 @@ enum AuthChoice {
 }
 
 #[derive(Debug, Clone)]
-struct AgentSetup {
-    agent_id: String,
-    name: String,
-    emoji: String,
-    primary_model: String,
-}
-
-#[derive(Debug, Clone)]
 struct ChannelConfig {
     connector_id: String,
     token: String,
 }
 
 pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
-    touch_setup_symbols_for_lints();
     let term = Term::stdout();
     let theme = ColorfulTheme::default();
 
@@ -114,6 +105,13 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
                 handle_remove(config_root, &theme, &state, force)?;
             }
             SetupAction::Done => {
+                if let Err(err) = validate_generated_config(config_root) {
+                    term.write_line(&format!(
+                        "{} {}",
+                        ARROW,
+                        style(format!("Config validation warning: {err}")).yellow()
+                    ))?;
+                }
                 term.write_line(&format!("{} {}", CRAB, style("Setup finished.").green().bold()))?;
                 break;
             }
@@ -122,29 +120,6 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
 
     Ok(())
 }
-
-fn touch_setup_symbols_for_lints() {
-    let _ = std::mem::size_of::<AgentSetup>();
-    let _ = std::mem::size_of::<ChannelConfig>();
-    let _ = validate_generated_config as fn(&Path) -> Result<()>;
-    let _ = prompt_channel_config as fn(&ColorfulTheme, &str, &str) -> Result<Option<ChannelConfig>>;
-    let _ = prompt_agent_setup as fn(&ColorfulTheme, ProviderId) -> Result<AgentSetup>;
-    let _ = write_provider_config as fn(&Path, ProviderId, &AuthChoice, bool) -> Result<PathBuf>;
-    let _ = write_agent_files as fn(&Path, &AgentSetup, bool) -> Result<(PathBuf, PathBuf)>;
-    let _ = write_main_and_routing
-        as fn(
-            &Path,
-            &str,
-            Option<ChannelConfig>,
-            Option<ChannelConfig>,
-            bool,
-        ) -> Result<(PathBuf, PathBuf)>;
-    let _ = generate_main_yaml as fn(&str, Option<ChannelConfig>, Option<ChannelConfig>) -> String;
-    let _ = generate_routing_yaml as fn(&str, Option<ChannelConfig>, Option<ChannelConfig>) -> String;
-    let _ = provider_models as fn(ProviderId) -> Vec<String>;
-    let _ = crate::setup_ui::print_step as fn(&Term, usize, usize, &str);
-}
-
 fn build_action_labels(state: &ConfigState) -> Vec<(SetupAction, String)> {
     vec![
         (
@@ -659,77 +634,6 @@ fn validate_generated_config(config_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prompt_channel_config(
-    theme: &ColorfulTheme,
-    channel_name: &str,
-    default_connector_id: &str,
-) -> Result<Option<ChannelConfig>> {
-    let enabled = Confirm::with_theme(theme)
-        .with_prompt(format!("Enable {channel_name}?"))
-        .default(channel_name == "Telegram")
-        .interact()?;
-    if !enabled {
-        return Ok(None);
-    }
-
-    let connector_id: String = Input::with_theme(theme)
-        .with_prompt(format!("{channel_name} connector_id"))
-        .default(default_connector_id.to_string())
-        .interact_text()?;
-    let token = Password::with_theme(theme)
-        .with_prompt(format!("{channel_name} bot token"))
-        .allow_empty_password(false)
-        .interact()?;
-    if token.trim().is_empty() {
-        anyhow::bail!("{channel_name} token cannot be empty");
-    }
-
-    Ok(Some(ChannelConfig {
-        connector_id,
-        token,
-    }))
-}
-
-fn prompt_agent_setup(theme: &ColorfulTheme, provider: ProviderId) -> Result<AgentSetup> {
-    let agent_id: String = dialoguer::Input::with_theme(theme)
-        .with_prompt("Agent ID")
-        .default("nanocrab-main".to_string())
-        .interact_text()?;
-    let name: String = dialoguer::Input::with_theme(theme)
-        .with_prompt("Agent display name")
-        .default("Nanocrab".to_string())
-        .interact_text()?;
-    let emoji: String = dialoguer::Input::with_theme(theme)
-        .with_prompt("Agent emoji")
-        .default("🦀".to_string())
-        .interact_text()?;
-
-    let models = provider_models(provider);
-    let model_labels: Vec<&str> = models.iter().map(String::as_str).collect();
-    let selected = Select::with_theme(theme)
-        .with_prompt("Primary model")
-        .items(&model_labels)
-        .default(0)
-        .interact()?;
-
-    let agent_id = agent_id.trim().to_string();
-    let name = name.trim().to_string();
-    let emoji = emoji.trim().to_string();
-    if agent_id.is_empty() {
-        anyhow::bail!("agent id cannot be empty");
-    }
-    if name.is_empty() {
-        anyhow::bail!("agent display name cannot be empty");
-    }
-
-    Ok(AgentSetup {
-        agent_id,
-        name,
-        emoji,
-        primary_model: models[selected].clone(),
-    })
-}
-
 fn prompt_provider(theme: &ColorfulTheme) -> Result<ProviderId> {
     let options = ["Anthropic", "OpenAI"];
     let selected = Select::with_theme(theme)
@@ -809,24 +713,6 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
     Ok(AuthChoice::OAuth { profile_name })
 }
 
-fn write_provider_config(config_root: &Path, provider: ProviderId, auth: &AuthChoice, force: bool) -> Result<PathBuf> {
-    let providers_dir = config_root.join("config/providers.d");
-    fs::create_dir_all(&providers_dir)
-        .with_context(|| format!("failed to create {}", providers_dir.display()))?;
-
-    let target = providers_dir.join(format!("{}.yaml", provider.as_str()));
-    if target.exists() && !force {
-        anyhow::bail!(
-            "provider config already exists: {} (use --force to overwrite)",
-            target.display()
-        );
-    }
-
-    let yaml = generate_provider_yaml(provider, auth);
-    fs::write(&target, yaml).with_context(|| format!("failed to write {}", target.display()))?;
-    Ok(target)
-}
-
 fn write_provider_config_unchecked(
     config_root: &Path,
     provider: ProviderId,
@@ -840,35 +726,6 @@ fn write_provider_config_unchecked(
     let yaml = generate_provider_yaml(provider, auth);
     fs::write(&target, yaml).with_context(|| format!("failed to write {}", target.display()))?;
     Ok(target)
-}
-
-fn write_agent_files(config_root: &Path, agent: &AgentSetup, force: bool) -> Result<(PathBuf, PathBuf)> {
-    let agents_dir = config_root.join("config/agents.d");
-    fs::create_dir_all(&agents_dir)
-        .with_context(|| format!("failed to create {}", agents_dir.display()))?;
-
-    let agent_yaml_path = agents_dir.join(format!("{}.yaml", agent.agent_id));
-    if agent_yaml_path.exists() && !force {
-        anyhow::bail!(
-            "agent config already exists: {} (use --force to overwrite)",
-            agent_yaml_path.display()
-        );
-    }
-
-    let yaml = generate_agent_yaml(&agent.agent_id, &agent.name, &agent.emoji, &agent.primary_model);
-    fs::write(&agent_yaml_path, yaml)
-        .with_context(|| format!("failed to write {}", agent_yaml_path.display()))?;
-
-    let prompt_dir = config_root.join("prompts").join(&agent.agent_id);
-    fs::create_dir_all(&prompt_dir)
-        .with_context(|| format!("failed to create {}", prompt_dir.display()))?;
-    let prompt_path = prompt_dir.join("system.md");
-    if !prompt_path.exists() || force {
-        fs::write(&prompt_path, default_system_prompt(&agent.name))
-            .with_context(|| format!("failed to write {}", prompt_path.display()))?;
-    }
-
-    Ok((agent_yaml_path, prompt_path))
 }
 
 fn write_agent_files_unchecked(
@@ -890,37 +747,6 @@ fn write_agent_files_unchecked(
         fs::write(&prompt_path, default_system_prompt(name))?;
     }
     Ok(())
-}
-
-fn write_main_and_routing(
-    config_root: &Path,
-    default_agent_id: &str,
-    telegram: Option<ChannelConfig>,
-    discord: Option<ChannelConfig>,
-    force: bool,
-) -> Result<(PathBuf, PathBuf)> {
-    let config_dir = config_root.join("config");
-    fs::create_dir_all(&config_dir)
-        .with_context(|| format!("failed to create {}", config_dir.display()))?;
-
-    let main_path = config_dir.join("main.yaml");
-    let routing_path = config_dir.join("routing.yaml");
-    if (!force) && (main_path.exists() || routing_path.exists()) {
-        anyhow::bail!(
-            "config files already exist: {} or {} (use --force to overwrite)",
-            main_path.display(),
-            routing_path.display()
-        );
-    }
-
-    let main_yaml = generate_main_yaml("nanocrab", telegram.clone(), discord.clone());
-    let routing_yaml = generate_routing_yaml(default_agent_id, telegram, discord);
-    fs::write(&main_path, main_yaml)
-        .with_context(|| format!("failed to write {}", main_path.display()))?;
-    fs::write(&routing_path, routing_yaml)
-        .with_context(|| format!("failed to write {}", routing_path.display()))?;
-
-    Ok((main_path, routing_path))
 }
 
 fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
@@ -1033,11 +859,8 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
 
 fn provider_models_for_id(provider_id: &str) -> Vec<String> {
     match provider_id {
-        "anthropic" => vec![
-            "anthropic/claude-sonnet-4-5".to_string(),
-            "anthropic/claude-3-haiku-20240307".to_string(),
-        ],
-        "openai" => vec!["openai/gpt-4o-mini".to_string(), "openai/gpt-4o".to_string()],
+        "anthropic" => provider_models(ProviderId::Anthropic),
+        "openai" => provider_models(ProviderId::OpenAi),
         _ => vec![],
     }
 }
