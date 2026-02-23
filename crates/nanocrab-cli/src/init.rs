@@ -8,7 +8,7 @@ use dialoguer::{theme::ColorfulTheme, Password, Select};
 use nanocrab_auth::oauth::{profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 use nanocrab_auth::{AuthProfile, TokenManager};
 
-use crate::init_ui::{print_done, print_logo, print_step};
+use crate::init_ui::{print_done, print_logo, print_step, ARROW, CRAB};
 
 const TOTAL_STEPS: usize = 5;
 
@@ -60,13 +60,17 @@ pub async fn run_init(config_root: &Path, force: bool) -> Result<()> {
 
     print_logo(&term);
     print_step(&term, 1, TOTAL_STEPS, "LLM Provider");
+    term.write_line(&format!("{} select provider and auth method", ARROW))?;
 
     let provider = prompt_provider(&theme)?;
     let auth = prompt_auth_choice(&theme, provider).await?;
     write_provider_config(config_root, provider, &auth, force)?;
 
     print_done(&term, "Provider configuration generated.");
-    term.write_line("Remaining wizard steps will be implemented in the next tasks.")?;
+    term.write_line(&format!(
+        "{} Remaining wizard steps will be implemented in the next tasks.",
+        CRAB
+    ))?;
 
     Ok(())
 }
@@ -197,7 +201,9 @@ fn unix_timestamp() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_provider_yaml, AuthChoice, ProviderId};
+    use super::{
+        default_system_prompt, generate_agent_yaml, generate_provider_yaml, AuthChoice, ProviderId,
+    };
 
     #[test]
     fn provider_yaml_uses_auth_profile_for_oauth() {
@@ -226,5 +232,22 @@ mod tests {
         assert!(yaml.contains("provider_id: anthropic"));
         assert!(yaml.contains("api_key_env: ANTHROPIC_API_KEY"));
         assert!(!yaml.contains("auth_profile:"));
+    }
+
+    #[test]
+    fn agent_yaml_contains_identity_and_model_policy() {
+        let yaml = generate_agent_yaml("nanocrab-main", "Nanocrab", "🦀", "openai/gpt-4o-mini");
+
+        assert!(yaml.contains("agent_id: nanocrab-main"));
+        assert!(yaml.contains("name: \"Nanocrab\""));
+        assert!(yaml.contains("emoji: \"🦀\""));
+        assert!(yaml.contains("primary: \"openai/gpt-4o-mini\""));
+    }
+
+    #[test]
+    fn default_system_prompt_contains_agent_name() {
+        let prompt = default_system_prompt("Nanocrab");
+        assert!(prompt.contains("You are Nanocrab"));
+        assert!(prompt.contains("helpful AI assistant"));
     }
 }
