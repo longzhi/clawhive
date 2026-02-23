@@ -2,7 +2,69 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillPermissions {
+    #[serde(default)]
+    pub fs: FsPermissionsDef,
+    #[serde(default)]
+    pub network: NetworkPermissionsDef,
+    #[serde(default)]
+    pub exec: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub services: HashMap<String, ServicePermissionDef>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FsPermissionsDef {
+    #[serde(default)]
+    pub read: Vec<String>,
+    #[serde(default)]
+    pub write: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkPermissionsDef {
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePermissionDef {
+    pub access: String,
+    #[serde(default)]
+    pub scope: HashMap<String, serde_json::Value>,
+}
+
+impl SkillPermissions {
+    pub fn to_corral_permissions(&self) -> corral_core::Permissions {
+        let mut services = std::collections::HashMap::new();
+        for (name, def) in &self.services {
+            services.insert(
+                name.clone(),
+                corral_core::ServicePermission {
+                    access: def.access.clone(),
+                    scope: def.scope.clone(),
+                },
+            );
+        }
+        corral_core::Permissions {
+            fs: corral_core::FsPermissions {
+                read: self.fs.read.clone(),
+                write: self.fs.write.clone(),
+            },
+            network: corral_core::NetworkPermissions {
+                allow: self.network.allow.clone(),
+            },
+            exec: self.exec.clone(),
+            env: self.env.clone(),
+            services,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SkillFrontmatter {
@@ -10,6 +72,8 @@ pub struct SkillFrontmatter {
     pub description: String,
     #[serde(default)]
     pub requires: SkillRequirements,
+    #[serde(default)]
+    pub permissions: Option<SkillPermissions>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -25,6 +89,7 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub requires: SkillRequirements,
+    pub permissions: Option<SkillPermissions>,
     pub content: String,
     pub path: PathBuf,
 }
@@ -137,6 +202,7 @@ fn load_skill(path: &Path) -> Result<Skill> {
         name: frontmatter.name,
         description: frontmatter.description,
         requires: frontmatter.requires,
+        permissions: frontmatter.permissions,
         content,
         path: path.to_path_buf(),
     })
@@ -176,6 +242,60 @@ mod tests {
     fn parse_frontmatter_rejects_missing() {
         let raw = "# No frontmatter\nJust content";
         assert!(parse_frontmatter(raw).is_err());
+    }
+
+    #[test]
+    fn parse_frontmatter_with_permissions() {
+        let raw = r#"---
+name: web-fetch
+description: Fetch web content
+requires:
+  bins: [curl]
+permissions:
+  fs:
+    read: ["$SKILL_DIR/**"]
+    write: ["$WORK_DIR/**"]
+  network:
+    allow: ["*:443", "*:80"]
+  exec: [curl, jq]
+  env: [LANG]
+---
+Content here"#;
+        let (fm, _content) = parse_frontmatter(raw).unwrap();
+        let perms = fm.permissions.unwrap();
+        assert_eq!(perms.fs.read.len(), 1);
+        assert_eq!(perms.fs.write.len(), 1);
+        assert_eq!(perms.network.allow.len(), 2);
+        assert_eq!(perms.exec, vec!["curl", "jq"]);
+        assert_eq!(perms.env, vec!["LANG"]);
+    }
+
+    #[test]
+    fn parse_frontmatter_without_permissions_is_none() {
+        let raw = "---\nname: simple\ndescription: No perms\n---\nBody";
+        let (fm, _) = parse_frontmatter(raw).unwrap();
+        assert!(fm.permissions.is_none());
+    }
+
+    #[test]
+    fn skill_permissions_to_corral_basic() {
+        let sp = SkillPermissions {
+            fs: FsPermissionsDef {
+                read: vec!["src/**".into()],
+                write: vec![],
+            },
+            network: NetworkPermissionsDef {
+                allow: vec!["api.com:443".into()],
+            },
+            exec: vec!["curl".into()],
+            env: vec!["HOME".into()],
+            services: Default::default(),
+        };
+        let corral_perms = sp.to_corral_permissions();
+        assert_eq!(corral_perms.fs.read, vec!["src/**"]);
+        assert_eq!(corral_perms.network.allow, vec!["api.com:443"]);
+        assert_eq!(corral_perms.exec, vec!["curl"]);
+        assert_eq!(corral_perms.env, vec!["HOME"]);
     }
 
     #[test]
@@ -220,6 +340,7 @@ mod tests {
                 bins: vec![],
                 env: vec!["NANOCRAB_NONEXISTENT_VAR_12345".into()],
             },
+            permissions: None,
             content: String::new(),
             path: PathBuf::new(),
         };
