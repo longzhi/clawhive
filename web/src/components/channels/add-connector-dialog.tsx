@@ -34,9 +34,10 @@ type AddConnectorFormValues = {
 interface AddConnectorDialogProps {
   kind: string;
   label: string;
+  onAdded?: () => void;
 }
 
-export function AddConnectorDialog({ kind, label }: AddConnectorDialogProps) {
+export function AddConnectorDialog({ kind, label, onAdded }: AddConnectorDialogProps) {
   const [open, setOpen] = useState(false);
   const addConnector = useAddConnector();
   const form = useForm<AddConnectorFormValues>({
@@ -54,6 +55,7 @@ export function AddConnectorDialog({ kind, label }: AddConnectorDialogProps) {
         token: values.token,
       });
       toast.success(`${label} connector added`);
+      onAdded?.();
       form.reset();
       setOpen(false);
     } catch {

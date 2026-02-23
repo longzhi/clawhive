@@ -10,6 +10,7 @@ import { MessageCircle, Loader2, Key, Trash2 } from "lucide-react";
 import { useChannelStatus, useChannels, useRemoveConnector, useUpdateChannels } from "@/hooks/use-api";
 import { toast } from "sonner";
 import { AddConnectorDialog } from "@/components/channels/add-connector-dialog";
+import { RestartBanner } from "@/components/restart-banner";
 
 const CHANNEL_META: Record<string, { label: string; description: string; color: string }> = {
   telegram: { label: "Telegram", description: "Bot API integration", color: "text-blue-500" },
@@ -22,6 +23,7 @@ export default function ChannelsPage() {
   const updateChannels = useUpdateChannels();
   const removeConnector = useRemoveConnector();
   const [tokens, setTokens] = useState<Record<string, string>>({});
+  const [restartRequired, setRestartRequired] = useState(false);
 
   const statusMap = new Map((statuses ?? []).map((item) => [`${item.kind}:${item.connector_id}`, item.status]));
 
@@ -33,6 +35,7 @@ export default function ChannelsPage() {
     }
     try {
       await updateChannels.mutateAsync(updated);
+      setRestartRequired(true);
       toast.success(`${CHANNEL_META[channelKey]?.label ?? channelKey} ${enabled ? "enabled" : "disabled"}`);
     } catch {
       toast.error(`Failed to update ${channelKey}`);
@@ -51,6 +54,7 @@ export default function ChannelsPage() {
     }
     try {
       await updateChannels.mutateAsync(updated);
+      setRestartRequired(true);
       toast.success("Token saved");
       setTokens(prev => ({ ...prev, [tokenKey]: "" }));
     } catch {
@@ -61,6 +65,7 @@ export default function ChannelsPage() {
   const handleRemoveConnector = async (channelKey: string, connectorId: string) => {
     try {
       await removeConnector.mutateAsync({ kind: channelKey, connectorId });
+      setRestartRequired(true);
       toast.success("Connector removed");
     } catch {
       toast.error("Failed to remove connector");
@@ -78,8 +83,10 @@ export default function ChannelsPage() {
   const channelKeys = Object.keys(CHANNEL_META);
 
   return (
-    <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-      {channelKeys.map((key) => {
+    <div>
+      <RestartBanner visible={restartRequired} />
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {channelKeys.map((key) => {
         const meta = CHANNEL_META[key];
         const channel = channels?.[key];
         const enabled = channel?.enabled ?? false;
@@ -93,7 +100,7 @@ export default function ChannelsPage() {
                 <CardDescription>{meta.description}</CardDescription>
               </div>
               <div className="flex items-center gap-4">
-                <AddConnectorDialog kind={key} label={meta.label} />
+                <AddConnectorDialog kind={key} label={meta.label} onAdded={() => setRestartRequired(true)} />
                 <Switch
                   checked={enabled}
                   onCheckedChange={(checked) => handleToggle(key, checked)}
@@ -169,7 +176,8 @@ export default function ChannelsPage() {
             </CardContent>
           </Card>
         );
-      })}
+        })}
+      </div>
     </div>
   );
 }
