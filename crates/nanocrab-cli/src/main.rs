@@ -10,8 +10,11 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
+mod init;
+mod init_ui;
 
 use commands::auth::{handle_auth_command, AuthCommands};
+use init::run_init;
 use nanocrab_auth::{AuthProfile, TokenManager};
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
@@ -73,6 +76,11 @@ enum Commands {
     Auth(AuthCommands),
     #[command(subcommand, about = "Manage scheduled tasks")]
     Schedule(ScheduleCommands),
+    #[command(about = "Initialize nanocrab configuration")]
+    Init {
+        #[arg(long, help = "Force overwrite existing config")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -365,6 +373,7 @@ async fn main() -> Result<()> {
                         "ID", "ENABLED", "SCHEDULE", "NEXT RUN", "ERRORS"
                     );
                     println!("{}", "-".repeat(96));
+                    for entry in entries {
                         let next_run = entry
                             .state
                             .next_run_at_ms
@@ -410,6 +419,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::Init { force } => {
+            run_init(&cli.config_root, force).await?;
         }
     }
 
@@ -969,5 +981,18 @@ mod tests {
             cli.command,
             Commands::Auth(AuthCommands::Login { .. })
         ));
+    }
+
+    #[test]
+    fn init_ui_symbols_exist() {
+        let _ = crate::init_ui::CHECKMARK;
+        let _ = crate::init_ui::ARROW;
+        let _ = crate::init_ui::CRAB;
+    }
+
+    #[test]
+    fn parses_init_force_flag() {
+        let cli = Cli::try_parse_from(["nanocrab", "init", "--force"]).unwrap();
+        assert!(matches!(cli.command, Commands::Init { force: true }));
     }
 }
