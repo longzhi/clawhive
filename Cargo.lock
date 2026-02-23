@@ -1889,6 +1889,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-core",
+ "nanocrab-auth",
  "nanocrab-bus",
  "nanocrab-core",
  "nanocrab-gateway",

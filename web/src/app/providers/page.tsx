@@ -4,13 +4,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Brain, Loader2, CheckCircle, Key } from "lucide-react";
-import { useProviders, useTestProvider, useSetProviderKey } from "@/hooks/use-api";
+import { Brain, Loader2, CheckCircle, Key, ShieldCheck } from "lucide-react";
+import { useAuthStatus, useProviders, useTestProvider, useSetProviderKey } from "@/hooks/use-api";
 import { toast } from "sonner";
 import { useState } from "react";
 
 export default function ProvidersPage() {
   const { data: providers, isLoading } = useProviders();
+  const { data: authStatus } = useAuthStatus();
   const testProvider = useTestProvider();
   const setProviderKey = useSetProviderKey();
   const [keys, setKeys] = useState<Record<string, string>>({});
@@ -39,6 +40,16 @@ export default function ProvidersPage() {
     } catch (e) {
       toast.error(`Failed to test provider ${id}`);
     }
+  };
+
+  const authProfileForProvider = (providerId: string) =>
+    authStatus?.profiles.find((p) => p.provider === providerId && p.active);
+
+  const loginHint = (providerId: string) =>
+    providerId === "openai" ? "nanocrab auth login openai" : "nanocrab auth login anthropic";
+
+  const handleShowLoginHint = (providerId: string) => {
+    toast.message(`Use CLI: ${loginHint(providerId)}`);
   };
 
   if (isLoading) {
@@ -71,6 +82,25 @@ export default function ProvidersPage() {
               >
                 {provider.key_configured ? "Configured" : "Not Set"}
               </Badge>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">OAuth / Session</span>
+              {authProfileForProvider(provider.provider_id) ? (
+                <Badge className="bg-emerald-600 hover:bg-emerald-700">
+                  <ShieldCheck className="mr-1 h-3.5 w-3.5" />
+                  Connected
+                </Badge>
+              ) : (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="h-7"
+                  onClick={() => handleShowLoginHint(provider.provider_id)}
+                >
+                  Login
+                </Button>
+              )}
             </div>
 
             <div className="flex flex-col gap-1">

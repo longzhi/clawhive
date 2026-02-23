@@ -31,6 +31,18 @@ export interface ProviderSummary {
   models: string[];
 }
 
+export interface AuthProfileItem {
+  name: string;
+  provider: string;
+  kind: string;
+  active: boolean;
+}
+
+export interface AuthStatus {
+  active_profile: string | null;
+  profiles: AuthProfileItem[];
+}
+
 export interface SessionSummary {
   session_key: string;
   file_name: string;
@@ -70,6 +82,10 @@ export function useToggleAgent() {
 
 export function useProviders() {
   return useQuery({ queryKey: ["providers"], queryFn: () => apiFetch<ProviderSummary[]>("/api/providers") });
+}
+
+export function useAuthStatus() {
+  return useQuery({ queryKey: ["auth-status"], queryFn: () => apiFetch<AuthStatus>("/api/auth/status") });
 }
 
 export function useTestProvider() {

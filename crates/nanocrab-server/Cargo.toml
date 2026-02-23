@@ -25,3 +25,4 @@ nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-gateway = { path = "../nanocrab-gateway" }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
+nanocrab-auth = { path = "../nanocrab-auth" }
