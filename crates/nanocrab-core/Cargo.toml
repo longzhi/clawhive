@@ -21,6 +21,7 @@ nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-runtime = { path = "../nanocrab-runtime" }
+nanocrab-scheduler = { path = "../nanocrab-scheduler" }
 reqwest.workspace = true
 htmd = "0.5"
 corral-core = { git = "https://github.com/longzhi/corral", package = "corral-core", default-features = false, features = ["broker"] }

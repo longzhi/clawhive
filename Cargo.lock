@@ -1744,6 +1744,7 @@ dependencies = [
  "nanocrab-memory",
  "nanocrab-provider",
  "nanocrab-runtime",
+ "nanocrab-scheduler",
  "nanocrab-schema",
  "reqwest 0.12.28",
  "serde",

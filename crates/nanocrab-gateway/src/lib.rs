@@ -245,6 +245,7 @@ mod tests {
     use nanocrab_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
     use nanocrab_provider::{register_builtin_providers, ProviderRegistry};
     use nanocrab_runtime::NativeExecutor;
+    use nanocrab_scheduler::ScheduleManager;
     use nanocrab_schema::{BusMessage, InboundMessage};
 
     use super::*;
@@ -261,6 +262,14 @@ mod tests {
         let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
         let bus = EventBus::new(16);
         let publisher = bus.publisher();
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                &tmp.path().join("config/schedules.d"),
+                &tmp.path().join("data/schedules"),
+                Arc::new(EventBus::new(16)),
+            )
+            .unwrap(),
+        );
         let session_mgr = SessionManager::new(memory.clone(), 1800);
         let file_store = MemoryFileStore::new(tmp.path());
         let session_writer = SessionWriter::new(tmp.path());
@@ -298,6 +307,7 @@ mod tests {
             tmp.path().to_path_buf(),
             None,
             None,
+            schedule_manager,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),
@@ -326,6 +336,14 @@ mod tests {
         let handle_incoming_rx = bus.subscribe(Topic::HandleIncomingMessage).await;
         let message_accepted_rx = bus.subscribe(Topic::MessageAccepted).await;
         let publisher = bus.publisher();
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                &tmp.path().join("config/schedules.d"),
+                &tmp.path().join("data/schedules"),
+                Arc::new(EventBus::new(16)),
+            )
+            .unwrap(),
+        );
         let session_mgr = SessionManager::new(memory.clone(), 1800);
         let file_store = MemoryFileStore::new(tmp.path());
         let session_writer = SessionWriter::new(tmp.path());
@@ -363,6 +381,7 @@ mod tests {
             tmp.path().to_path_buf(),
             None,
             None,
+            schedule_manager,
         ));
         let routing = RoutingConfig {
             default_agent_id: "nanocrab-main".into(),

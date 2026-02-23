@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Session(cmd) => {
-            let (_bus, memory, _gateway, _config) = bootstrap(&cli.config_root)?;
+            let (_bus, memory, _gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
             let session_mgr = SessionManager::new(memory, 1800);
             match cmd {
                 SessionCommands::Reset { session_key } => {
@@ -288,7 +288,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config) = bootstrap(&cli.config_root)?;
+            let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -336,7 +336,15 @@ fn toggle_agent(agents_dir: &std::path::Path, agent_id: &str, enabled: bool) -> 
     Ok(())
 }
 
-fn bootstrap(root: &Path) -> Result<(Arc<EventBus>, Arc<MemoryStore>, Arc<Gateway>, NanocrabConfig)> {
+fn bootstrap(
+    root: &Path,
+) -> Result<(
+    Arc<EventBus>,
+    Arc<MemoryStore>,
+    Arc<Gateway>,
+    NanocrabConfig,
+    Arc<ScheduleManager>,
+)> {
     let config = load_config(&root.join("config"))?;
 
     let db_path = root.join("data/nanocrab.db");
@@ -369,6 +377,11 @@ fn bootstrap(root: &Path) -> Result<(Arc<EventBus>, Arc<MemoryStore>, Arc<Gatewa
 
     let bus = Arc::new(EventBus::new(256));
     let publisher = bus.publisher();
+    let schedule_manager = Arc::new(ScheduleManager::new(
+        &root.join("config/schedules.d"),
+        &root.join("data/schedules"),
+        Arc::clone(&bus),
+    )?);
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let skill_registry = SkillRegistry::load_from_dir(&root.join("skills")).unwrap_or_else(|e| {
         tracing::warn!("Failed to load skills: {e}");
@@ -407,6 +420,7 @@ fn bootstrap(root: &Path) -> Result<(Arc<EventBus>, Arc<MemoryStore>, Arc<Gatewa
         workspace_dir.clone(),
         brave_api_key,
         Some(root.to_path_buf()),
+        Arc::clone(&schedule_manager),
     ));
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());
@@ -417,7 +431,7 @@ fn bootstrap(root: &Path) -> Result<(Arc<EventBus>, Arc<MemoryStore>, Arc<Gatewa
         rate_limiter,
     ));
 
-    Ok((bus, memory, gateway, config))
+    Ok((bus, memory, gateway, config, schedule_manager))
 }
 
 fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
@@ -538,7 +552,7 @@ fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvide
 }
 
 async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
-    let (bus, memory, gateway, config) = bootstrap(root)?;
+    let (bus, memory, gateway, config, schedule_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store_for_consolidation =
@@ -584,11 +598,6 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
     let _consolidation_handle = scheduler.start();
     tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
 
-    let schedule_manager = Arc::new(ScheduleManager::new(
-        &root.join("config/schedules.d"),
-        &root.join("data/schedules"),
-        Arc::clone(&bus),
-    )?);
     let schedule_manager_for_loop = Arc::clone(&schedule_manager);
     let _schedule_handle = tokio::spawn(async move {
         schedule_manager_for_loop.run().await;
@@ -688,7 +697,7 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config) = bootstrap(root)?;
+    let (_bus, memory, _gateway, config, _schedule_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
@@ -718,7 +727,7 @@ async fn run_consolidate(root: &Path) -> Result<()> {
 }
 
 async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
-    let (_bus, _memory, gateway, _config) = bootstrap(root)?;
+    let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(root)?;
 
     println!("nanocrab REPL. Type 'quit' to exit.");
     println!("---");

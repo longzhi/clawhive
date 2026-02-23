@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use nanocrab_bus::EventBus;
 use nanocrab_schema::{
@@ -186,6 +186,82 @@ impl ScheduleManager {
         Ok(())
     }
 
+    pub async fn update_schedule(
+        &self,
+        schedule_id: &str,
+        patch: &serde_json::Value,
+    ) -> Result<()> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .get_mut(schedule_id)
+            .ok_or_else(|| anyhow!("schedule not found: {schedule_id}"))?;
+
+        let mut value = serde_json::to_value(&entry.config)?;
+        merge_json_value(&mut value, patch);
+        let mut updated: ScheduleConfig = serde_json::from_value(value)?;
+        if updated.schedule_id != schedule_id {
+            updated.schedule_id = schedule_id.to_string();
+        }
+
+        if updated.enabled {
+            let now_ms = Utc::now().timestamp_millis();
+            entry.state.next_run_at_ms = compute_next_run_at_ms(&updated.schedule, now_ms)?;
+        } else {
+            entry.state.next_run_at_ms = None;
+        }
+        entry.config = updated.clone();
+
+        let yaml = serde_yaml::to_string(&updated)?;
+        tokio::fs::create_dir_all(&self.config_dir).await?;
+        let path = self.config_dir.join(format!("{}.yaml", schedule_id));
+        tokio::fs::write(path, yaml).await?;
+
+        self.state_store.persist(&entries).await?;
+        Ok(())
+    }
+
+    pub async fn set_enabled(&self, schedule_id: &str, enabled: bool) -> Result<()> {
+        self.update_schedule(schedule_id, &serde_json::json!({"enabled": enabled}))
+            .await
+    }
+
+    pub async fn trigger_now(&self, schedule_id: &str) -> Result<()> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .get_mut(schedule_id)
+            .ok_or_else(|| anyhow!("schedule not found: {schedule_id}"))?;
+        let now_ms = Utc::now().timestamp_millis();
+
+        if entry.state.running_at_ms.is_some() {
+            return Err(anyhow!("schedule already running: {schedule_id}"));
+        }
+
+        entry.state.running_at_ms = Some(now_ms);
+        let msg = BusMessage::ScheduledTaskTriggered {
+            schedule_id: entry.config.schedule_id.clone(),
+            agent_id: entry.config.agent_id.clone(),
+            task: entry.config.task.clone(),
+            session_mode: match entry.config.session_mode {
+                SessionMode::Isolated => ScheduledSessionMode::Isolated,
+                SessionMode::Main => ScheduledSessionMode::Main,
+            },
+            delivery_mode: match entry.config.delivery.mode {
+                DeliveryMode::None => ScheduledDeliveryMode::None,
+                DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
+            },
+            delivery_channel: entry.config.delivery.channel.clone(),
+            delivery_connector_id: entry.config.delivery.connector_id.clone(),
+            triggered_at: Utc::now(),
+        };
+        self.bus.publish(msg).await?;
+        self.state_store.persist(&entries).await?;
+        Ok(())
+    }
+
+    pub async fn recent_history(&self, schedule_id: &str, limit: usize) -> Result<Vec<RunRecord>> {
+        self.history_store.recent(schedule_id, limit).await
+    }
+
     pub async fn remove_schedule(&self, schedule_id: &str) -> Result<()> {
         let mut entries = self.entries.write().await;
         entries.remove(schedule_id);
@@ -352,6 +428,24 @@ where
         items.push(item);
     }
     Ok(items)
+}
+
+fn merge_json_value(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target_map), serde_json::Value::Object(patch_map)) => {
+            for (k, v) in patch_map {
+                merge_json_value(
+                    target_map
+                        .entry(k.clone())
+                        .or_insert_with(|| serde_json::Value::Null),
+                    v,
+                );
+            }
+        }
+        (target_slot, patch_value) => {
+            *target_slot = patch_value.clone();
+        }
+    }
 }
 
 #[cfg(test)]
