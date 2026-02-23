@@ -8,9 +8,18 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use nanocrab_auth::oauth::{profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 use nanocrab_auth::{AuthProfile, TokenManager};
 
-use crate::setup_ui::{print_done, print_logo, print_step, ARROW, CRAB};
+use crate::setup_scan::{scan_config, ConfigState};
+use crate::setup_ui::{print_done, print_logo, render_dashboard, ARROW, CRAB};
 
-const TOTAL_STEPS: usize = 5;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupAction {
+    AddProvider,
+    AddAgent,
+    AddChannel,
+    Modify,
+    Remove,
+    Done,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderId {
@@ -74,60 +83,107 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
 
     print_logo(&term);
     ensure_required_dirs(config_root)?;
-    print_step(&term, 1, TOTAL_STEPS, "LLM Provider");
-    term.write_line(&format!("{} select provider and auth method", ARROW))?;
 
-    let provider = prompt_provider(&theme)?;
-    let auth = prompt_auth_choice(&theme, provider).await?;
-    let provider_path = write_provider_config(config_root, provider, &auth, force)?;
+    loop {
+        let state = scan_config(config_root);
+        render_dashboard(&term, &state);
 
-    print_done(&term, "Provider configuration generated.");
+        let actions = build_action_labels(&state);
+        let labels: Vec<&str> = actions.iter().map(|(_, label)| label.as_str()).collect();
+        let selected = Select::with_theme(&theme)
+            .with_prompt("Choose setup action")
+            .items(&labels)
+            .default(0)
+            .interact()?;
 
-    print_step(&term, 2, TOTAL_STEPS, "Agent Identity");
-    let agent_setup = prompt_agent_setup(&theme, provider)?;
-    let (agent_path, prompt_path) = write_agent_files(config_root, &agent_setup, force)?;
-    print_done(&term, "Agent configuration and default persona generated.");
-
-    print_step(&term, 3, TOTAL_STEPS, "Channels & Routing");
-    let telegram = prompt_channel_config(&theme, "Telegram", "tg-main")?;
-    let discord = prompt_channel_config(&theme, "Discord", "dc-main")?;
-    let (main_path, routing_path) = write_main_and_routing(
-        config_root,
-        &agent_setup.agent_id,
-        telegram,
-        discord,
-        force,
-    )?;
-    print_done(&term, "main.yaml and routing.yaml generated.");
-
-    print_step(&term, 4, TOTAL_STEPS, "Validation");
-    validate_generated_config(config_root)?;
-    print_done(&term, "Generated configuration validated.");
-
-    print_step(&term, 5, TOTAL_STEPS, "Complete");
-    term.write_line(&format!("{}", style("Configuration complete!").green().bold()))?;
-    term.write_line("")?;
-    term.write_line("Generated files:")?;
-    for rel in [
-        display_rel(config_root, &main_path),
-        display_rel(config_root, &provider_path),
-        display_rel(config_root, &agent_path),
-        display_rel(config_root, &routing_path),
-        display_rel(config_root, &prompt_path),
-    ] {
-        term.write_line(&format!("  {} {}", crate::setup_ui::CHECKMARK, rel))?;
+        match actions[selected].0 {
+            SetupAction::AddProvider => {
+                handle_add_provider(config_root, &theme, &state, force).await?;
+            }
+            SetupAction::AddAgent => {
+                handle_add_agent(config_root, &theme, &state, force)?;
+            }
+            SetupAction::AddChannel => {
+                handle_add_channel(config_root, &theme, &state, force)?;
+            }
+            SetupAction::Modify => {
+                handle_modify(config_root, &theme, &state, force).await?;
+            }
+            SetupAction::Remove => {
+                handle_remove(config_root, &theme, &state, force)?;
+            }
+            SetupAction::Done => {
+                term.write_line(&format!("{} {}", CRAB, style("Setup finished.").green().bold()))?;
+                break;
+            }
+        }
     }
-    term.write_line("")?;
-    term.write_line("┌─ Next Steps ───────────────────────────┐")?;
-    term.write_line("│  1. Validate: nanocrab validate         │")?;
-    term.write_line("│  2. Start:    nanocrab start            │")?;
-    term.write_line("│                                         │")?;
-    term.write_line("│  Optional: edit your agent persona at   │")?;
-    term.write_line("│  prompts/<agent_id>/system.md            │")?;
-    term.write_line("└─────────────────────────────────────────┘")?;
 
-    term.write_line(&format!("{} Setup wizard finished.", CRAB))?;
+    Ok(())
+}
 
+fn build_action_labels(state: &ConfigState) -> Vec<(SetupAction, String)> {
+    vec![
+        (
+            SetupAction::AddProvider,
+            format!("{} Add Provider ({})", ARROW, state.providers.len()),
+        ),
+        (
+            SetupAction::AddAgent,
+            format!("{} Add Agent ({})", ARROW, state.agents.len()),
+        ),
+        (
+            SetupAction::AddChannel,
+            format!("{} Add Channel ({})", ARROW, state.channels.len()),
+        ),
+        (SetupAction::Modify, format!("{} Modify existing item", ARROW)),
+        (SetupAction::Remove, format!("{} Remove item", ARROW)),
+        (SetupAction::Done, "Done".to_string()),
+    ]
+}
+
+async fn handle_add_provider(
+    _config_root: &Path,
+    _theme: &ColorfulTheme,
+    _state: &ConfigState,
+    _force: bool,
+) -> Result<()> {
+    Ok(())
+}
+
+fn handle_add_agent(
+    _config_root: &Path,
+    _theme: &ColorfulTheme,
+    _state: &ConfigState,
+    _force: bool,
+) -> Result<()> {
+    Ok(())
+}
+
+fn handle_add_channel(
+    _config_root: &Path,
+    _theme: &ColorfulTheme,
+    _state: &ConfigState,
+    _force: bool,
+) -> Result<()> {
+    Ok(())
+}
+
+async fn handle_modify(
+    _config_root: &Path,
+    _theme: &ColorfulTheme,
+    _state: &ConfigState,
+    _force: bool,
+) -> Result<()> {
+    Ok(())
+}
+
+fn handle_remove(
+    _config_root: &Path,
+    _theme: &ColorfulTheme,
+    _state: &ConfigState,
+    _force: bool,
+) -> Result<()> {
     Ok(())
 }
 
@@ -505,10 +561,11 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_system_prompt, ensure_required_dirs, generate_agent_yaml, generate_main_yaml,
-        generate_provider_yaml, generate_routing_yaml, validate_generated_config, provider_models,
-        AuthChoice, ChannelConfig, ProviderId,
+        build_action_labels, default_system_prompt, ensure_required_dirs, generate_agent_yaml,
+        generate_main_yaml, generate_provider_yaml, generate_routing_yaml, provider_models,
+        validate_generated_config, AuthChoice, ChannelConfig, ProviderId, SetupAction,
     };
+    use crate::setup_scan::ConfigState;
 
     #[test]
     fn provider_yaml_uses_auth_profile_for_oauth() {
@@ -659,5 +716,23 @@ mod tests {
         .expect("write agent yaml");
 
         validate_generated_config(temp.path()).expect("generated config should be valid");
+    }
+
+    #[test]
+    fn build_action_labels_includes_all_actions() {
+        let labels = build_action_labels(&ConfigState {
+            providers: vec![],
+            agents: vec![],
+            channels: vec![],
+            default_agent: None,
+        });
+
+        assert_eq!(labels.len(), 6);
+        assert!(matches!(labels[0].0, SetupAction::AddProvider));
+        assert!(matches!(labels[1].0, SetupAction::AddAgent));
+        assert!(matches!(labels[2].0, SetupAction::AddChannel));
+        assert!(matches!(labels[3].0, SetupAction::Modify));
+        assert!(matches!(labels[4].0, SetupAction::Remove));
+        assert!(matches!(labels[5].0, SetupAction::Done));
     }
 }

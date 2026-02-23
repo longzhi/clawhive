@@ -10,9 +10,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
-mod setup_scan;
 mod setup;
 mod setup_ui;
+mod setup_scan;
 
 use commands::auth::{handle_auth_command, AuthCommands};
 use setup::run_setup;
