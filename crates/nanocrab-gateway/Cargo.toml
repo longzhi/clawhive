@@ -15,6 +15,7 @@ nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-provider = { path = "../nanocrab-provider" }
 nanocrab-memory = { path = "../nanocrab-memory" }
 nanocrab-bus = { path = "../nanocrab-bus" }
+nanocrab-scheduler = { path = "../nanocrab-scheduler" }
 tokio.workspace = true
 
 [dev-dependencies]

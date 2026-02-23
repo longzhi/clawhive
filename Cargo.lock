@@ -1769,6 +1769,7 @@ dependencies = [
  "nanocrab-memory",
  "nanocrab-provider",
  "nanocrab-runtime",
+ "nanocrab-scheduler",
  "nanocrab-schema",
  "serde",
  "tempfile",
