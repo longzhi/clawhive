@@ -82,7 +82,7 @@ impl ToolExecutor for ReadFileTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -98,6 +98,19 @@ impl ToolExecutor for ReadFileTool {
                 })
             }
         };
+
+        let resolved_str = resolved.to_str().unwrap_or("");
+        let requested_abs = if Path::new(path_str).is_absolute() {
+            path_str.to_string()
+        } else {
+            self.workspace.join(path_str).to_string_lossy().into_owned()
+        };
+        if !ctx.check_read(resolved_str) && !ctx.check_read(&requested_abs) {
+            return Ok(ToolOutput {
+                content: format!("Read access denied for path: {}", path_str),
+                is_error: true,
+            });
+        }
 
         if resolved.is_dir() {
             match std::fs::read_dir(&resolved) {
@@ -187,7 +200,7 @@ impl ToolExecutor for WriteFileTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -204,6 +217,19 @@ impl ToolExecutor for WriteFileTool {
                 })
             }
         };
+
+        let resolved_str = resolved.to_str().unwrap_or("");
+        let requested_abs = if Path::new(path_str).is_absolute() {
+            path_str.to_string()
+        } else {
+            self.workspace.join(path_str).to_string_lossy().into_owned()
+        };
+        if !ctx.check_write(resolved_str) && !ctx.check_write(&requested_abs) {
+            return Ok(ToolOutput {
+                content: format!("Write access denied for path: {}", path_str),
+                is_error: true,
+            });
+        }
 
         if let Some(parent) = resolved.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -264,7 +290,7 @@ impl ToolExecutor for EditFileTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -284,6 +310,19 @@ impl ToolExecutor for EditFileTool {
                 })
             }
         };
+
+        let resolved_str = resolved.to_str().unwrap_or("");
+        let requested_abs = if Path::new(path_str).is_absolute() {
+            path_str.to_string()
+        } else {
+            self.workspace.join(path_str).to_string_lossy().into_owned()
+        };
+        if !ctx.check_write(resolved_str) && !ctx.check_write(&requested_abs) {
+            return Ok(ToolOutput {
+                content: format!("Write access denied for path: {}", path_str),
+                is_error: true,
+            });
+        }
 
         let content = match tokio::fs::read_to_string(&resolved).await {
             Ok(c) => c,
@@ -381,6 +420,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_denied_by_policy() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("secret.txt"), "classified").unwrap();
+
+        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+
+        let perms = corral_core::Permissions::builder()
+            .fs_read([format!("{}/**/*.md", tmp.path().display())])
+            .build();
+        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+
+        let result = tool
+            .execute(serde_json::json!({"path": "secret.txt"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn read_file_allowed_by_policy() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("readme.md"), "hello").unwrap();
+
+        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+
+        let perms = corral_core::Permissions::builder()
+            .fs_read([format!("{}/**", tmp.path().display())])
+            .build();
+        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+
+        let result = tool
+            .execute(serde_json::json!({"path": "readme.md"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("hello"));
+    }
+
+    #[tokio::test]
     async fn path_escape_blocked() {
         let tmp = TempDir::new().unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
@@ -424,6 +503,27 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert!(tmp.path().join("sub/deep/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_denied_by_policy() {
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteFileTool::new(tmp.path().to_path_buf());
+
+        let perms = corral_core::Permissions::builder()
+            .fs_write([format!("{}/**/*.log", tmp.path().display())])
+            .build();
+        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "hack.sh", "content": "rm -rf /"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
     }
 
     #[tokio::test]
@@ -476,5 +576,27 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("2 matches"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_denied_by_policy() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "key: value").unwrap();
+        let tool = EditFileTool::new(tmp.path().to_path_buf());
+
+        let perms = corral_core::Permissions::builder()
+            .fs_read([format!("{}/**", tmp.path().display())])
+            .build();
+        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "config.yaml", "old_text": "key", "new_text": "newkey"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
     }
 }
