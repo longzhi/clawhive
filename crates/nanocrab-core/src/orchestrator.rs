@@ -525,7 +525,10 @@ impl Orchestrator {
             });
 
             let mut tool_results = Vec::new();
-            let ctx = ToolContext::default_policy(&self.workspace_root);
+            let ctx = match self.skill_registry.merged_permissions() {
+                Some(perms) => ToolContext::new(corral_core::PolicyEngine::new(perms)),
+                None => ToolContext::default_policy(&self.workspace_root),
+            };
             for (id, name, input) in tool_uses {
                 let result = match self.tool_registry.execute(&name, input, &ctx).await {
                     Ok(output) => ContentBlock::ToolResult {

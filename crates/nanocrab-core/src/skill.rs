@@ -192,6 +192,42 @@ impl SkillRegistry {
         );
         lines.join("\n")
     }
+
+    pub fn merged_permissions(&self) -> Option<corral_core::Permissions> {
+        let skill_perms: Vec<_> = self
+            .available()
+            .iter()
+            .filter_map(|s| s.permissions.as_ref())
+            .map(|sp| sp.to_corral_permissions())
+            .collect();
+
+        if skill_perms.is_empty() {
+            return None;
+        }
+
+        let mut merged = corral_core::Permissions::default();
+        for p in skill_perms {
+            merged.fs.read.extend(p.fs.read);
+            merged.fs.write.extend(p.fs.write);
+            merged.network.allow.extend(p.network.allow);
+            merged.exec.extend(p.exec);
+            merged.env.extend(p.env);
+            merged.services.extend(p.services);
+        }
+
+        merged.fs.read.sort();
+        merged.fs.read.dedup();
+        merged.fs.write.sort();
+        merged.fs.write.dedup();
+        merged.network.allow.sort();
+        merged.network.allow.dedup();
+        merged.exec.sort();
+        merged.exec.dedup();
+        merged.env.sort();
+        merged.env.dedup();
+
+        Some(merged)
+    }
 }
 
 fn load_skill(path: &Path) -> Result<Skill> {
@@ -345,5 +381,103 @@ Content here"#;
             path: PathBuf::new(),
         };
         assert!(!skill.requirements_met());
+    }
+
+    #[test]
+    fn merged_permissions_union() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let a_dir = dir.path().join("skill-a");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(
+            a_dir.join("SKILL.md"),
+            r#"---
+name: skill-a
+description: A
+permissions:
+  network:
+    allow: ["api.a.com:443"]
+  exec: [curl]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let b_dir = dir.path().join("skill-b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(
+            b_dir.join("SKILL.md"),
+            r#"---
+name: skill-b
+description: B
+permissions:
+  network:
+    allow: ["api.b.com:443"]
+  exec: [python3]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let merged = registry.merged_permissions();
+
+        let perms = merged.unwrap();
+        assert!(perms.network.allow.contains(&"api.a.com:443".to_string()));
+        assert!(perms.network.allow.contains(&"api.b.com:443".to_string()));
+        assert!(perms.exec.contains(&"curl".to_string()));
+        assert!(perms.exec.contains(&"python3".to_string()));
+    }
+
+    #[test]
+    fn merged_permissions_none_when_no_skills_have_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("plain");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(
+            s.join("SKILL.md"),
+            "---\nname: plain\ndescription: X\n---\nBody",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        assert!(registry.merged_permissions().is_none());
+    }
+
+    #[test]
+    fn merged_permissions_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let a_dir = dir.path().join("skill-a");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(
+            a_dir.join("SKILL.md"),
+            r#"---
+name: skill-a
+description: A
+permissions:
+  exec: [sh, curl]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let b_dir = dir.path().join("skill-b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(
+            b_dir.join("SKILL.md"),
+            r#"---
+name: skill-b
+description: B
+permissions:
+  exec: [sh, python3]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let perms = registry.merged_permissions().unwrap();
+        assert_eq!(perms.exec.iter().filter(|e| *e == "sh").count(), 1);
     }
 }
