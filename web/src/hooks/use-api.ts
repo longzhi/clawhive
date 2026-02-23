@@ -121,7 +121,7 @@ export function useChannelStatus() {
 }
 
 export function useRouting() {
-  return useQuery({ queryKey: ["routing"], queryFn: () => apiFetch<Record<string, any>>("/api/routing") });
+  return useQuery({ queryKey: ["routing"], queryFn: () => apiFetch<Record<string, unknown>>("/api/routing") });
 }
 
 export function useUpdateChannels() {
@@ -162,7 +162,8 @@ export function useRemoveConnector() {
 export function useUpdateRouting() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: any) => apiFetch<any>("/api/routing", { method: "PUT", body: JSON.stringify(data) }),
+    mutationFn: (data: Record<string, unknown>) =>
+      apiFetch<Record<string, unknown>>("/api/routing", { method: "PUT", body: JSON.stringify(data) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["routing"] }),
   });
 }

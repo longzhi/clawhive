@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MessageCircle, Loader2, Key, Trash2 } from "lucide-react";
-import { useChannelStatus, useChannels, useRemoveConnector, useUpdateChannels } from "@/hooks/use-api";
+import { type ConnectorConfig, useChannelStatus, useChannels, useRemoveConnector, useUpdateChannels } from "@/hooks/use-api";
 import { toast } from "sonner";
 import { AddConnectorDialog } from "@/components/channels/add-connector-dialog";
 import { RestartBanner } from "@/components/restart-banner";
@@ -90,7 +90,7 @@ export default function ChannelsPage() {
         const meta = CHANNEL_META[key];
         const channel = channels?.[key];
         const enabled = channel?.enabled ?? false;
-        const connectors = channel?.connectors ?? [];
+        const connectors: ConnectorConfig[] = channel?.connectors ?? [];
 
         return (
           <Card key={key}>
@@ -111,7 +111,7 @@ export default function ChannelsPage() {
             </CardHeader>
             <CardContent className="grid gap-4 pt-4">
               {connectors.length > 0 ? (
-                connectors.map((connector: any, idx: number) => {
+                connectors.map((connector, idx: number) => {
                   const tokenKey = `${key}-${idx}`;
                   const isEnvRef = connector.token?.startsWith("${");
                   const runtimeStatus = statusMap.get(`${key}:${connector.connector_id}`) ?? "inactive";
