@@ -9,9 +9,11 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
+mod init;
 mod init_ui;
 
 use commands::auth::{handle_auth_command, AuthCommands};
+use init::run_init;
 use nanocrab_auth::{AuthProfile, TokenManager};
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
@@ -777,10 +779,6 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn run_init(_root: &Path, _force: bool) -> Result<()> {
-    anyhow::bail!("init wizard is not implemented yet")
 }
 
 #[cfg(test)]
