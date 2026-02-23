@@ -460,6 +460,7 @@ fn format_schedule_type(schedule: &ScheduleType) -> String {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn bootstrap(
     root: &Path,
 ) -> Result<(

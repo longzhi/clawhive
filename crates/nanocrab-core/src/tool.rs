@@ -62,23 +62,23 @@ impl ToolContext {
     pub fn check_read(&self, path: &str) -> bool {
         self.policy
             .as_ref()
-            .map_or(true, |p| p.check_path_read(path))
+            .is_none_or(|p| p.check_path_read(path))
     }
 
     pub fn check_write(&self, path: &str) -> bool {
         self.policy
             .as_ref()
-            .map_or(true, |p| p.check_path_write(path))
+            .is_none_or(|p| p.check_path_write(path))
     }
 
     pub fn check_network(&self, host: &str, port: u16) -> bool {
         self.policy
             .as_ref()
-            .map_or(true, |p| p.check_network(host, port))
+            .is_none_or(|p| p.check_network(host, port))
     }
 
     pub fn check_exec(&self, cmd: &str) -> bool {
-        self.policy.as_ref().map_or(true, |p| p.check_exec(cmd))
+        self.policy.as_ref().is_none_or(|p| p.check_exec(cmd))
     }
 
     pub fn policy(&self) -> Option<&PolicyEngine> {

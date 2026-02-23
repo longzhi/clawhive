@@ -107,6 +107,7 @@ impl TokenManager {
         let lock_path = self.store_path.with_extension("lock");
         let lock_file = fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .read(true)
             .write(true)
             .open(&lock_path)

@@ -80,7 +80,7 @@ impl ToolExecutor for WebSearchTool {
         let query = input["query"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'query' field"))?;
-        let count = input["count"].as_u64().unwrap_or(DEFAULT_COUNT).min(10).max(1);
+        let count = input["count"].as_u64().unwrap_or(DEFAULT_COUNT).clamp(1, 10);
         let country = input["country"].as_str();
         let freshness = input["freshness"].as_str();
 

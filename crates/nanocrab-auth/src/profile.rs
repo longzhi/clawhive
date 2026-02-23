@@ -19,20 +19,12 @@ pub enum AuthProfile {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AuthStore {
     pub active_profile: Option<String>,
     pub profiles: HashMap<String, AuthProfile>,
 }
 
-impl Default for AuthStore {
-    fn default() -> Self {
-        Self {
-            active_profile: None,
-            profiles: HashMap::new(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
