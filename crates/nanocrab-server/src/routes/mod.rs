@@ -3,6 +3,7 @@ pub mod channels;
 pub mod events;
 pub mod providers;
 pub mod routing;
+pub mod schedules;
 pub mod sessions;
 
 use axum::Router;
@@ -15,6 +16,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/channels", channels::router())
         .nest("/providers", providers::router())
         .nest("/routing", routing::router())
+        .nest("/schedules", schedules::router())
         .nest("/sessions", sessions::router())
         .nest("/events", events::router())
 }
