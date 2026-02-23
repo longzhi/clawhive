@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use nanocrab_bus::EventBus;
 use nanocrab_schema::{
     BusMessage, ScheduledDeliveryMode, ScheduledRunStatus, ScheduledSessionMode,
@@ -12,7 +12,10 @@ use nanocrab_schema::{
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
-use crate::{compute_next_run_at_ms, DeliveryMode, RunStatus, ScheduleConfig, ScheduleState, SessionMode};
+use crate::{
+    compute_next_run_at_ms, DeliveryMode, HistoryStore, RunRecord, RunStatus, ScheduleConfig,
+    ScheduleState, SessionMode, StateStore,
+};
 
 const MAX_SLEEP_MS: u64 = 60_000;
 
@@ -214,6 +217,27 @@ impl ScheduleManager {
         entry.state.last_error = error;
         entry.state.last_duration_ms = Some((ended_at_ms - started_at_ms).max(0) as u64);
 
+        if let (Some(started_at), Some(ended_at)) = (
+            Utc.timestamp_millis_opt(started_at_ms).single(),
+            Utc.timestamp_millis_opt(ended_at_ms).single(),
+        ) {
+            let _ = self
+                .history_store
+                .append(&RunRecord {
+                    schedule_id: schedule_id.to_string(),
+                    started_at,
+                    ended_at,
+                    status: entry
+                        .state
+                        .last_run_status
+                        .clone()
+                        .unwrap_or(RunStatus::Skipped),
+                    error: entry.state.last_error.clone(),
+                    duration_ms: entry.state.last_duration_ms.unwrap_or_default(),
+                })
+                .await;
+        }
+
         match status {
             ScheduledRunStatus::Ok => entry.state.consecutive_errors = 0,
             ScheduledRunStatus::Error => {
@@ -237,38 +261,6 @@ impl ScheduleManager {
 pub struct ScheduleStateView {
     pub config: ScheduleConfig,
     pub state: ScheduleState,
-}
-
-struct StateStore {
-    _path: PathBuf,
-}
-
-impl StateStore {
-    fn new(data_dir: &Path) -> Self {
-        Self {
-            _path: data_dir.join("state.json"),
-        }
-    }
-
-    fn load(&self) -> Result<HashMap<String, ScheduleState>> {
-        Ok(HashMap::new())
-    }
-
-    async fn persist(&self, _entries: &HashMap<String, ScheduleEntry>) -> Result<()> {
-        Ok(())
-    }
-}
-
-struct HistoryStore {
-    _dir: PathBuf,
-}
-
-impl HistoryStore {
-    fn new(data_dir: &Path) -> Self {
-        Self {
-            _dir: data_dir.join("runs"),
-        }
-    }
 }
 
 fn read_yaml_dir<T>(dir: &Path) -> Result<Vec<T>>

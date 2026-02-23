@@ -1836,6 +1836,7 @@ dependencies = [
  "nanocrab-bus",
  "nanocrab-schema",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "uuid",
