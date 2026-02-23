@@ -9,6 +9,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
+mod init_ui;
 
 use commands::auth::{handle_auth_command, AuthCommands};
 use nanocrab_auth::{AuthProfile, TokenManager};
@@ -69,6 +70,11 @@ enum Commands {
     Task(TaskCommands),
     #[command(subcommand, about = "Auth management")]
     Auth(AuthCommands),
+    #[command(about = "Initialize nanocrab configuration")]
+    Init {
+        #[arg(long, help = "Force overwrite existing config")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -320,6 +326,9 @@ async fn main() -> Result<()> {
         }
         Commands::Auth(cmd) => {
             handle_auth_command(cmd).await?;
+        }
+        Commands::Init { force } => {
+            run_init(&cli.config_root, force).await?;
         }
     }
 
@@ -770,6 +779,10 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn run_init(_root: &Path, _force: bool) -> Result<()> {
+    anyhow::bail!("init wizard is not implemented yet")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -842,5 +855,18 @@ mod tests {
             cli.command,
             Commands::Auth(AuthCommands::Login { .. })
         ));
+    }
+
+    #[test]
+    fn init_ui_symbols_exist() {
+        let _ = crate::init_ui::CHECKMARK;
+        let _ = crate::init_ui::ARROW;
+        let _ = crate::init_ui::CRAB;
+    }
+
+    #[test]
+    fn parses_init_force_flag() {
+        let cli = Cli::try_parse_from(["nanocrab", "init", "--force"]).unwrap();
+        assert!(matches!(cli.command, Commands::Init { force: true }));
     }
 }
