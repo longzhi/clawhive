@@ -24,8 +24,6 @@ nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-gateway = { path = "../nanocrab-gateway" }
 nanocrab-scheduler = { path = "../nanocrab-scheduler" }
-tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
 nanocrab-auth = { path = "../nanocrab-auth" }
 
 [dev-dependencies]

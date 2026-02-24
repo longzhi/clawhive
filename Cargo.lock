@@ -1836,6 +1836,7 @@ dependencies = [
  "nanocrab-runtime",
  "nanocrab-scheduler",
  "nanocrab-schema",
+ "nanocrab-server",
  "nanocrab-tui",
  "reqwest 0.12.28",
  "serde",
@@ -2002,8 +2003,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "uuid",
 ]
 

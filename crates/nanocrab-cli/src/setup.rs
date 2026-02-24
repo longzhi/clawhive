@@ -719,9 +719,9 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
                 .interact_text()
                 .context("failed to read Anthropic setup-token")?;
             let http = reqwest::Client::new();
-            let ok = validate_setup_token(&http, &token, "https://api.anthropic.com/v1/models").await?;
+            let ok = validate_setup_token(&http, &token, "https://api.anthropic.com").await?;
             if !ok {
-                anyhow::bail!("Anthropic setup-token validation failed");
+                anyhow::bail!("Anthropic setup-token validation failed. Check the log above for details.");
             }
             manager.save_profile(&profile_name, profile_from_setup_token(token))?;
         }

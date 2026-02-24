@@ -30,6 +30,7 @@ nanocrab-runtime = { path = "../nanocrab-runtime" }
 nanocrab-tui = { path = "../nanocrab-tui" }
 nanocrab-auth = { path = "../nanocrab-auth" }
 nanocrab-scheduler = { path = "../nanocrab-scheduler" }
+nanocrab-server = { path = "../nanocrab-server" }
 
 [[bin]]
 name = "nanocrab"

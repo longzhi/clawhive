@@ -161,7 +161,9 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&payload);
         req = match self.use_session_auth() {
-            Some(session) => req.header("authorization", format!("Bearer {session}")),
+            Some(session) => req
+                .header("authorization", format!("Bearer {session}"))
+                .header("anthropic-beta", nanocrab_auth::oauth::ANTHROPIC_OAUTH_BETAS),
             None => req.header("x-api-key", &self.api_key),
         };
 
@@ -239,7 +241,9 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&payload);
         req = match self.use_session_auth() {
-            Some(session) => req.header("authorization", format!("Bearer {session}")),
+            Some(session) => req
+                .header("authorization", format!("Bearer {session}"))
+                .header("anthropic-beta", nanocrab_auth::oauth::ANTHROPIC_OAUTH_BETAS),
             None => req.header("x-api-key", &self.api_key),
         };
 

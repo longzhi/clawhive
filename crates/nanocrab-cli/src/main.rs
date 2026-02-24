@@ -40,7 +40,7 @@ use nanocrab_schema::InboundMessage;
 struct Cli {
     #[arg(
         long,
-        default_value = ".",
+        default_value = "~/.nanocrab",
         help = "Config root directory (contains config/ and prompts/)"
     )]
     config_root: PathBuf,
@@ -51,10 +51,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Start all configured channel bots")]
+    #[command(about = "Start all configured channel bots and HTTP API server")]
     Start {
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
+        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        port: u16,
     },
     #[command(about = "Local REPL for testing (no Telegram needed)")]
     Chat {
@@ -166,7 +168,16 @@ enum ScheduleCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Expand ~ to home directory
+    if cli.config_root.starts_with("~") {
+        if let Some(home) = std::env::var_os("HOME") {
+            cli.config_root = PathBuf::from(home).join(
+                cli.config_root.strip_prefix("~").unwrap_or(&cli.config_root),
+            );
+        }
+    }
 
     let log_dir = cli.config_root.join("logs");
     std::fs::create_dir_all(&log_dir)?;
@@ -192,8 +203,8 @@ async fn main() -> Result<()> {
                 config.routing.bindings.len()
             );
         }
-        Commands::Start { tui } => {
-            start_bot(&cli.config_root, tui).await?;
+        Commands::Start { tui, port } => {
+            start_bot(&cli.config_root, tui, port).await?;
         }
         Commands::Chat { agent } => {
             run_repl(&cli.config_root, &agent).await?;
@@ -694,7 +705,7 @@ fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvide
     Arc::new(provider)
 }
 
-async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
+async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     let (bus, memory, gateway, config, schedule_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
@@ -750,6 +761,18 @@ async fn start_bot(root: &Path, with_tui: bool) -> Result<()> {
     let _schedule_listener_handle = spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Scheduled task gateway listener started");
 
+
+    // Start embedded HTTP API server
+    let http_state = nanocrab_server::state::AppState {
+        root: root.to_path_buf(),
+        bus: Arc::clone(&bus),
+    };
+    let http_addr = format!("0.0.0.0:{port}");
+    tokio::spawn(async move {
+        if let Err(err) = nanocrab_server::serve(http_state, &http_addr).await {
+            tracing::error!("HTTP API server exited with error: {err}");
+        }
+    });
     let _tui_handle = if with_tui {
         let receivers = nanocrab_tui::subscribe_all(bus.as_ref()).await;
         Some(tokio::spawn(async move {
@@ -925,7 +948,7 @@ mod tests {
     #[test]
     fn parses_start_tui_flag() {
         let cli = Cli::try_parse_from(["nanocrab", "start", "--tui"]).unwrap();
-        assert!(matches!(cli.command, Commands::Start { tui: true }));
+        assert!(matches!(cli.command, Commands::Start { tui: true, .. }));
     }
 
     #[test]

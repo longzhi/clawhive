@@ -19,17 +19,43 @@ pub fn profile_from_setup_token(token: impl Into<String>) -> AuthProfile {
     }
 }
 
-pub async fn validate_setup_token(http: &reqwest::Client, token: &str, endpoint: &str) -> Result<bool> {
+/// Required beta flags for Anthropic OAuth (setup-token) auth.
+/// Without these the API returns 401 "OAuth authentication is currently not supported".
+pub const ANTHROPIC_OAUTH_BETAS: &str =
+    "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14";
+
+const SETUP_TOKEN_PREFIX: &str = "sk-ant-oat01-";
+pub async fn validate_setup_token(http: &reqwest::Client, token: &str, base_url: &str) -> Result<bool> {
+    if !token.starts_with(SETUP_TOKEN_PREFIX) {
+        anyhow::bail!(
+            "Invalid setup-token format. Expected token starting with {SETUP_TOKEN_PREFIX}\n\
+             Generate one with: claude setup-token"
+        );
+    }
+    // Use /v1/messages with a minimal request — /v1/models rejects OAuth tokens.
+    let url = format!("{base_url}/v1/messages");
+    let body = serde_json::json!({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
     let response = http
-        .get(endpoint)
+        .post(&url)
         .header("authorization", format!("Bearer {token}"))
         .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", ANTHROPIC_OAUTH_BETAS)
         .header("content-type", "application/json")
+        .json(&body)
         .send()
         .await
         .map_err(|e| anyhow!("failed to validate setup-token: {e}"))?;
-
-    Ok(response.status().is_success())
+    let status = response.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    let resp_body = response.text().await.unwrap_or_default();
+    eprintln!("setup-token validation failed: HTTP {status} — {resp_body}");
+    Ok(false)
 }
 
 fn normalize_setup_token(input: &str) -> Result<String> {
@@ -51,17 +77,16 @@ mod tests {
     async fn validate_setup_token_returns_true_on_2xx() {
         let server = MockServer::start().await;
 
-        Mock::given(method("GET"))
-            .and(path("/v1/models"))
-            .and(header("authorization", "Bearer setup-token-123"))
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("authorization", "Bearer sk-ant-oat01-test-token-abc123"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-
         let ok = validate_setup_token(
             &reqwest::Client::new(),
-            "setup-token-123",
-            &format!("{}/v1/models", server.uri()),
+            "sk-ant-oat01-test-token-abc123",
+            &server.uri(),
         )
         .await
         .expect("request should succeed");
