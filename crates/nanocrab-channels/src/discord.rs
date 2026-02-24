@@ -129,6 +129,11 @@ impl EventHandler for DiscordHandler {
         let current_user_id = ctx.cache.current_user().id;
         let is_mention = msg.mentions.iter().any(|u| u.id == current_user_id);
 
+        // In guild channels, only respond if this bot is @mentioned
+        if guild_id.is_some() && !is_mention {
+            return;
+        }
+
         let mut inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, text);
         inbound.is_mention = is_mention;
         inbound.mention_target = if is_mention {
