@@ -23,6 +23,7 @@ pub async fn validate_setup_token(http: &reqwest::Client, token: &str, endpoint:
     let response = http
         .get(endpoint)
         .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .send()
         .await

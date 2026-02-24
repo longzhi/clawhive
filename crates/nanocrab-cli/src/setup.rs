@@ -714,10 +714,9 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
             let _ = term.write_line("");
             let _ = term.write_line("  Then paste the token below.");
             let _ = term.write_line("");
-            let token = Password::new()
+            let token: String = Input::new()
                 .with_prompt("Paste your Anthropic setup-token")
-                .allow_empty_password(false)
-                .interact()
+                .interact_text()
                 .context("failed to read Anthropic setup-token")?;
             let http = reqwest::Client::new();
             let ok = validate_setup_token(&http, &token, "https://api.anthropic.com/v1/models").await?;
