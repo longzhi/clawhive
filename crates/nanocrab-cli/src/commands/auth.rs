@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use nanocrab_auth::oauth::{
-    exchange_id_token_for_api_key, profile_from_setup_token, prompt_setup_token,
+    extract_chatgpt_account_id, profile_from_setup_token, prompt_setup_token,
     run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig,
 };
 use nanocrab_auth::{AuthProfile, AuthStore, TokenManager};
@@ -40,20 +40,20 @@ pub async fn handle_auth_command(cmd: AuthCommands) -> Result<()> {
                 let config = OpenAiOAuthConfig::default_with_client(client_id);
                 let http = reqwest::Client::new();
                 let token = run_openai_pkce_flow(&http, &config).await?;
-                let access_token = if let Some(id_token) = &token.id_token {
-                    exchange_id_token_for_api_key(&http, &config.token_endpoint, client_id, id_token)
-                        .await
-                        .unwrap_or_else(|_| token.access_token.clone())
+                let account_id = extract_chatgpt_account_id(&token.access_token);
+                if let Some(ref id) = account_id {
+                    eprintln!("  ✓ ChatGPT account: {id}");
                 } else {
-                    token.access_token.clone()
-                };
+                    eprintln!("  ⚠ Could not extract chatgpt_account_id from token");
+                }
                 let now = now_unix_ts()?;
                 manager.save_profile(
                     "openai-oauth",
                     AuthProfile::OpenAiOAuth {
-                        access_token,
+                        access_token: token.access_token,
                         refresh_token: token.refresh_token,
                         expires_at: now + token.expires_in,
+                        chatgpt_account_id: account_id,
                     },
                 )?;
 

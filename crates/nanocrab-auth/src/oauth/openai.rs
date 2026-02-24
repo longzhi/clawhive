@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 use super::server::wait_for_oauth_callback;
 
 /// Default OAuth scope required by OpenAI's authorize endpoint.
-/// All four scopes are required; omitting any causes "Authentication Error".
 pub const OPENAI_OAUTH_SCOPE: &str = "openid profile email offline_access";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,13 +219,49 @@ pub async fn exchange_id_token_for_api_key(
     Ok(resp.access_token)
 }
 
+/// Extract the ChatGPT account ID from an OAuth access_token JWT.
+///
+/// Decodes the JWT payload (no signature verification) and checks
+/// multiple known claim keys for the account ID.
+pub fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+    // Check namespaced auth claims first (OpenAI convention)
+    if let Some(auth_obj) = claims.get("https://api.openai.com/auth") {
+        for sub_key in ["chatgpt_account_id", "account_id"] {
+            if let Some(val) = auth_obj.get(sub_key).and_then(|v| v.as_str()) {
+                if !val.trim().is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: top-level keys
+    for key in ["account_id", "accountId", "acct", "sub", "https://api.openai.com/account_id"] {
+        if let Some(val) = claims.get(key).and_then(|v| v.as_str()) {
+            if !val.trim().is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_authorize_url, exchange_code_for_tokens, exchange_id_token_for_api_key,
-        generate_pkce_pair, OpenAiOAuthConfig,
+        extract_chatgpt_account_id, generate_pkce_pair, OpenAiOAuthConfig,
     };
     use wiremock::matchers::{body_string_contains, method, path};
+    use base64::Engine;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_config() -> OpenAiOAuthConfig {
@@ -331,5 +366,40 @@ mod tests {
         .expect("api key exchange should succeed");
 
         assert_eq!(api_key, "sk-openai-api-key-xyz");
+    }
+
+    #[test]
+    fn extract_chatgpt_account_id_from_namespaced_claims() {
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-test-123"
+            },
+            "sub": "user-456"
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload}.fakesig");
+        assert_eq!(
+            extract_chatgpt_account_id(&fake_jwt).as_deref(),
+            Some("acct-test-123")
+        );
+    }
+
+    #[test]
+    fn extract_chatgpt_account_id_fallback_to_sub() {
+        let claims = serde_json::json!({"sub": "user-789"});
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload}.fakesig");
+        assert_eq!(
+            extract_chatgpt_account_id(&fake_jwt).as_deref(),
+            Some("user-789")
+        );
+    }
+
+    #[test]
+    fn extract_chatgpt_account_id_returns_none_for_garbage() {
+        assert!(extract_chatgpt_account_id("not-a-jwt").is_none());
+        assert!(extract_chatgpt_account_id("a.b.c").is_none());
     }
 }

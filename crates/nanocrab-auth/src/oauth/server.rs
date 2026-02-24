@@ -22,6 +22,8 @@ pub struct OAuthCallback {
 struct CallbackQuery {
     code: Option<String>,
     state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
 }
 
 #[derive(Clone)]
@@ -101,6 +103,11 @@ async fn handle_callback(
 }
 
 fn validate_callback(query: CallbackQuery, expected_state: &str) -> std::result::Result<OAuthCallback, (StatusCode, String)> {
+    // Check for OAuth error response first
+    if let Some(error) = &query.error {
+        let desc = query.error_description.as_deref().unwrap_or("no description");
+        return Err((StatusCode::BAD_REQUEST, format!("OAuth error: {error} \u{2014} {desc}")));
+    }
     let code = query
         .code
         .filter(|v| !v.is_empty())
@@ -130,6 +137,8 @@ mod tests {
         let query = CallbackQuery {
             code: Some("code-123".to_string()),
             state: Some("state-abc".to_string()),
+            error: None,
+            error_description: None,
         };
 
         let callback = validate_callback(query, "state-abc").expect("valid callback");
@@ -142,6 +151,8 @@ mod tests {
         let query = CallbackQuery {
             code: Some("code-123".to_string()),
             state: Some("wrong-state".to_string()),
+            error: None,
+            error_description: None,
         };
 
         let err = validate_callback(query, "state-abc").expect_err("state mismatch should fail");

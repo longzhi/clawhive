@@ -779,6 +779,7 @@ mod tests {
                 access_token: "oauth-at".into(),
                 refresh_token: "oauth-rt".into(),
                 expires_at: 0,
+                chatgpt_account_id: None,
             }),
         );
 

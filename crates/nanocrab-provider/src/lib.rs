@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod openai;
+pub mod openai_chatgpt;
 pub mod types;
 
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
 pub use openai::OpenAiProvider;
+pub use openai_chatgpt::OpenAiChatGptProvider;
 pub use types::StreamChunk;
 pub use types::*;
 

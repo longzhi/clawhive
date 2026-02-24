@@ -29,7 +29,8 @@ use nanocrab_memory::embedding::{
 use nanocrab_memory::search_index::SearchIndex;
 use nanocrab_memory::MemoryStore;
 use nanocrab_provider::{
-    register_builtin_providers, AnthropicProvider, OpenAiProvider, ProviderRegistry,
+    register_builtin_providers, AnthropicProvider, OpenAiChatGptProvider, OpenAiProvider,
+    ProviderRegistry,
 };
 use nanocrab_runtime::NativeExecutor;
 use nanocrab_scheduler::{ScheduleManager, ScheduleType};
@@ -618,14 +619,32 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     .filter(|k| !k.is_empty())
                     .unwrap_or_default();
                 if !api_key.is_empty() {
+                    // Standard API key path — use chat/completions
                     let provider = Arc::new(OpenAiProvider::new_with_auth(
                         api_key,
                         provider_config.api_base.clone(),
                         openai_profile.clone(),
                     ));
                     registry.register("openai", provider);
+                } else if let Some(AuthProfile::OpenAiOAuth {
+                    access_token,
+                    chatgpt_account_id,
+                    ..
+                }) = &openai_profile
+                {
+                    // OAuth path — use ChatGPT Responses API
+                    let provider = Arc::new(OpenAiChatGptProvider::new(
+                        access_token.clone(),
+                        chatgpt_account_id.clone(),
+                        provider_config.api_base.clone(),
+                    ));
+                    registry.register("openai", provider);
+                    tracing::info!(
+                        "OpenAI registered via ChatGPT OAuth (account: {:?})",
+                        chatgpt_account_id
+                    );
                 } else {
-                    tracing::warn!("OpenAI API key not set, skipping");
+                    tracing::warn!("OpenAI: no API key and no OAuth profile, skipping");
                 }
             }
             _ => {

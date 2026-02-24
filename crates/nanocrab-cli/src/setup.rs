@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
-use nanocrab_auth::oauth::{exchange_id_token_for_api_key, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
+use nanocrab_auth::oauth::{extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 use nanocrab_auth::{AuthProfile, TokenManager};
 
 use crate::setup_scan::{scan_config, ConfigState};
@@ -688,19 +688,19 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
             let config = OpenAiOAuthConfig::default_with_client(client_id);
             let http = reqwest::Client::new();
             let token = run_openai_pkce_flow(&http, &config).await?;
-            let access_token = if let Some(id_token) = &token.id_token {
-                exchange_id_token_for_api_key(&http, &config.token_endpoint, client_id, id_token)
-                    .await
-                    .unwrap_or_else(|_| token.access_token.clone())
+            let account_id = extract_chatgpt_account_id(&token.access_token);
+            if let Some(ref id) = account_id {
+                eprintln!("  ✓ ChatGPT account: {id}");
             } else {
-                token.access_token.clone()
-            };
+                eprintln!("  ⚠ Could not extract chatgpt_account_id from token");
+            }
             manager.save_profile(
                 &profile_name,
                 AuthProfile::OpenAiOAuth {
-                    access_token,
+                    access_token: token.access_token,
                     refresh_token: token.refresh_token,
                     expires_at: unix_timestamp()? + token.expires_in,
+                    chatgpt_account_id: account_id,
                 },
             )?;
         }
@@ -768,13 +768,19 @@ fn write_agent_files_unchecked(
 
 fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
     match auth {
-        AuthChoice::OAuth { profile_name } => format!(
-            "provider_id: {provider}\nenabled: true\napi_base: {base}\nauth_profile: \"{profile}\"\nmodels:\n  - {model}\n",
-            provider = provider.as_str(),
-            base = provider.api_base(),
-            profile = profile_name,
-            model = provider.default_model(),
-        ),
+        AuthChoice::OAuth { profile_name } => {
+            let base = match provider {
+                ProviderId::OpenAi => "https://chatgpt.com/backend-api/codex",
+                _ => provider.api_base(),
+            };
+            format!(
+                "provider_id: {provider}\nenabled: true\napi_base: {base}\nauth_profile: \"{profile}\"\nmodels:\n  - {model}\n",
+                provider = provider.as_str(),
+                base = base,
+                profile = profile_name,
+                model = provider.default_model(),
+            )
+        }
         AuthChoice::ApiKey { api_key } => format!(
             "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key: \"{key}\"\nmodels:\n  - {model}\n",
             provider = provider.as_str(),
@@ -910,6 +916,7 @@ mod tests {
 
         assert!(yaml.contains("provider_id: openai"));
         assert!(yaml.contains("auth_profile: \"openai-oauth\""));
+        assert!(yaml.contains("api_base: https://chatgpt.com/backend-api/codex"));
         assert!(!yaml.contains("api_key:"));
     }
 

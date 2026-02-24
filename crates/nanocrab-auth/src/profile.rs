@@ -13,6 +13,8 @@ pub enum AuthProfile {
         access_token: String,
         refresh_token: String,
         expires_at: i64,
+        #[serde(default)]
+        chatgpt_account_id: Option<String>,
     },
     AnthropicSession {
         session_token: String,
@@ -40,6 +42,7 @@ mod tests {
                 access_token: "at_123".to_string(),
                 refresh_token: "rt_456".to_string(),
                 expires_at: 1_750_000_000,
+                chatgpt_account_id: Some("acct_123".to_string()),
             },
         );
         profiles.insert(

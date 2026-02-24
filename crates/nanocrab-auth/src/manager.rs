@@ -31,7 +31,7 @@ pub struct TokenManager {
 impl TokenManager {
     pub fn new() -> Result<Self> {
         let home = std::env::var("HOME").map_err(|_| anyhow!("HOME is not set"))?;
-        let config_dir = Path::new(&home).join(".config").join("nanocrab");
+        let config_dir = Path::new(&home).join(".nanocrab").join("config");
         Ok(Self::from_config_dir(config_dir))
     }
 
@@ -164,6 +164,7 @@ impl TokenManager {
             access_token: body.access_token,
             refresh_token: body.refresh_token.unwrap_or(refresh_token),
             expires_at: now_unix_ts()? + body.expires_in,
+            chatgpt_account_id: None,
         };
 
         store
@@ -233,6 +234,7 @@ mod tests {
                     access_token: "old-at".to_string(),
                     refresh_token: "old-rt".to_string(),
                     expires_at: 0,
+                    chatgpt_account_id: None,
                 },
             )
             .expect("save profile");
