@@ -35,8 +35,7 @@ pub async fn handle_auth_command(cmd: AuthCommands) -> Result<()> {
     match cmd {
         AuthCommands::Login { provider } => match provider {
             AuthLoginProvider::Openai => {
-                let client_id = std::env::var("OPENAI_OAUTH_CLIENT_ID")
-                    .map_err(|_| anyhow!("OPENAI_OAUTH_CLIENT_ID is not set"))?;
+                let client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
 
                 let config = OpenAiOAuthConfig::default_with_client(client_id);
                 let http = reqwest::Client::new();

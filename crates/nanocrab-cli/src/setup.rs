@@ -684,8 +684,7 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
 
     match provider {
         ProviderId::OpenAi => {
-            let client_id = std::env::var("OPENAI_OAUTH_CLIENT_ID")
-                .map_err(|_| anyhow!("OPENAI_OAUTH_CLIENT_ID is not set"))?;
+            let client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
             let config = OpenAiOAuthConfig::default_with_client(client_id);
             let http = reqwest::Client::new();
             let token = run_openai_pkce_flow(&http, &config).await?;
