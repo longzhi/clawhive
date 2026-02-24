@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -54,6 +55,15 @@ struct Cli {
 enum Commands {
     #[command(about = "Start all configured channel bots and HTTP API server")]
     Start {
+        #[arg(long, help = "Run TUI dashboard in the same process")]
+        tui: bool,
+        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        port: u16,
+    },
+    #[command(about = "Stop a running nanocrab process")]
+    Stop,
+    #[command(about = "Restart nanocrab (stop + start)")]
+    Restart {
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
         #[arg(long, default_value = "3001", help = "HTTP API server port")]
@@ -205,6 +215,17 @@ async fn main() -> Result<()> {
             );
         }
         Commands::Start { tui, port } => {
+            start_bot(&cli.config_root, tui, port).await?;
+        }
+        Commands::Stop => {
+            stop_process(&cli.config_root)?;
+        }
+        Commands::Restart { tui, port } => {
+            let was_running = stop_process(&cli.config_root)?;
+            if was_running {
+                // Brief pause to let ports release
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             start_bot(&cli.config_root, tui, port).await?;
         }
         Commands::Chat { agent } => {
@@ -717,7 +738,97 @@ fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvide
     Arc::new(provider)
 }
 
+// ---------------------------------------------------------------------------
+// PID file management
+// ---------------------------------------------------------------------------
+
+fn pid_file_path(root: &Path) -> PathBuf {
+    root.join("nanocrab.pid")
+}
+
+fn write_pid_file(root: &Path) -> Result<()> {
+    let path = pid_file_path(root);
+    std::fs::write(&path, std::process::id().to_string())?;
+    Ok(())
+}
+
+fn read_pid_file(root: &Path) -> Result<Option<u32>> {
+    let path = pid_file_path(root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let pid = content.trim().parse::<u32>()?;
+            Ok(Some(pid))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn remove_pid_file(root: &Path) {
+    let _ = std::fs::remove_file(pid_file_path(root));
+}
+
+fn is_process_running(pid: u32) -> bool {
+    // kill(pid, 0) checks if process exists without sending a signal
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Check for stale PID file. Returns error if another instance is running.
+fn check_and_clean_pid(root: &Path) -> Result<()> {
+    if let Some(pid) = read_pid_file(root)? {
+        if is_process_running(pid) {
+            anyhow::bail!("nanocrab is already running (pid: {pid}). Use 'nanocrab stop' first.");
+        }
+        tracing::info!("Removing stale PID file (pid: {pid}, process not running)");
+        remove_pid_file(root);
+    }
+    Ok(())
+}
+
+/// Stop a running nanocrab process. Returns Ok(true) if stopped, Ok(false) if not running.
+fn stop_process(root: &Path) -> Result<bool> {
+    let pid = match read_pid_file(root)? {
+        Some(pid) => pid,
+        None => {
+            println!("No PID file found. nanocrab is not running.");
+            return Ok(false);
+        }
+    };
+
+    if !is_process_running(pid) {
+        println!("Process {pid} is not running. Cleaning up stale PID file.");
+        remove_pid_file(root);
+        return Ok(false);
+    }
+
+    println!("Stopping nanocrab (pid: {pid})...");
+    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+
+    // Wait up to 10s for graceful shutdown
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        if !is_process_running(pid) {
+            remove_pid_file(root);
+            println!("Stopped.");
+            return Ok(true);
+        }
+    }
+
+    // Force kill
+    eprintln!("Process did not exit after 10s, sending SIGKILL...");
+    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    std::thread::sleep(Duration::from_millis(500));
+    remove_pid_file(root);
+    println!("Killed.");
+    Ok(true)
+}
+
 async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
+    // PID file: check stale → write
+    check_and_clean_pid(root)?;
+    write_pid_file(root)?;
+    tracing::info!("PID file written (pid: {})", std::process::id());
+
     let (bus, memory, gateway, config, schedule_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
@@ -846,28 +957,58 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 
     tracing::info!("Starting {} channel bot(s)", bots.len());
 
-    if bots.len() == 1 {
-        let bot = bots.into_iter().next().unwrap();
-        tracing::info!(
-            "Starting {} bot: {}",
-            bot.channel_type(),
-            bot.connector_id()
-        );
-        bot.run().await?;
-    } else {
-        let mut handles = Vec::new();
-        for bot in bots {
-            let channel = bot.channel_type().to_string();
-            let connector = bot.connector_id().to_string();
-            handles.push(tokio::spawn(async move {
-                tracing::info!("Starting {channel} bot: {connector}");
-                if let Err(err) = bot.run().await {
-                    tracing::error!("{channel} bot ({connector}) exited with error: {err}");
-                }
-            }));
+    // Run bots with graceful shutdown on SIGTERM/SIGINT
+    let root_for_cleanup = root.to_path_buf();
+    let bot_future = async {
+        if bots.len() == 1 {
+            let bot = bots.into_iter().next().unwrap();
+            tracing::info!("Starting {} bot: {}", bot.channel_type(), bot.connector_id());
+            bot.run().await
+        } else {
+            let mut handles = Vec::new();
+            for bot in bots {
+                let channel = bot.channel_type().to_string();
+                let connector = bot.connector_id().to_string();
+                handles.push(tokio::spawn(async move {
+                    tracing::info!("Starting {channel} bot: {connector}");
+                    if let Err(err) = bot.run().await {
+                        tracing::error!("{channel} bot ({connector}) exited with error: {err}");
+                    }
+                }));
+            }
+            for handle in handles {
+                let _ = handle.await;
+            }
+            Ok(())
         }
-        for handle in handles {
-            let _ = handle.await;
+    };
+
+    let shutdown_signal = async {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => tracing::info!("Received SIGINT, shutting down..."),
+                _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down..."),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+            tracing::info!("Received SIGINT, shutting down...");
+        }
+    };
+
+    tokio::select! {
+        result = bot_future => {
+            remove_pid_file(&root_for_cleanup);
+            result?;
+        }
+        _ = shutdown_signal => {
+            remove_pid_file(&root_for_cleanup);
+            tracing::info!("PID file cleaned up. Goodbye.");
         }
     }
 
@@ -1031,5 +1172,71 @@ mod tests {
     fn parses_setup_force_flag() {
         let cli = Cli::try_parse_from(["nanocrab", "setup", "--force"]).unwrap();
         assert!(matches!(cli.command, Commands::Setup { force: true }));
+    }
+
+    #[test]
+    fn parses_stop_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "stop"]).unwrap();
+        assert!(matches!(cli.command, Commands::Stop));
+    }
+
+    #[test]
+    fn parses_restart_subcommand() {
+        let cli = Cli::try_parse_from(["nanocrab", "restart"]).unwrap();
+        assert!(matches!(cli.command, Commands::Restart { tui: false, .. }));
+    }
+
+    #[test]
+    fn parses_restart_with_flags() {
+        let cli = Cli::try_parse_from(["nanocrab", "restart", "--tui", "--port", "8080"]).unwrap();
+        assert!(matches!(cli.command, Commands::Restart { tui: true, port: 8080 }));
+    }
+
+    #[test]
+    fn pid_file_write_read_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pid_file(tmp.path()).unwrap();
+        let pid = read_pid_file(tmp.path()).unwrap();
+        assert_eq!(pid, Some(std::process::id()));
+        remove_pid_file(tmp.path());
+        let pid = read_pid_file(tmp.path()).unwrap();
+        assert_eq!(pid, None);
+    }
+
+    #[test]
+    fn read_pid_file_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_pid_file(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn is_process_running_self() {
+        assert!(is_process_running(std::process::id()));
+    }
+
+    #[test]
+    fn is_process_running_nonexistent() {
+        // PID 99999999 almost certainly does not exist
+        assert!(!is_process_running(99_999_999));
+    }
+
+    #[test]
+    fn check_and_clean_pid_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write a fake PID that doesn't exist
+        std::fs::write(tmp.path().join("nanocrab.pid"), "99999999").unwrap();
+        // Should clean up the stale PID file
+        check_and_clean_pid(tmp.path()).unwrap();
+        assert_eq!(read_pid_file(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn check_and_clean_pid_active_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write our own PID - it's running
+        std::fs::write(tmp.path().join("nanocrab.pid"), std::process::id().to_string()).unwrap();
+        let result = check_and_clean_pid(tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already running"));
     }
 }

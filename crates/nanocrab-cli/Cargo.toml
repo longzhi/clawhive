@@ -19,6 +19,7 @@ reqwest.workspace = true
 dialoguer = "0.11"
 console = "0.15"
 serde_json.workspace = true
+libc = "0.2"
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-memory = { path = "../nanocrab-memory" }

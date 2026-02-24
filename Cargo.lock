@@ -1826,6 +1826,7 @@ dependencies = [
  "clap",
  "console",
  "dialoguer",
+ "libc",
  "nanocrab-auth",
  "nanocrab-bus",
  "nanocrab-channels",
