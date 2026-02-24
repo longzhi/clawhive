@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use nanocrab_auth::oauth::{
-    profile_from_setup_token, prompt_setup_token, run_openai_pkce_flow, validate_setup_token,
-    OpenAiOAuthConfig,
+    exchange_id_token_for_api_key, profile_from_setup_token, prompt_setup_token,
+    run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig,
 };
 use nanocrab_auth::{AuthProfile, AuthStore, TokenManager};
 
@@ -40,12 +40,18 @@ pub async fn handle_auth_command(cmd: AuthCommands) -> Result<()> {
                 let config = OpenAiOAuthConfig::default_with_client(client_id);
                 let http = reqwest::Client::new();
                 let token = run_openai_pkce_flow(&http, &config).await?;
-
+                let access_token = if let Some(id_token) = &token.id_token {
+                    exchange_id_token_for_api_key(&http, &config.token_endpoint, client_id, id_token)
+                        .await
+                        .unwrap_or_else(|_| token.access_token.clone())
+                } else {
+                    token.access_token.clone()
+                };
                 let now = now_unix_ts()?;
                 manager.save_profile(
                     "openai-oauth",
                     AuthProfile::OpenAiOAuth {
-                        access_token: token.access_token,
+                        access_token,
                         refresh_token: token.refresh_token,
                         expires_at: now + token.expires_in,
                     },
