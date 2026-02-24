@@ -12,7 +12,6 @@ pub struct ProviderSummary {
     pub provider_id: String,
     pub enabled: bool,
     pub api_base: String,
-    pub api_key_env: String,
     pub key_configured: bool,
     pub models: Vec<String>,
 }
@@ -54,19 +53,16 @@ async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderSumma
             }
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                    let api_key_env = val["api_key_env"].as_str().unwrap_or("").to_string();
                     let has_direct_key = val["api_key"]
                         .as_str()
                         .map(|k| !k.is_empty())
                         .unwrap_or(false);
-                    let key_configured =
-                        has_direct_key || std::env::var(&api_key_env).is_ok();
+                    let key_configured = has_direct_key;
 
                     providers.push(ProviderSummary {
                         provider_id: val["provider_id"].as_str().unwrap_or("").to_string(),
                         enabled: val["enabled"].as_bool().unwrap_or(false),
                         api_base: val["api_base"].as_str().unwrap_or("").to_string(),
-                        api_key_env,
                         key_configured,
                         models: val["models"]
                             .as_sequence()
@@ -167,10 +163,8 @@ async fn test_provider(
         .as_str()
         .map(|k| !k.is_empty())
         .unwrap_or(false);
-    let api_key_env = val["api_key_env"].as_str().unwrap_or("");
-    let has_env_key = std::env::var(api_key_env).is_ok();
 
-    if !has_direct_key && !has_env_key {
+    if !has_direct_key {
         return Json(TestResult {
             ok: false,
             message: "API key not configured".to_string(),

@@ -598,7 +598,7 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     .api_key
                     .clone()
                     .filter(|k| !k.is_empty())
-                    .unwrap_or_else(|| std::env::var(&provider_config.api_key_env).unwrap_or_default());
+                    .unwrap_or_default();
                 if !api_key.is_empty() {
                     let provider = Arc::new(AnthropicProvider::new_with_auth(
                         api_key,
@@ -616,7 +616,7 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     .api_key
                     .clone()
                     .filter(|k| !k.is_empty())
-                    .unwrap_or_else(|| std::env::var(&provider_config.api_key_env).unwrap_or_default());
+                    .unwrap_or_default();
                 if !api_key.is_empty() {
                     let provider = Arc::new(OpenAiProvider::new_with_auth(
                         api_key,
@@ -625,10 +625,7 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
                     ));
                     registry.register("openai", provider);
                 } else {
-                    tracing::warn!(
-                        "OpenAI API key not set (env: {}), skipping",
-                        provider_config.api_key_env
-                    );
+                    tracing::warn!("OpenAI API key not set, skipping");
                 }
             }
             _ => {
@@ -678,13 +675,9 @@ fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvide
         return Arc::new(StubEmbeddingProvider::new(8));
     }
 
-    // Read API key from environment
-    let api_key = std::env::var(&embedding_config.api_key_env).unwrap_or_default();
+    let api_key = embedding_config.api_key.clone();
     if api_key.is_empty() {
-        tracing::warn!(
-            "OpenAI embedding API key not set (env: {}), using stub provider",
-            embedding_config.api_key_env
-        );
+        tracing::warn!("OpenAI embedding API key not set, using stub provider");
         return Arc::new(StubEmbeddingProvider::new(8));
     }
 

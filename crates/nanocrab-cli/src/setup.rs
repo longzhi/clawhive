@@ -49,18 +49,12 @@ impl ProviderId {
         }
     }
 
-    fn default_api_key_env(self) -> &'static str {
-        match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::OpenAi => "OPENAI_API_KEY",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
 enum AuthChoice {
     OAuth { profile_name: String },
-    ApiKey { env_var: String },
+    ApiKey { api_key: String },
 }
 
 #[derive(Debug, Clone)]
@@ -677,7 +671,7 @@ async fn prompt_auth_choice(theme: &ColorfulTheme, provider: ProviderId) -> Resu
                 anyhow::bail!("API key cannot be empty");
             }
             Ok(AuthChoice::ApiKey {
-                env_var: provider.default_api_key_env().to_string(),
+                api_key: api_key.trim().to_string(),
             })
         }
         _ => Err(anyhow!("invalid auth method index: {method}")),
@@ -769,18 +763,17 @@ fn write_agent_files_unchecked(
 fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
     match auth {
         AuthChoice::OAuth { profile_name } => format!(
-            "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key_env: {env}\nauth_profile: \"{profile}\"\nmodels:\n  - {model}\n",
+            "provider_id: {provider}\nenabled: true\napi_base: {base}\nauth_profile: \"{profile}\"\nmodels:\n  - {model}\n",
             provider = provider.as_str(),
             base = provider.api_base(),
-            env = provider.default_api_key_env(),
             profile = profile_name,
             model = provider.default_model(),
         ),
-        AuthChoice::ApiKey { env_var } => format!(
-            "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key_env: {env}\nmodels:\n  - {model}\n",
+        AuthChoice::ApiKey { api_key } => format!(
+            "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key: \"{key}\"\nmodels:\n  - {model}\n",
             provider = provider.as_str(),
             base = provider.api_base(),
-            env = env_var,
+            key = api_key,
             model = provider.default_model(),
         ),
     }
@@ -835,7 +828,7 @@ fn generate_main_yaml(
     }
 
     out.push_str(
-        "\nembedding:\n  enabled: false\n  provider: stub\n  api_key_env: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+        "\nembedding:\n  enabled: false\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
     );
 
     out
@@ -911,21 +904,20 @@ mod tests {
 
         assert!(yaml.contains("provider_id: openai"));
         assert!(yaml.contains("auth_profile: \"openai-oauth\""));
-        assert!(yaml.contains("api_key_env: OPENAI_API_KEY"));
         assert!(!yaml.contains("api_key:"));
     }
 
     #[test]
-    fn provider_yaml_uses_api_key_env_for_api_key_auth() {
+    fn provider_yaml_uses_api_key_for_api_key_auth() {
         let yaml = generate_provider_yaml(
             ProviderId::Anthropic,
             &AuthChoice::ApiKey {
-                env_var: "ANTHROPIC_API_KEY".to_string(),
+                api_key: "sk-test-key".to_string(),
             },
         );
 
         assert!(yaml.contains("provider_id: anthropic"));
-        assert!(yaml.contains("api_key_env: ANTHROPIC_API_KEY"));
+        assert!(yaml.contains("api_key: \"sk-test-key\""));
         assert!(!yaml.contains("auth_profile:"));
     }
 
@@ -1125,7 +1117,7 @@ mod tests {
             generate_provider_yaml(
                 ProviderId::OpenAi,
                 &AuthChoice::ApiKey {
-                    env_var: "OPENAI_API_KEY".to_string(),
+                    api_key: "sk-test".to_string(),
                 },
             ),
         )
@@ -1174,7 +1166,7 @@ mod tests {
             temp.path(),
             ProviderId::OpenAi,
             &AuthChoice::ApiKey {
-                env_var: "OPENAI_API_KEY".to_string(),
+                api_key: "sk-test".to_string(),
             },
         )
         .expect("write provider config");

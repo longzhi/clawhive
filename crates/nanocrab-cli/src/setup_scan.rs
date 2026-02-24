@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub enum AuthSummary {
-    ApiKey { env_var: String },
+    ApiKey,
     OAuth { profile_name: String },
 }
 
@@ -40,7 +40,8 @@ pub struct ConfigState {
 #[derive(Debug, Deserialize)]
 struct RawProviderYaml {
     provider_id: String,
-    api_key_env: String,
+    #[serde(default)]
+    api_key: Option<String>,
     #[serde(default)]
     auth_profile: Option<String>,
 }
@@ -81,10 +82,10 @@ fn scan_providers(config_dir: &Path) -> Vec<ProviderInfo> {
                 Some(profile_name) if !profile_name.trim().is_empty() => {
                     AuthSummary::OAuth { profile_name }
                 }
-                _ => AuthSummary::ApiKey {
-                    env_var: provider.api_key_env,
-                },
+                _ => AuthSummary::ApiKey,
             };
+
+            let _ = provider.api_key;
 
             providers.push(ProviderInfo {
                 provider_id: provider.provider_id,
@@ -187,7 +188,7 @@ mod tests {
 
     fn base_main_yaml(channels_yaml: &str) -> String {
         format!(
-            "app:\n  name: nanocrab\n  env: dev\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\nchannels:\n{channels_yaml}\nembedding:\n  enabled: false\n  provider: stub\n  api_key_env: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\ntools: {{}}\n"
+            "app:\n  name: nanocrab\n  env: dev\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\nchannels:\n{channels_yaml}\nembedding:\n  enabled: false\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\ntools: {{}}\n"
         )
     }
 
@@ -208,7 +209,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         write(
             &temp.path().join("config/providers.d/openai.yaml"),
-            "provider_id: openai\nenabled: true\napi_base: https://api.openai.com/v1\napi_key_env: OPENAI_API_KEY\nmodels:\n  - gpt-4o-mini\n",
+            "provider_id: openai\nenabled: true\napi_base: https://api.openai.com/v1\napi_key: \"sk-test\"\nmodels:\n  - gpt-4o-mini\n",
         );
 
         let state = scan_config(temp.path());
@@ -216,7 +217,7 @@ mod tests {
         assert_eq!(state.providers.len(), 1);
         assert_eq!(state.providers[0].provider_id, "openai");
         match &state.providers[0].auth_summary {
-            AuthSummary::ApiKey { env_var } => assert_eq!(env_var, "OPENAI_API_KEY"),
+            AuthSummary::ApiKey => {}
             AuthSummary::OAuth { .. } => panic!("expected api key auth"),
         }
     }
@@ -226,7 +227,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         write(
             &temp.path().join("config/providers.d/openai.yaml"),
-            "provider_id: openai\nenabled: true\napi_base: https://api.openai.com/v1\napi_key_env: OPENAI_API_KEY\nauth_profile: openai-123\nmodels:\n  - gpt-4o-mini\n",
+            "provider_id: openai\nenabled: true\napi_base: https://api.openai.com/v1\napi_key: \"sk-test\"\nauth_profile: openai-123\nmodels:\n  - gpt-4o-mini\n",
         );
 
         let state = scan_config(temp.path());
@@ -235,7 +236,7 @@ mod tests {
         assert_eq!(state.providers[0].provider_id, "openai");
         match &state.providers[0].auth_summary {
             AuthSummary::OAuth { profile_name } => assert_eq!(profile_name, "openai-123"),
-            AuthSummary::ApiKey { .. } => panic!("expected oauth auth"),
+            AuthSummary::ApiKey => panic!("expected oauth auth"),
         }
     }
 

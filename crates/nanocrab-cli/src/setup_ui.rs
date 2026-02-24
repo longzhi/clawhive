@@ -43,7 +43,7 @@ pub fn render_dashboard(term: &Term, state: &ConfigState) {
     } else {
         for provider in &state.providers {
             let auth = match &provider.auth_summary {
-                AuthSummary::ApiKey { env_var } => format!("api key ({env_var})"),
+                AuthSummary::ApiKey => "api key".to_string(),
                 AuthSummary::OAuth { profile_name } => format!("oauth ({profile_name})"),
             };
             let _ = term.write_line(&format!("   - {}: {}", provider.provider_id, auth));

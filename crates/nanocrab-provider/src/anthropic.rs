@@ -64,19 +64,6 @@ impl AnthropicProvider {
         }
     }
 
-    pub fn from_env(api_base: impl Into<String>) -> Result<Self> {
-        Self::from_env_with_auth(api_base, None)
-    }
-
-    pub fn from_env_with_auth(
-        api_base: impl Into<String>,
-        auth_profile: Option<AuthProfile>,
-    ) -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| anyhow!("ANTHROPIC_API_KEY is not set"))?;
-        Ok(Self::new_with_auth(api_key, api_base, auth_profile))
-    }
-
     fn use_session_auth(&self) -> Option<&str> {
         match &self.auth_profile {
             Some(AuthProfile::AnthropicSession { session_token }) => Some(session_token.as_str()),
@@ -674,17 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn from_env_missing_key_returns_error() {
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        let result = AnthropicProvider::from_env("https://api.anthropic.com");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("ANTHROPIC_API_KEY"));
-    }
-
-    #[test]
     fn parse_sse_event_unknown_type_returns_none() {
         let event = serde_json::json!({
             "type": "ping",
@@ -710,10 +686,11 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn integration_real_api_call() {
-        let provider = match AnthropicProvider::from_env("https://api.anthropic.com") {
-            Ok(provider) => provider,
-            Err(_) => return,
+        let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(api_key) if !api_key.is_empty() => api_key,
+            _ => return,
         };
+        let provider = AnthropicProvider::new(api_key, "https://api.anthropic.com");
 
         let request = LlmRequest::simple(
             "claude-3-5-haiku-latest".to_string(),

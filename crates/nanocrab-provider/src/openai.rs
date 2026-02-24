@@ -64,20 +64,6 @@ impl OpenAiProvider {
         }
     }
 
-    pub fn from_env(api_key_env: &str, api_base: impl Into<String>) -> Result<Self> {
-        Self::from_env_with_auth(api_key_env, api_base, None)
-    }
-
-    pub fn from_env_with_auth(
-        api_key_env: &str,
-        api_base: impl Into<String>,
-        auth_profile: Option<AuthProfile>,
-    ) -> Result<Self> {
-        let api_key =
-            std::env::var(api_key_env).map_err(|_| anyhow!("{api_key_env} is not set"))?;
-        Ok(Self::new_with_auth(api_key, api_base, auth_profile))
-    }
-
     fn auth_bearer_token(&self) -> &str {
         match &self.auth_profile {
             Some(AuthProfile::OpenAiOAuth { access_token, .. }) => access_token,
@@ -770,17 +756,6 @@ mod tests {
         let api = OpenAiProvider::to_api_request(req, false);
         assert_eq!(api.messages[0].role, "tool");
         assert_eq!(api.messages[0].tool_call_id.as_deref(), Some("call_1"));
-    }
-
-    #[test]
-    fn from_env_missing_key_returns_error() {
-        std::env::remove_var("OPENAI_KEY_FOR_TEST");
-        let result = OpenAiProvider::from_env("OPENAI_KEY_FOR_TEST", "https://api.openai.com/v1");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("OPENAI_KEY_FOR_TEST"));
     }
 
     #[test]

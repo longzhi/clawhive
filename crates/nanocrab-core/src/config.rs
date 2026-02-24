@@ -40,7 +40,8 @@ fn default_embedding_base_url() -> String {
 pub struct EmbeddingConfig {
     pub enabled: bool,
     pub provider: String,
-    pub api_key_env: String,
+    #[serde(default)]
+    pub api_key: String,
     #[serde(default = "default_embedding_model")]
     pub model: String,
     #[serde(default = "default_embedding_dimensions")]
@@ -54,7 +55,7 @@ impl Default for EmbeddingConfig {
         Self {
             enabled: false,
             provider: "stub".to_string(),
-            api_key_env: String::new(),
+            api_key: String::new(),
             model: default_embedding_model(),
             dimensions: default_embedding_dimensions(),
             base_url: default_embedding_base_url(),
@@ -149,7 +150,6 @@ pub struct ProviderConfig {
     pub provider_id: String,
     pub enabled: bool,
     pub api_base: String,
-    pub api_key_env: String,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -323,7 +323,7 @@ fn resolve_main_env(main: &mut MainConfig) {
         }
     }
 
-    main.embedding.api_key_env = resolve_env_var(&main.embedding.api_key_env);
+    main.embedding.api_key = resolve_env_var(&main.embedding.api_key);
     main.embedding.base_url = resolve_env_var(&main.embedding.base_url);
     main.embedding.model = resolve_env_var(&main.embedding.model);
     main.embedding.provider = resolve_env_var(&main.embedding.provider);
@@ -347,7 +347,6 @@ fn resolve_providers_env(providers: &mut [ProviderConfig]) {
     for provider in providers {
         provider.provider_id = resolve_env_var(&provider.provider_id);
         provider.api_base = resolve_env_var(&provider.api_base);
-        provider.api_key_env = resolve_env_var(&provider.api_key_env);
         for model in &mut provider.models {
             *model = resolve_env_var(model);
         }

@@ -45,7 +45,7 @@ channels:
 embedding:
   enabled: false
   provider: stub
-  api_key_env: ""
+  api_key: ""
   model: text-embedding-3-small
   dimensions: 1536
   base_url: https://api.openai.com/v1
@@ -59,7 +59,7 @@ tools: {}
         r#"provider_id: anthropic
 enabled: true
 api_base: https://api.anthropic.com/v1
-api_key_env: ANTHROPIC_API_KEY
+api_key: ""
 models:
   - claude-sonnet-4-5
 "#,
