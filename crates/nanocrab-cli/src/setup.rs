@@ -650,7 +650,16 @@ fn prompt_provider(theme: &ColorfulTheme) -> Result<ProviderId> {
 }
 
 async fn prompt_auth_choice(theme: &ColorfulTheme, provider: ProviderId) -> Result<AuthChoice> {
-    let methods = ["OAuth Login (use your subscription)", "API Key"];
+    let methods: Vec<&str> = match provider {
+        ProviderId::Anthropic => vec![
+            "Setup Token (run `claude setup-token` in terminal)",
+            "API Key (from console.anthropic.com/settings/keys)",
+        ],
+        ProviderId::OpenAi => vec![
+            "OAuth Login (use your ChatGPT subscription)",
+            "API Key (from platform.openai.com/api-keys)",
+        ],
+    };
     let method = Select::with_theme(theme)
         .with_prompt("Authentication method")
         .items(&methods)
@@ -696,6 +705,15 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
             )?;
         }
         ProviderId::Anthropic => {
+            let term = Term::stdout();
+            let _ = term.write_line("");
+            let _ = term.write_line("  To use Anthropic with your subscription, you need a setup-token.");
+            let _ = term.write_line("  If you have Claude Code CLI installed, run:");
+            let _ = term.write_line("");
+            let _ = term.write_line("    claude setup-token");
+            let _ = term.write_line("");
+            let _ = term.write_line("  Then paste the token below.");
+            let _ = term.write_line("");
             let token = Password::new()
                 .with_prompt("Paste your Anthropic setup-token")
                 .allow_empty_password(false)
