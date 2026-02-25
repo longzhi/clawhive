@@ -1,0 +1,9 @@
+[2m2026-02-20T09:18:07.571713Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m Anthropic API key not set, using stub provider
+[2m2026-02-20T09:18:07.571909Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m OpenAI API key not set (env: OPENAI_API_KEY), skipping
+[2m2026-02-20T09:18:07.573905Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m OpenAI embedding API key not set (env: OPENAI_API_KEY), using stub provider
+[2m2026-02-20T09:18:07.580617Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m OpenAI embedding API key not set (env: OPENAI_API_KEY), using stub provider
+[2m2026-02-20T09:18:07.580745Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m Anthropic API key not set, using stub provider
+[2m2026-02-20T09:18:07.580770Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m OpenAI API key not set (env: OPENAI_API_KEY), skipping
+[2m2026-02-20T09:18:07.580850Z[0m [32m INFO[0m [2mnanocrab[0m[2m:[0m Hippocampus consolidation scheduler started (every 24h)
+[2m2026-02-20T09:18:07.580877Z[0m [33m WARN[0m [2mnanocrab[0m[2m:[0m Telegram token is empty for connector tg_main, skipping
+Error: No channel bots configured or enabled. Check main.yaml channels section.

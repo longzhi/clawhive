@@ -20,6 +20,12 @@ pub struct ConversationMessage {
 pub struct ToolContext {
     policy: Option<PolicyEngine>,
     recent_messages: Vec<ConversationMessage>,
+    /// Source channel type (e.g., "discord", "telegram")
+    source_channel_type: Option<String>,
+    /// Source connector id (e.g., "dc_main", "tg_main")
+    source_connector_id: Option<String>,
+    /// Source conversation scope (e.g., "guild:123:channel:456")
+    source_conversation_scope: Option<String>,
 }
 
 impl ToolContext {
@@ -27,6 +33,9 @@ impl ToolContext {
         Self {
             policy: Some(policy),
             recent_messages: Vec::new(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
         }
     }
 
@@ -42,12 +51,39 @@ impl ToolContext {
         Self {
             policy: Some(PolicyEngine::new(perms)),
             recent_messages: Vec::new(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
         }
     }
 
     pub fn with_recent_messages(mut self, recent_messages: Vec<ConversationMessage>) -> Self {
         self.recent_messages = recent_messages;
         self
+    }
+
+    pub fn with_source(
+        mut self,
+        channel_type: String,
+        connector_id: String,
+        conversation_scope: String,
+    ) -> Self {
+        self.source_channel_type = Some(channel_type);
+        self.source_connector_id = Some(connector_id);
+        self.source_conversation_scope = Some(conversation_scope);
+        self
+    }
+
+    pub fn source_channel_type(&self) -> Option<&str> {
+        self.source_channel_type.as_deref()
+    }
+
+    pub fn source_connector_id(&self) -> Option<&str> {
+        self.source_connector_id.as_deref()
+    }
+
+    pub fn source_conversation_scope(&self) -> Option<&str> {
+        self.source_conversation_scope.as_deref()
     }
 
     pub fn recent_messages(&self, limit: usize) -> Vec<ConversationMessage> {

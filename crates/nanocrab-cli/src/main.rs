@@ -971,11 +971,14 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                     continue;
                 }
                 tracing::info!("Registering Discord bot: {}", connector.connector_id);
-                bots.push(Box::new(DiscordBot::new(
-                    token,
-                    connector.connector_id.clone(),
-                    gateway.clone(),
-                )));
+                bots.push(Box::new(
+                    DiscordBot::new(
+                        token,
+                        connector.connector_id.clone(),
+                        gateway.clone(),
+                    )
+                    .with_bus(bus.clone()),
+                ));
             }
         }
     }

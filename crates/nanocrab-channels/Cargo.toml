@@ -19,6 +19,7 @@ tracing.workspace = true
 async-trait.workspace = true
 nanocrab-schema = { path = "../nanocrab-schema" }
 nanocrab-gateway = { path = "../nanocrab-gateway" }
+nanocrab-bus = { path = "../nanocrab-bus" }
 
 teloxide = { workspace = true, optional = true }
 log = { workspace = true, optional = true }

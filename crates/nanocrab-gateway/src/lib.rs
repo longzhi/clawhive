@@ -173,9 +173,12 @@ pub fn spawn_scheduled_task_listener(
                 agent_id: _,
                 task,
                 session_mode,
-                delivery_mode: _,
+                delivery_mode,
                 delivery_channel: _,
                 delivery_connector_id: _,
+                source_channel_type,
+                source_connector_id,
+                source_conversation_scope,
                 triggered_at,
             } = msg
             else {
@@ -204,6 +207,24 @@ pub fn spawn_scheduled_task_listener(
 
             match gateway.handle_inbound(inbound).await {
                 Ok(outbound) => {
+                    // If delivery mode is Announce and we have source info, publish DeliverAnnounce
+                    if matches!(delivery_mode, ScheduledDeliveryMode::Announce) {
+                        if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
+                            source_channel_type.clone(),
+                            source_connector_id.clone(),
+                            source_conversation_scope.clone(),
+                        ) {
+                            let _ = bus
+                                .publish(BusMessage::DeliverAnnounce {
+                                    channel_type: ch_type,
+                                    connector_id: conn_id,
+                                    conversation_scope: conv_scope,
+                                    text: outbound.text.clone(),
+                                })
+                                .await;
+                        }
+                    }
+
                     let _ = bus
                         .publish(BusMessage::ScheduledTaskCompleted {
                             schedule_id,

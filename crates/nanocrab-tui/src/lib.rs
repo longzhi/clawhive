@@ -320,6 +320,20 @@ impl App {
                     self.push_log(format!("[{ts}] schedule={schedule_id} error={err}"));
                 }
             }
+            BusMessage::DeliverAnnounce {
+                ref channel_type,
+                ref connector_id,
+                ref conversation_scope,
+                ref text,
+            } => {
+                let preview: String = text.chars().take(60).collect();
+                self.push_event(format!(
+                    "[{ts}] DeliverAnnounce {channel_type}:{connector_id}"
+                ));
+                self.push_log(format!(
+                    "[{ts}] Deliver → {conversation_scope}: {preview}"
+                ));
+            }
         }
     }
 }

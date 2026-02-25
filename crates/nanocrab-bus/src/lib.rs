@@ -20,6 +20,7 @@ pub enum Topic {
     StreamDelta,
     ScheduledTaskTriggered,
     ScheduledTaskCompleted,
+    DeliverAnnounce,
 }
 
 impl Topic {
@@ -38,6 +39,7 @@ impl Topic {
             BusMessage::StreamDelta { .. } => Topic::StreamDelta,
             BusMessage::ScheduledTaskTriggered { .. } => Topic::ScheduledTaskTriggered,
             BusMessage::ScheduledTaskCompleted { .. } => Topic::ScheduledTaskCompleted,
+            BusMessage::DeliverAnnounce { .. } => Topic::DeliverAnnounce,
         }
     }
 }

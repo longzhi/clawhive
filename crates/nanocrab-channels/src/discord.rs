@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use nanocrab_bus::{EventBus, Topic};
 use nanocrab_gateway::Gateway;
-use nanocrab_schema::{InboundMessage, OutboundMessage};
-use serenity::all::{Client, Context, EventHandler, GatewayIntents, Message, Ready};
+use nanocrab_schema::{BusMessage, InboundMessage, OutboundMessage};
+use serenity::all::{ChannelId, Client, Context, EventHandler, GatewayIntents, Http, Message, Ready};
 use serenity::async_trait;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub struct DiscordAdapter {
@@ -55,6 +57,7 @@ pub struct DiscordBot {
     token: String,
     connector_id: String,
     gateway: Arc<Gateway>,
+    bus: Option<Arc<EventBus>>,
 }
 
 impl DiscordBot {
@@ -63,17 +66,38 @@ impl DiscordBot {
             token,
             connector_id,
             gateway,
+            bus: None,
         }
+    }
+
+    pub fn with_bus(mut self, bus: Arc<EventBus>) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     pub async fn run_impl(self) -> anyhow::Result<()> {
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
             | GatewayIntents::MESSAGE_CONTENT;
+
+        let http_holder: Arc<RwLock<Option<Arc<Http>>>> = Arc::new(RwLock::new(None));
+        let connector_id_for_delivery = self.connector_id.clone();
+
         let handler = DiscordHandler {
             connector_id: self.connector_id,
             gateway: self.gateway,
+            http_holder: http_holder.clone(),
         };
+
+        // Spawn delivery listener if bus is available
+        if let Some(bus) = self.bus {
+            let http_holder_clone = http_holder.clone();
+            let connector_id = connector_id_for_delivery.clone();
+            tokio::spawn(async move {
+                spawn_delivery_listener(bus, http_holder_clone, connector_id).await;
+            });
+        }
+
         let mut client = Client::builder(self.token, intents)
             .event_handler(handler)
             .await?;
@@ -100,16 +124,20 @@ impl crate::ChannelBot for DiscordBot {
 struct DiscordHandler {
     connector_id: String,
     gateway: Arc<Gateway>,
+    http_holder: Arc<RwLock<Option<Arc<Http>>>>,
 }
 
 #[async_trait]
 impl EventHandler for DiscordHandler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!(
             "discord bot connected: {} ({})",
             ready.user.name,
             self.connector_id
         );
+        // Store HTTP client for delivery listener
+        let mut holder = self.http_holder.write().await;
+        *holder = Some(ctx.http.clone());
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -164,6 +192,76 @@ impl EventHandler for DiscordHandler {
                 }
             }
         });
+    }
+}
+
+/// Parse conversation_scope to extract channel ID
+/// Format: "guild:<guild_id>:channel:<channel_id>" or "dm:<channel_id>"
+fn parse_channel_id(conversation_scope: &str) -> Option<u64> {
+    if let Some(rest) = conversation_scope.strip_prefix("dm:") {
+        return rest.parse().ok();
+    }
+    if conversation_scope.contains(":channel:") {
+        let parts: Vec<&str> = conversation_scope.split(":channel:").collect();
+        if parts.len() == 2 {
+            return parts[1].parse().ok();
+        }
+    }
+    None
+}
+
+/// Spawn a listener for DeliverAnnounce messages
+async fn spawn_delivery_listener(
+    bus: Arc<EventBus>,
+    http_holder: Arc<RwLock<Option<Arc<Http>>>>,
+    connector_id: String,
+) {
+    let mut rx = bus.subscribe(Topic::DeliverAnnounce).await;
+    while let Some(msg) = rx.recv().await {
+        let BusMessage::DeliverAnnounce {
+            channel_type,
+            connector_id: msg_connector_id,
+            conversation_scope,
+            text,
+        } = msg
+        else {
+            continue;
+        };
+
+        // Only handle messages for this connector
+        if channel_type != "discord" || msg_connector_id != connector_id {
+            continue;
+        }
+
+        // Get HTTP client
+        let http = {
+            let holder = http_holder.read().await;
+            holder.clone()
+        };
+
+        let Some(http) = http else {
+            tracing::warn!("Discord HTTP client not ready for delivery");
+            continue;
+        };
+
+        // Parse channel ID from conversation_scope
+        let Some(channel_id) = parse_channel_id(&conversation_scope) else {
+            tracing::warn!(
+                "Could not parse channel ID from conversation_scope: {}",
+                conversation_scope
+            );
+            continue;
+        };
+
+        let channel = ChannelId::new(channel_id);
+        if let Err(e) = channel.say(&http, &text).await {
+            tracing::error!("Failed to deliver announce message: {e}");
+        } else {
+            tracing::info!(
+                "Delivered scheduled task result to channel {}",
+                channel_id
+            );
+        }
     }
 }
 

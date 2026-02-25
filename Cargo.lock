@@ -1968,6 +1968,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "log",
+ "nanocrab-bus",
  "nanocrab-gateway",
  "nanocrab-schema",
  "serde",

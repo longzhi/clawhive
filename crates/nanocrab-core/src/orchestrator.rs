@@ -454,6 +454,11 @@ impl Orchestrator {
             forced_skills.as_deref(),
             agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
         );
+        let source_info = Some((
+            inbound.channel_type.clone(),
+            inbound.connector_id.clone(),
+            inbound.conversation_scope.clone(),
+        ));
         let (resp, _messages) = self
             .tool_use_loop(
                 agent_id,
@@ -464,6 +469,7 @@ impl Orchestrator {
                 2048,
                 allowed.as_deref(),
                 merged_permissions,
+                source_info,
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
@@ -645,6 +651,11 @@ impl Orchestrator {
             forced_skills.as_deref(),
             agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
         );
+        let source_info_stream = Some((
+            inbound.channel_type.clone(),
+            inbound.connector_id.clone(),
+            inbound.conversation_scope.clone(),
+        ));
         let (_resp, final_messages) = self
             .tool_use_loop(
                 agent_id,
@@ -655,6 +666,7 @@ impl Orchestrator {
                 2048,
                 allowed_stream.as_deref(),
                 merged_permissions,
+                source_info_stream,
             )
             .await?;
 
@@ -708,6 +720,7 @@ impl Orchestrator {
         max_tokens: u32,
         allowed_tools: Option<&[String]>,
         merged_permissions: Option<corral_core::Permissions>,
+        source_info: Option<(String, String, String)>, // (channel_type, connector_id, conversation_scope)
     ) -> Result<(nanocrab_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
         let tool_defs: Vec<_> = match allowed_tools {
@@ -759,6 +772,11 @@ impl Orchestrator {
                 None => ToolContext::default_policy(&self.workspace_root),
             }
             .with_recent_messages(recent_messages);
+            let ctx = if let Some((ref ch, ref co, ref cv)) = source_info {
+                ctx.with_source(ch.clone(), co.clone(), cv.clone())
+            } else {
+                ctx
+            };
             for (id, name, input) in tool_uses {
                 let result = match self
                     .execute_tool_for_agent(agent_id, &name, input, &ctx)

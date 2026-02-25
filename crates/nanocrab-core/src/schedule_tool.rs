@@ -95,6 +95,15 @@ impl ScheduleJobInput {
             connector_id: None,
         });
 
+        // Default to Announce delivery if source info available and mode not specified
+        let delivery_mode = delivery.mode.unwrap_or_else(|| {
+            if ctx.source_conversation_scope().is_some() {
+                DeliveryMode::Announce
+            } else {
+                DeliveryMode::None
+            }
+        });
+
         ScheduleConfig {
             schedule_id: self
                 .schedule_id
@@ -113,9 +122,12 @@ impl ScheduleJobInput {
             timeout_seconds: self.timeout_seconds.unwrap_or(300),
             delete_after_run: self.delete_after_run.unwrap_or(false),
             delivery: DeliveryConfig {
-                mode: delivery.mode.unwrap_or(DeliveryMode::None),
+                mode: delivery_mode,
                 channel: delivery.channel,
                 connector_id: delivery.connector_id,
+                source_channel_type: ctx.source_channel_type().map(String::from),
+                source_connector_id: ctx.source_connector_id().map(String::from),
+                source_conversation_scope: ctx.source_conversation_scope().map(String::from),
             },
         }
     }

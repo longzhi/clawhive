@@ -113,6 +113,12 @@ pub enum BusMessage {
         delivery_mode: ScheduledDeliveryMode,
         delivery_channel: Option<String>,
         delivery_connector_id: Option<String>,
+        /// Source channel type for announce delivery (e.g., "discord", "telegram")
+        source_channel_type: Option<String>,
+        /// Source connector id for announce delivery (e.g., "dc_main", "tg_main")
+        source_connector_id: Option<String>,
+        /// Source conversation scope for announce delivery (e.g., "guild:123:channel:456")
+        source_conversation_scope: Option<String>,
         triggered_at: DateTime<Utc>,
     },
     ScheduledTaskCompleted {
@@ -122,6 +128,12 @@ pub enum BusMessage {
         started_at: DateTime<Utc>,
         ended_at: DateTime<Utc>,
         response: Option<String>,
+    },
+    DeliverAnnounce {
+        channel_type: String,
+        connector_id: String,
+        conversation_scope: String,
+        text: String,
     },
 }
 

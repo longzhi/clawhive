@@ -251,6 +251,9 @@ impl ScheduleManager {
             },
             delivery_channel: entry.config.delivery.channel.clone(),
             delivery_connector_id: entry.config.delivery.connector_id.clone(),
+            source_channel_type: entry.config.delivery.source_channel_type.clone(),
+            source_connector_id: entry.config.delivery.source_connector_id.clone(),
+            source_conversation_scope: entry.config.delivery.source_conversation_scope.clone(),
             triggered_at: Utc::now(),
         };
         self.bus.publish(msg).await?;
@@ -324,6 +327,9 @@ impl ScheduleManager {
                         },
                         delivery_channel: entry.config.delivery.channel.clone(),
                         delivery_connector_id: entry.config.delivery.connector_id.clone(),
+                        source_channel_type: entry.config.delivery.source_channel_type.clone(),
+                        source_connector_id: entry.config.delivery.source_connector_id.clone(),
+                        source_conversation_scope: entry.config.delivery.source_conversation_scope.clone(),
                         triggered_at: Utc::now(),
                     })
                     .await;

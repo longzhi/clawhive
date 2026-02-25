@@ -77,6 +77,15 @@ pub struct DeliveryConfig {
     pub channel: Option<String>,
     #[serde(default)]
     pub connector_id: Option<String>,
+    /// Source channel type (e.g., "discord", "telegram") for announce delivery
+    #[serde(default)]
+    pub source_channel_type: Option<String>,
+    /// Source connector id for announce delivery
+    #[serde(default)]
+    pub source_connector_id: Option<String>,
+    /// Source conversation scope (e.g., "guild:123:channel:456") for announce delivery
+    #[serde(default)]
+    pub source_conversation_scope: Option<String>,
 }
 
 impl Default for DeliveryConfig {
@@ -85,6 +94,9 @@ impl Default for DeliveryConfig {
             mode: DeliveryMode::None,
             channel: None,
             connector_id: None,
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
         }
     }
 }
