@@ -35,6 +35,9 @@ impl OpenAiChatGptProvider {
     }
 
     pub(crate) fn to_responses_request(request: LlmRequest, stream: bool) -> ResponsesRequest {
+        // OpenAI Responses API uses a flat tool structure (different from Chat Completions API):
+        // { type: "function", name: "...", description: "...", input_schema: {...} }
+        // NOT nested under "function" like Chat Completions API
         let tools = if request.tools.is_empty() {
             None
         } else {
@@ -44,11 +47,9 @@ impl OpenAiChatGptProvider {
                     .iter()
                     .map(|t| ResponsesTool {
                         tool_type: "function".to_string(),
-                        function: ResponsesFunction {
-                            name: t.name.clone(),
-                            description: Some(t.description.clone()),
-                            parameters: Some(t.input_schema.clone()),
-                        },
+                        name: t.name.clone(),
+                        description: Some(t.description.clone()),
+                        input_schema: Some(t.input_schema.clone()),
                     })
                     .collect(),
             )
@@ -84,6 +85,14 @@ impl LlmProvider for OpenAiChatGptProvider {
         // ChatGPT Codex API requires stream=true, so we stream and collect
         let url = format!("{}/responses", self.api_base);
         let payload = Self::to_responses_request(request, true);
+
+        // Debug: log the actual tools payload
+        if let Some(ref tools) = payload.tools {
+            tracing::debug!(
+                "ChatGPT tools payload: {}",
+                serde_json::to_string(tools).unwrap_or_else(|_| "failed to serialize".to_string())
+            );
+        }
 
         let mut req = self
             .client
@@ -512,20 +521,16 @@ pub(crate) struct ResponsesInputContent {
     pub text: String,
 }
 
+/// Tool definition for Responses API (flat structure, different from Chat Completions API)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ResponsesTool {
     #[serde(rename = "type")]
     pub tool_type: String,
-    pub function: ResponsesFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResponsesFunction {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<serde_json::Value>,
+    pub input_schema: Option<serde_json::Value>,
 }
 
 // ============ Response Types ============
@@ -805,7 +810,7 @@ mod tests {
         assert!(payload.tools.is_some());
         let tools = payload.tools.unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].function.name, "get_weather");
+        assert_eq!(tools[0].name, "get_weather");
         assert_eq!(payload.tool_choice, Some("auto".to_string()));
     }
 
