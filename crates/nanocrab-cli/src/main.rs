@@ -847,11 +847,14 @@ fn daemonize(root: &Path, tui: bool, port: u16) -> Result<()> {
     // Get the current executable path
     let exe = std::env::current_exe()?;
 
-    // Prepare log files
+    // Prepare log file (append to nanocrab.out)
     let log_dir = root.join("logs");
     std::fs::create_dir_all(&log_dir)?;
-    let stdout_log = std::fs::File::create(log_dir.join("daemon.out"))?;
-    let stderr_log = std::fs::File::create(log_dir.join("daemon.err"))?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("nanocrab.out"))?;
+    let log_file_err = log_file.try_clone()?;
 
     // Spawn the process in background
     let child = Command::new(&exe)
@@ -861,12 +864,11 @@ fn daemonize(root: &Path, tui: bool, port: u16) -> Result<()> {
         .arg("--port")
         .arg(port.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log))
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err))
         .spawn()?;
 
     println!("nanocrab started in background (pid: {})", child.id());
-    println!("Logs: {}/daemon.out", log_dir.display());
 
     Ok(())
 }
