@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 use nanocrab_provider::ToolDef;
 use nanocrab_scheduler::{DeliveryConfig, DeliveryMode, ScheduleConfig, ScheduleManager, ScheduleType, SessionMode};
 use serde::Deserialize;
@@ -104,6 +105,15 @@ impl ScheduleJobInput {
             }
         });
 
+        // Convert relative time to absolute timestamp for "at" schedules
+        // This prevents the bug where "1m" keeps being re-interpreted as "1 minute from now"
+        let schedule = normalize_schedule_type(self.schedule);
+
+        // "at" schedules should default to delete_after_run=true since they're one-shot
+        let delete_after_run = self.delete_after_run.unwrap_or_else(|| {
+            matches!(schedule, ScheduleType::At { .. })
+        });
+
         ScheduleConfig {
             schedule_id: self
                 .schedule_id
@@ -112,7 +122,7 @@ impl ScheduleJobInput {
             enabled: true,
             name: self.name,
             description: self.description,
-            schedule: self.schedule,
+            schedule,
             agent_id: self
                 .agent_id
                 .filter(|id| !id.trim().is_empty())
@@ -120,7 +130,7 @@ impl ScheduleJobInput {
             session_mode: self.session_mode.unwrap_or(SessionMode::Isolated),
             task,
             timeout_seconds: self.timeout_seconds.unwrap_or(300),
-            delete_after_run: self.delete_after_run.unwrap_or(false),
+            delete_after_run,
             delivery: DeliveryConfig {
                 mode: delivery_mode,
                 channel: delivery.channel,
@@ -130,6 +140,48 @@ impl ScheduleJobInput {
                 source_conversation_scope: ctx.source_conversation_scope().map(String::from),
             },
         }
+    }
+}
+
+/// Convert relative time in "at" schedules to absolute ISO timestamp.
+/// This prevents the bug where "1m" keeps being re-interpreted on every check.
+fn normalize_schedule_type(schedule: ScheduleType) -> ScheduleType {
+    match schedule {
+        ScheduleType::At { at } => {
+            // Try to parse as relative time (e.g., "1m", "2h", "30s")
+            if let Some(ms) = try_parse_relative_ms(&at) {
+                let now_ms = Utc::now().timestamp_millis();
+                let target_ms = now_ms + ms;
+                let target_dt = chrono::DateTime::from_timestamp_millis(target_ms)
+                    .unwrap_or_else(Utc::now);
+                ScheduleType::At {
+                    at: target_dt.to_rfc3339(),
+                }
+            } else {
+                // Already absolute or unparseable, keep as-is
+                ScheduleType::At { at }
+            }
+        }
+        other => other,
+    }
+}
+
+/// Try to parse a relative time string like "1m", "2h", "30s", "1d"
+fn try_parse_relative_ms(input: &str) -> Option<i64> {
+    let input = input.trim();
+    if input.len() < 2 {
+        return None;
+    }
+
+    let (num_str, unit) = input.split_at(input.len() - 1);
+    let num: i64 = num_str.parse().ok()?;
+
+    match unit {
+        "s" => Some(num * 1_000),
+        "m" => Some(num * 60_000),
+        "h" => Some(num * 3_600_000),
+        "d" => Some(num * 86_400_000),
+        _ => None,
     }
 }
 
@@ -487,5 +539,67 @@ mod tests {
 
         assert!(!remove_result.is_error);
         assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn at_schedule_converts_relative_to_absolute_and_defaults_delete_after_run() {
+        let (manager, _bus, _tmp) = setup();
+        let tool = ScheduleTool::new(manager.clone());
+        let ctx = ToolContext::builtin();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "add",
+                    "job": {
+                        "name": "One-shot reminder",
+                        "schedule": { "kind": "at", "at": "5m" },
+                        "task": "Do something"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let entries = manager.list().await;
+        assert_eq!(entries.len(), 1);
+
+        let config = &entries[0].config;
+        
+        // Should default to delete_after_run=true for "at" schedules
+        assert!(config.delete_after_run, "at schedules should default to delete_after_run=true");
+
+        // The "at" time should be converted to an absolute ISO timestamp, not "5m"
+        if let nanocrab_scheduler::ScheduleType::At { at } = &config.schedule {
+            assert!(
+                at.contains("T") && at.contains(":"),
+                "relative time '5m' should be converted to absolute ISO timestamp, got: {}",
+                at
+            );
+            assert!(
+                !at.ends_with("m") && !at.ends_with("h") && !at.ends_with("s"),
+                "should not be a relative time string, got: {}",
+                at
+            );
+        } else {
+            panic!("expected At schedule type");
+        }
+    }
+
+    #[test]
+    fn try_parse_relative_ms_works() {
+        use super::try_parse_relative_ms;
+        
+        assert_eq!(try_parse_relative_ms("1m"), Some(60_000));
+        assert_eq!(try_parse_relative_ms("5m"), Some(300_000));
+        assert_eq!(try_parse_relative_ms("2h"), Some(7_200_000));
+        assert_eq!(try_parse_relative_ms("30s"), Some(30_000));
+        assert_eq!(try_parse_relative_ms("1d"), Some(86_400_000));
+        
+        // Not relative times
+        assert_eq!(try_parse_relative_ms("2026-02-25T10:00:00Z"), None);
+        assert_eq!(try_parse_relative_ms("invalid"), None);
     }
 }
