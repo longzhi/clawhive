@@ -355,22 +355,70 @@ impl Orchestrator {
             .get(agent_id)
             .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
 
-        // Handle /model command directly without LLM
-        if inbound.text.trim() == "/model" {
-            return Ok(OutboundMessage {
-                trace_id: inbound.trace_id,
-                channel_type: inbound.channel_type,
-                connector_id: inbound.connector_id,
-                conversation_scope: inbound.conversation_scope,
-                text: format!(
-                    "Model: **{}**\nSession: **{}**",
-                    agent.model_policy.primary, agent_id
-                ),
-                at: chrono::Utc::now(),
-            });
+        let session_key = SessionKey::from_inbound(&inbound);
+
+        // Handle slash commands before LLM
+        if let Some(cmd) = super::slash_commands::parse_command(&inbound.text) {
+            match cmd {
+                super::slash_commands::SlashCommand::Model => {
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: format!(
+                            "Model: **{}**\nSession: **{}**",
+                            agent.model_policy.primary, agent_id
+                        ),
+                        at: chrono::Utc::now(),
+                    });
+                }
+                super::slash_commands::SlashCommand::Status => {
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: super::slash_commands::format_status_response(
+                            agent_id,
+                            &agent.model_policy.primary,
+                            &session_key.0,
+                        ),
+                        at: chrono::Utc::now(),
+                    });
+                }
+                super::slash_commands::SlashCommand::Reset { model_hint } => {
+                    // Reset the session: clear history and start fresh
+                    let _ = self.session_mgr.reset(&session_key).await;
+                    let _ = self.session_writer_for(agent_id).clear_session(&session_key.0).await;
+
+                    // Build post-reset prompt
+                    let post_reset_prompt = super::slash_commands::build_post_reset_prompt(agent_id);
+
+                    // Log the model hint if provided (for future model switching)
+                    if let Some(ref hint) = model_hint {
+                        tracing::info!("Session reset with model hint: {hint}");
+                    }
+
+                    // Continue with normal flow but inject the post-reset prompt
+                    return self
+                        .handle_post_reset_flow(inbound, agent_id, agent, &session_key, &post_reset_prompt)
+                        .await;
+                }
+                super::slash_commands::SlashCommand::Compact => {
+                    // Placeholder for compact command
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: "⚠️ Compaction is not yet implemented.".to_string(),
+                        at: chrono::Utc::now(),
+                    });
+                }
+            }
         }
 
-        let session_key = SessionKey::from_inbound(&inbound);
         let session_result = self
             .session_mgr
             .get_or_create(&session_key, agent_id)
@@ -892,6 +940,102 @@ impl Orchestrator {
         }
 
         Ok(last_reply)
+    }
+
+    /// Handle the flow after a /reset or /new command.
+    /// This creates a fresh session and injects the post-reset prompt to guide the agent.
+    async fn handle_post_reset_flow(
+        &self,
+        inbound: InboundMessage,
+        agent_id: &str,
+        agent: &FullAgentConfig,
+        session_key: &SessionKey,
+        post_reset_prompt: &str,
+    ) -> Result<OutboundMessage> {
+        // Create a fresh session
+        let _ = self
+            .session_mgr
+            .get_or_create(session_key, agent_id)
+            .await?;
+
+        // Build system prompt with post-reset context
+        let system_prompt = self
+            .personas
+            .get(agent_id)
+            .map(|p| p.assembled_system_prompt())
+            .unwrap_or_default();
+        let active_skills = self.active_skill_registry();
+        let skill_summary = active_skills.summary_prompt();
+        let system_prompt = if skill_summary.is_empty() {
+            system_prompt
+        } else {
+            format!("{system_prompt}\n\n{skill_summary}")
+        };
+        let system_prompt = self.build_runtime_system_prompt(
+            agent_id,
+            &agent.model_policy.primary,
+            system_prompt,
+        );
+
+        // Build messages with post-reset prompt
+        let messages = vec![LlmMessage::user(post_reset_prompt.to_string())];
+
+        let source_info = Some((
+            inbound.channel_type.clone(),
+            inbound.connector_id.clone(),
+            inbound.conversation_scope.clone(),
+        ));
+
+        // Run the tool-use loop
+        let (resp, _messages) = self
+            .tool_use_loop(
+                agent_id,
+                &agent.model_policy.primary,
+                &agent.model_policy.fallbacks,
+                Some(system_prompt),
+                messages,
+                2048,
+                agent.tool_policy.as_ref().map(|tp| tp.allow.as_slice()),
+                None,
+                source_info,
+            )
+            .await?;
+
+        let reply_text = self.runtime.postprocess_output(&resp.text).await?;
+
+        // Record the assistant's response in the fresh session
+        if let Err(e) = self
+            .session_writer_for(agent_id)
+            .append_message(&session_key.0, "system", post_reset_prompt)
+            .await
+        {
+            tracing::warn!("Failed to write post-reset prompt to session: {e}");
+        }
+        if let Err(e) = self
+            .session_writer_for(agent_id)
+            .append_message(&session_key.0, "assistant", &reply_text)
+            .await
+        {
+            tracing::warn!("Failed to write assistant session entry: {e}");
+        }
+
+        let outbound = OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text: reply_text,
+            at: chrono::Utc::now(),
+        };
+
+        let _ = self
+            .bus
+            .publish(BusMessage::ReplyReady {
+                outbound: outbound.clone(),
+            })
+            .await;
+
+        Ok(outbound)
     }
 
     async fn try_fallback_summary(&self, agent_id: &str, session_key: &SessionKey, agent: &FullAgentConfig) {

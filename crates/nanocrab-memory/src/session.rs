@@ -112,6 +112,16 @@ impl SessionWriter {
     fn session_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir.join(format!("{session_id}.jsonl"))
     }
+
+    /// Clear (delete) a session file. Returns true if the file was deleted.
+    pub async fn clear_session(&self, session_id: &str) -> Result<bool> {
+        let path = self.session_path(session_id);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// Reader for session JSONL files
@@ -498,5 +508,30 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(&line).expect("valid jsonl");
             assert!(value.get("type").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_clear_session() {
+        let tmp = TempDir::new().expect("tempdir");
+        let writer = SessionWriter::new(tmp.path());
+        let reader = SessionReader::new(tmp.path());
+
+        // Clear non-existent session returns false
+        let cleared = writer.clear_session("nonexistent").await.expect("clear");
+        assert!(!cleared);
+
+        // Create a session
+        writer.start_session("s1", "main").await.expect("start");
+        writer.append_message("s1", "user", "hello").await.expect("append");
+        assert!(reader.session_exists("s1").await);
+
+        // Clear existing session returns true
+        let cleared = writer.clear_session("s1").await.expect("clear");
+        assert!(cleared);
+        assert!(!reader.session_exists("s1").await);
+
+        // Clear again returns false
+        let cleared = writer.clear_session("s1").await.expect("clear again");
+        assert!(!cleared);
     }
 }
