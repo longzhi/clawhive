@@ -23,7 +23,7 @@ use super::schedule_tool::ScheduleTool;
 use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
-use super::tool::{ConversationMessage, ToolContext, ToolRegistry};
+use super::tool::{ConversationMessage, ToolContext, ToolExecutor, ToolRegistry};
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
@@ -56,6 +56,7 @@ pub struct Orchestrator {
     search_index: SearchIndex,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     tool_registry: ToolRegistry,
+    default_workspace_root: std::path::PathBuf,
     react_max_steps: usize,
     react_repeat_guard: usize,
 }
@@ -154,8 +155,50 @@ impl Orchestrator {
             search_index,
             embedding_provider,
             tool_registry,
+            default_workspace_root: effective_project_root,
             react_max_steps: 4,
             react_repeat_guard: 2,
+        }
+    }
+
+    fn workspace_root_for(&self, agent_id: &str) -> std::path::PathBuf {
+        self.agent_workspaces
+            .get(agent_id)
+            .map(|ws| ws.workspace.root().to_path_buf())
+            .unwrap_or_else(|| self.default_workspace_root.clone())
+    }
+
+    fn build_runtime_system_prompt(&self, agent_id: &str, base_prompt: String) -> String {
+        let workspace_root = self.workspace_root_for(agent_id);
+        format!(
+            "{base_prompt}\n\nRuntime:\n- Working directory: {}",
+            workspace_root.display()
+        )
+    }
+
+    async fn execute_tool_for_agent(
+        &self,
+        agent_id: &str,
+        name: &str,
+        input: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<super::tool::ToolOutput> {
+        match name {
+            "read" => ReadFileTool::new(self.workspace_root_for(agent_id))
+                .execute(input, ctx)
+                .await,
+            "write" => WriteFileTool::new(self.workspace_root_for(agent_id))
+                .execute(input, ctx)
+                .await,
+            "edit" => EditFileTool::new(self.workspace_root_for(agent_id))
+                .execute(input, ctx)
+                .await,
+            "exec" | "execute_command" => {
+                ExecuteCommandTool::new(self.workspace_root_for(agent_id), 30)
+                    .execute(input, ctx)
+                    .await
+            }
+            _ => self.tool_registry.execute(name, input, ctx).await,
         }
     }
 
@@ -240,6 +283,7 @@ impl Orchestrator {
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
         };
+        let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
 
         let memory_context = self
             .build_memory_context(agent_id, &session_key, &inbound.text)
@@ -279,6 +323,7 @@ impl Orchestrator {
         let allowed = agent.tool_policy.as_ref().map(|tp| tp.allow.clone());
         let (resp, _messages) = self
             .tool_use_loop(
+                agent_id,
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt),
@@ -387,6 +432,7 @@ impl Orchestrator {
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
         };
+        let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
 
         let memory_context = self
             .build_memory_context(agent_id, &session_key, &inbound.text)
@@ -426,6 +472,7 @@ impl Orchestrator {
         let allowed_stream = agent.tool_policy.as_ref().map(|tp| tp.allow.clone());
         let (_resp, final_messages) = self
             .tool_use_loop(
+                agent_id,
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt.clone()),
@@ -477,6 +524,7 @@ impl Orchestrator {
     /// should use the returned messages instead of the original input.
     async fn tool_use_loop(
         &self,
+        agent_id: &str,
         primary: &str,
         fallbacks: &[String],
         system: Option<String>,
@@ -535,7 +583,10 @@ impl Orchestrator {
             }
             .with_recent_messages(recent_messages);
             for (id, name, input) in tool_uses {
-                let result = match self.tool_registry.execute(&name, input, &ctx).await {
+                let result = match self
+                    .execute_tool_for_agent(agent_id, &name, input, &ctx)
+                    .await
+                {
                     Ok(output) => ContentBlock::ToolResult {
                         tool_use_id: id,
                         content: output.content,
