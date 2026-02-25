@@ -1726,7 +1726,7 @@ mod tests {
     #[test]
     fn parses_restart_with_flags() {
         let cli = Cli::try_parse_from(["nanocrab", "restart", "--tui", "--port", "8080"]).unwrap();
-        assert!(matches!(cli.command, Commands::Restart { tui: true, port: 8080 }));
+        assert!(matches!(cli.command, Commands::Restart { tui: true, port: 8080, .. }));
     }
 
     #[test]
