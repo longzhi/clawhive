@@ -28,10 +28,10 @@ fn create_skill_without_permissions(dir: &Path, name: &str) {
     .unwrap();
 }
 
-fn context_from_registry(registry: &SkillRegistry, workspace: &Path) -> ToolContext {
+fn context_from_registry(registry: &SkillRegistry, _workspace: &Path) -> ToolContext {
     match registry.merged_permissions() {
-        Some(perms) => ToolContext::new(corral_core::PolicyEngine::new(perms)),
-        None => ToolContext::default_policy(workspace),
+        Some(perms) => ToolContext::external(perms),
+        None => ToolContext::builtin(),
     }
 }
 
@@ -111,7 +111,9 @@ async fn e2e_skill_with_network_permissions_denies_unlisted_host() {
 }
 
 #[tokio::test]
-async fn e2e_no_permissions_uses_default_policy() {
+async fn e2e_no_permissions_uses_builtin_context() {
+    // Skills without permissions use builtin context, which allows network
+    // (but still subject to hard baseline SSRF protection)
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -124,17 +126,21 @@ async fn e2e_no_permissions_uses_default_policy() {
 
     let ctx = context_from_registry(&registry, &workspace);
 
+    // Builtin context allows external network
     let tool = WebFetchTool::new();
     let result = tool
         .execute(serde_json::json!({"url": "https://example.com"}), &ctx)
         .await
         .unwrap();
-    assert!(
-        result.is_error,
-        "Default policy should deny network: {}",
-        result.content
-    );
-    assert!(result.content.contains("denied"));
+    // This should succeed (or fail for network reasons, not policy)
+    // For testing, we just check it's not a policy denial
+    if result.is_error {
+        assert!(
+            !result.content.contains("denied for"),
+            "Should not be denied by policy: {}",
+            result.content
+        );
+    }
 }
 
 #[tokio::test]

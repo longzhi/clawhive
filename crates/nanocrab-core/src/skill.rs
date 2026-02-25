@@ -108,6 +108,22 @@ impl Skill {
         }
         true
     }
+
+    /// Check if this skill requires sandboxed execution.
+    ///
+    /// Skills with explicit permissions declarations are considered external
+    /// and require sandbox enforcement. Skills without permissions are treated
+    /// as simple prompt injections and use builtin tool context.
+    pub fn requires_sandbox(&self) -> bool {
+        self.permissions.is_some()
+    }
+
+    /// Get corral-compatible permissions for sandbox execution.
+    ///
+    /// Returns None if this skill has no permissions declared.
+    pub fn corral_permissions(&self) -> Option<corral_core::Permissions> {
+        self.permissions.as_ref().map(|p| p.to_corral_permissions())
+    }
 }
 
 fn bin_exists(name: &str) -> bool {

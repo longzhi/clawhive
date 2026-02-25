@@ -104,6 +104,8 @@ impl ToolExecutor for ReadFileTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        use super::policy::HardBaseline;
+
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -119,6 +121,14 @@ impl ToolExecutor for ReadFileTool {
                 })
             }
         };
+
+        // Hard baseline check - blocks sensitive files regardless of tool origin
+        if HardBaseline::path_read_denied(&resolved) {
+            return Ok(ToolOutput {
+                content: format!("Read access denied: sensitive file (hard baseline): {}", path_str),
+                is_error: true,
+            });
+        }
 
         let resolved_str = resolved.to_str().unwrap_or("");
         let requested_abs = if Path::new(path_str).is_absolute() {
@@ -222,6 +232,8 @@ impl ToolExecutor for WriteFileTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        use super::policy::HardBaseline;
+
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -238,6 +250,14 @@ impl ToolExecutor for WriteFileTool {
                 })
             }
         };
+
+        // Hard baseline check - blocks sensitive paths regardless of tool origin
+        if HardBaseline::path_write_denied(&resolved) {
+            return Ok(ToolOutput {
+                content: format!("Write access denied: sensitive path (hard baseline): {}", path_str),
+                is_error: true,
+            });
+        }
 
         let resolved_str = resolved.to_str().unwrap_or("");
         let requested_abs = if Path::new(path_str).is_absolute() {
@@ -312,6 +332,8 @@ impl ToolExecutor for EditFileTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        use super::policy::HardBaseline;
+
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -331,6 +353,14 @@ impl ToolExecutor for EditFileTool {
                 })
             }
         };
+
+        // Hard baseline check - blocks sensitive paths regardless of tool origin
+        if HardBaseline::path_write_denied(&resolved) {
+            return Ok(ToolOutput {
+                content: format!("Write access denied: sensitive path (hard baseline): {}", path_str),
+                is_error: true,
+            });
+        }
 
         let resolved_str = resolved.to_str().unwrap_or("");
         let requested_abs = if Path::new(path_str).is_absolute() {
@@ -395,7 +425,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("hello.txt"), "line1\nline2\nline3").unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"path": "hello.txt"}), &ctx)
             .await
@@ -410,7 +440,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "a\nb\nc\nd\ne").unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"path": "f.txt", "offset": 3, "limit": 2}),
@@ -430,7 +460,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("subdir")).unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"path": "."}), &ctx)
             .await
@@ -484,7 +514,7 @@ mod tests {
     async fn path_escape_blocked() {
         let tmp = TempDir::new().unwrap();
         let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"path": "../../../etc/passwd"}), &ctx)
             .await
@@ -497,7 +527,7 @@ mod tests {
     async fn write_file_basic() {
         let tmp = TempDir::new().unwrap();
         let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"path": "new.txt", "content": "hello world"}),
@@ -505,7 +535,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.is_error);
+        assert!(!result.is_error, "unexpected error: {}", result.content);
         let content = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
         assert_eq!(content, "hello world");
     }
@@ -514,7 +544,7 @@ mod tests {
     async fn write_file_creates_dirs() {
         let tmp = TempDir::new().unwrap();
         let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"path": "sub/deep/file.txt", "content": "nested"}),
@@ -552,7 +582,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "foo bar baz").unwrap();
         let tool = EditFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"path": "e.txt", "old_text": "bar", "new_text": "qux"}),
@@ -570,7 +600,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "foo bar").unwrap();
         let tool = EditFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"path": "e.txt", "old_text": "missing", "new_text": "x"}),
@@ -587,7 +617,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "aaa aaa").unwrap();
         let tool = EditFileTool::new(tmp.path().to_path_buf());
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"path": "e.txt", "old_text": "aaa", "new_text": "bbb"}),

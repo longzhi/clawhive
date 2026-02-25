@@ -767,9 +767,12 @@ impl Orchestrator {
 
             let mut tool_results = Vec::new();
             let recent_messages = collect_recent_messages(&messages, 20);
+            // Build tool context based on whether we have skill permissions
+            // - With permissions: external skill context (sandboxed)
+            // - Without: builtin context (trusted, only hard baseline checks)
             let ctx = match merged_permissions.as_ref() {
-                Some(perms) => ToolContext::new(corral_core::PolicyEngine::new(perms.clone())),
-                None => ToolContext::default_policy(&self.workspace_root),
+                Some(perms) => ToolContext::external(perms.clone()),
+                None => ToolContext::builtin(),
             }
             .with_recent_messages(recent_messages);
             let ctx = if let Some((ref ch, ref co, ref cv)) = source_info {

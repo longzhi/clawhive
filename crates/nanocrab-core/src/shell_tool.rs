@@ -246,19 +246,6 @@ fn default_sandbox(workspace: &Path) -> Result<Sandbox> {
     Sandbox::new(config)
 }
 
-fn sandbox_from_policy(workspace: &Path, policy: &PolicyEngine) -> Result<Sandbox> {
-    let config = SandboxConfig {
-        permissions: policy.permissions().clone(),
-        work_dir: workspace.to_path_buf(),
-        data_dir: None,
-        timeout: Duration::from_secs(30),
-        max_memory_mb: Some(512),
-        env_vars: collect_env_vars(),
-        broker_socket: None,
-    };
-    Sandbox::new(config)
-}
-
 async fn sandbox_with_broker(
     workspace: &Path,
     timeout_secs: u64,
@@ -328,6 +315,10 @@ impl ToolExecutor for ExecuteCommandTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        use super::audit::ToolAuditEntry;
+        use super::policy::HardBaseline;
+        use std::time::Instant;
+
         let command = input["command"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'command' field"))?;
@@ -345,22 +336,53 @@ impl ToolExecutor for ExecuteCommandTool {
             })
             .unwrap_or_default();
 
+        // Hard baseline check - applies to ALL tool origins
+        if HardBaseline::exec_denied(command) {
+            let entry = ToolAuditEntry::denied(
+                "execute_command",
+                ctx.origin(),
+                &input,
+                "command blocked by hard baseline",
+            );
+            entry.emit();
+            return Ok(ToolOutput {
+                content: "Command denied: matches dangerous pattern (hard baseline)".to_string(),
+                is_error: true,
+            });
+        }
+
+        // Policy context check (external skills need exec permission)
+        if !ctx.check_exec(command) {
+            let entry = ToolAuditEntry::denied(
+                "execute_command",
+                ctx.origin(),
+                &input,
+                "command not in allowed exec list",
+            );
+            entry.emit();
+            return Ok(ToolOutput {
+                content: "Command denied: not in allowed exec list for this skill".to_string(),
+                is_error: true,
+            });
+        }
+
         let timeout = Duration::from_secs(timeout_secs.max(1));
+        let start = Instant::now();
 
         let result = if enable_reminders_service {
             let sandbox =
                 sandbox_with_broker(&self.workspace, timeout_secs, &reminders_lists).await?;
             sandbox.execute_with_timeout(command, timeout).await
-        } else if let Some(policy) = ctx.policy() {
-            let sandbox = sandbox_from_policy(&self.workspace, policy)?;
-            sandbox.execute_with_timeout(command, timeout).await
         } else {
+            // Use default sandbox for all executions now that policy is checked above
             let sandbox = self
                 .default_sandbox
                 .get_or_try_init(|| async { default_sandbox(&self.workspace) })
                 .await?;
             sandbox.execute_with_timeout(command, timeout).await
         };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
             Ok(output) => {
@@ -397,19 +419,43 @@ impl ToolExecutor for ExecuteCommandTool {
                     combined.push_str(&format!("\n[exit code: {exit_code}]"));
                 }
 
+                let content = if combined.is_empty() {
+                    format!("[exit code: {exit_code}]")
+                } else {
+                    combined
+                };
+
+                // Audit log successful execution
+                let entry = ToolAuditEntry::success(
+                    "execute_command",
+                    ctx.origin(),
+                    &input,
+                    &content,
+                    duration_ms,
+                );
+                entry.emit();
+
                 Ok(ToolOutput {
-                    content: if combined.is_empty() {
-                        format!("[exit code: {exit_code}]")
-                    } else {
-                        combined
-                    },
+                    content,
                     is_error,
                 })
             }
-            Err(e) => Ok(ToolOutput {
-                content: format!("Failed to execute command: {e}"),
-                is_error: true,
-            }),
+            Err(e) => {
+                // Audit log failed execution
+                let entry = ToolAuditEntry::error(
+                    "execute_command",
+                    ctx.origin(),
+                    &input,
+                    e.to_string(),
+                    duration_ms,
+                );
+                entry.emit();
+
+                Ok(ToolOutput {
+                    content: format!("Failed to execute command: {e}"),
+                    is_error: true,
+                })
+            }
         }
     }
 }
@@ -423,7 +469,7 @@ mod tests {
     async fn echo_command() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}), &ctx)
             .await
@@ -436,7 +482,7 @@ mod tests {
     async fn failing_command() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "exit 1"}), &ctx)
             .await
@@ -449,7 +495,7 @@ mod tests {
     async fn timeout_command() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 1);
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"command": "sleep 10", "timeout_seconds": 1}),
@@ -466,7 +512,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("marker.txt"), "found").unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "cat marker.txt"}), &ctx)
             .await
@@ -476,24 +522,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_uses_policy_from_context() {
+    async fn external_context_requires_exec_permission() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("data.txt"), "hello from policy").unwrap();
+        std::fs::write(tmp.path().join("data.txt"), "hello").unwrap();
 
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
 
-        let perms = corral_core::Permissions::builder()
-            .fs_read([format!("{}/**", tmp.path().display())])
-            .exec_allow(["sh", "cat"])
-            .build();
-        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+        // External context with cat allowed
+        let perms = corral_core::Permissions {
+            fs: corral_core::FsPermissions {
+                read: vec![format!("{}/**", tmp.path().display())],
+                write: vec![],
+            },
+            network: corral_core::NetworkPermissions { allow: vec![] },
+            exec: vec!["cat".into()],
+            env: vec![],
+            services: Default::default(),
+        };
+        let ctx = ToolContext::external(perms);
 
         let result = tool
             .execute(serde_json::json!({"command": "cat data.txt"}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
-        assert!(result.content.contains("hello from policy"));
+        assert!(result.content.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn external_context_denies_unlisted_command() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+
+        // External context with only echo allowed
+        let perms = corral_core::Permissions {
+            fs: corral_core::FsPermissions::default(),
+            network: corral_core::NetworkPermissions { allow: vec![] },
+            exec: vec!["echo".into()],
+            env: vec![],
+            services: Default::default(),
+        };
+        let ctx = ToolContext::external(perms);
+
+        // Try to run ls (not in exec list)
+        let result = tool
+            .execute(serde_json::json!({"command": "ls"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn hard_baseline_blocks_dangerous_command() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+
+        // Even builtin context should block dangerous commands
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(serde_json::json!({"command": "rm -rf /"}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("denied"));
     }
 
     #[cfg(target_os = "linux")]
@@ -501,7 +593,7 @@ mod tests {
     async fn denies_network_by_default_on_linux() {
         let tmp = TempDir::new().unwrap();
         let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({"command": "curl -sS https://example.com", "timeout_seconds": 5}),

@@ -1,9 +1,11 @@
+pub mod audit;
 pub mod config;
 pub mod consolidation;
 pub mod file_tools;
 pub mod memory_tools;
 pub mod orchestrator;
 pub mod persona;
+pub mod policy;
 pub mod router;
 pub mod schedule_tool;
 pub mod session;
@@ -16,12 +18,14 @@ pub mod subagent_tool;
 pub mod tool;
 pub mod workspace;
 
+pub use audit::*;
 pub use config::*;
 pub use consolidation::*;
 pub use file_tools::*;
 pub use memory_tools::*;
 pub use orchestrator::*;
 pub use persona::*;
+pub use policy::*;
 pub use router::*;
 pub use schedule_tool::*;
 pub use session::*;

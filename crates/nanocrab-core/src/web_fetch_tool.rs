@@ -61,6 +61,8 @@ impl ToolExecutor for WebFetchTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        use super::policy::HardBaseline;
+
         let url = input["url"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'url' field"))?;
@@ -83,6 +85,16 @@ impl ToolExecutor for WebFetchTool {
         if let Ok(parsed) = reqwest::Url::parse(url) {
             let host = parsed.host_str().unwrap_or("");
             let port = parsed.port_or_known_default().unwrap_or(443);
+
+            // Hard baseline check - SSRF protection regardless of tool origin
+            if HardBaseline::network_denied(host, port) {
+                return Ok(ToolOutput {
+                    content: format!("Network access denied (hard baseline): {host}:{port} - private/internal network blocked"),
+                    is_error: true,
+                });
+            }
+
+            // Policy context check (external skills need network permission)
             if !ctx.check_network(host, port) {
                 return Ok(ToolOutput {
                     content: format!("Network access denied for {host}:{port}"),
@@ -356,8 +368,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_fetch_denied_by_default_policy() {
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+    async fn web_fetch_denied_by_external_policy() {
+        // External context with no network permissions
+        let perms = corral_core::Permissions {
+            fs: corral_core::FsPermissions::default(),
+            network: corral_core::NetworkPermissions { allow: vec![] },
+            exec: vec![],
+            env: vec![],
+            services: Default::default(),
+        };
+        let ctx = ToolContext::external(perms);
 
         let tool = WebFetchTool::new();
         let result = tool
@@ -366,5 +386,22 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_allowed_by_builtin() {
+        // Builtin context allows network (but we can't actually fetch in tests)
+        // Just verify it doesn't immediately deny
+        let ctx = ToolContext::builtin();
+        let tool = WebFetchTool::new();
+
+        // Use a non-routable IP to avoid actual network call
+        let result = tool
+            .execute(serde_json::json!({"url": "https://10.255.255.1/test"}), &ctx)
+            .await
+            .unwrap();
+        // Should be denied by hard baseline (private network), not by policy
+        assert!(result.is_error);
+        assert!(result.content.contains("hard baseline"));
     }
 }
