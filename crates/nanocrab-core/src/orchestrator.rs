@@ -8,7 +8,7 @@ use nanocrab_bus::BusPublisher;
 use nanocrab_memory::embedding::EmbeddingProvider;
 use nanocrab_memory::file_store::MemoryFileStore;
 use nanocrab_memory::search_index::SearchIndex;
-use nanocrab_memory::{Episode, MemoryStore};
+use nanocrab_memory::MemoryStore;
 use nanocrab_memory::{SessionReader, SessionWriter};
 use nanocrab_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use nanocrab_runtime::TaskExecutor;
@@ -417,8 +417,6 @@ impl Orchestrator {
             self.try_fallback_summary(agent_id, &session_key, agent).await;
         }
 
-        // Save inbound data before it's moved
-        let inbound_at = inbound.at;
         let inbound_text = inbound.text.clone();
 
         let system_prompt = self
@@ -544,42 +542,13 @@ impl Orchestrator {
             at: chrono::Utc::now(),
         };
 
-        // Record episodes
-        let user_ep = Episode {
-            id: uuid::Uuid::new_v4(),
-            ts: inbound_at,
-            session_id: session_key.0.clone(),
-            speaker: "user".into(),
-            text: inbound_text.clone(),
-            tags: vec![],
-            importance: 0.5,
-            context_hash: None,
-            source_ref: None,
-        };
-        if let Err(e) = self.memory.insert_episode(user_ep).await {
-            tracing::warn!("Failed to record user episode: {e}");
-        }
+        // Record session messages (JSONL)
         if let Err(e) = self
             .session_writer_for(agent_id)
             .append_message(&session_key.0, "user", &inbound_text)
             .await
         {
             tracing::warn!("Failed to write user session entry: {e}");
-        }
-
-        let asst_ep = Episode {
-            id: uuid::Uuid::new_v4(),
-            ts: outbound.at,
-            session_id: session_key.0.clone(),
-            speaker: agent_id.to_string(),
-            text: outbound.text.clone(),
-            tags: vec![],
-            importance: 0.5,
-            context_hash: None,
-            source_ref: None,
-        };
-        if let Err(e) = self.memory.insert_episode(asst_ep).await {
-            tracing::warn!("Failed to record assistant episode: {e}");
         }
         if let Err(e) = self
             .session_writer_for(agent_id)
