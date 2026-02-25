@@ -44,6 +44,7 @@ pub struct Orchestrator {
     session_mgr: SessionManager,
     session_locks: super::session_lock::SessionLockManager,
     context_manager: super::context::ContextManager,
+    hook_registry: super::hooks::HookRegistry,
     skill_registry: SkillRegistry,
     skills_root: std::path::PathBuf,
     memory: Arc<MemoryStore>,
@@ -151,6 +152,7 @@ impl Orchestrator {
                 router.clone(),
                 super::context::ContextConfig::default(),
             ),
+            hook_registry: super::hooks::HookRegistry::new(),
             skills_root: workspace_root.join("skills"),
             skill_registry,
             memory,
@@ -350,6 +352,11 @@ impl Orchestrator {
         self.react_max_steps = react.max_steps;
         self.react_repeat_guard = react.repeat_guard;
         self
+    }
+
+    /// Get a reference to the hook registry for registering hooks.
+    pub fn hook_registry(&self) -> &super::hooks::HookRegistry {
+        &self.hook_registry
     }
 
     pub async fn handle_inbound(
