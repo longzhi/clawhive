@@ -260,10 +260,15 @@ impl Orchestrator {
         }
     }
 
-    fn build_runtime_system_prompt(&self, agent_id: &str, base_prompt: String) -> String {
+    fn build_runtime_system_prompt(
+        &self,
+        agent_id: &str,
+        model: &str,
+        base_prompt: String,
+    ) -> String {
         let workspace_root = self.workspace_root_for(agent_id);
         format!(
-            "{base_prompt}\n\nRuntime:\n- Working directory: {}",
+            "{base_prompt}\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
             workspace_root.display()
         )
     }
@@ -350,6 +355,21 @@ impl Orchestrator {
             .get(agent_id)
             .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
 
+        // Handle /model command directly without LLM
+        if inbound.text.trim() == "/model" {
+            return Ok(OutboundMessage {
+                trace_id: inbound.trace_id,
+                channel_type: inbound.channel_type,
+                connector_id: inbound.connector_id,
+                conversation_scope: inbound.conversation_scope,
+                text: format!(
+                    "Model: **{}**\nSession: **{}**",
+                    agent.model_policy.primary, agent_id
+                ),
+                at: chrono::Utc::now(),
+            });
+        }
+
         let session_key = SessionKey::from_inbound(&inbound);
         let session_result = self
             .session_mgr
@@ -413,7 +433,11 @@ impl Orchestrator {
         } else {
             None
         };
-        let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
+        let system_prompt = self.build_runtime_system_prompt(
+            agent_id,
+            &agent.model_policy.primary,
+            system_prompt,
+        );
 
         let memory_context = self
             .build_memory_context(agent_id, &session_key, &inbound.text)
@@ -610,7 +634,11 @@ impl Orchestrator {
         } else {
             None
         };
-        let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
+        let system_prompt = self.build_runtime_system_prompt(
+            agent_id,
+            &agent.model_policy.primary,
+            system_prompt,
+        );
 
         let memory_context = self
             .build_memory_context(agent_id, &session_key, &inbound.text)
