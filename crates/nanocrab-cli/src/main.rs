@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{Cursor, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1173,7 +1173,7 @@ async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
 }
 
 async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
-    const MAX_SKILL_MD_BYTES: usize = 512 * 1024;
+    const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
 
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
@@ -1183,7 +1183,7 @@ async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
@@ -1193,33 +1193,144 @@ async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
     }
 
     if let Some(len) = resp.content_length() {
-        if len as usize > MAX_SKILL_MD_BYTES {
+        if len as usize > MAX_DOWNLOAD_BYTES {
             anyhow::bail!(
-                "remote SKILL.md too large: {} bytes (limit {})",
+                "remote file too large: {} bytes (limit {})",
                 len,
-                MAX_SKILL_MD_BYTES
+                MAX_DOWNLOAD_BYTES
             );
         }
     }
 
     let body = resp.bytes().await?;
-    if body.len() > MAX_SKILL_MD_BYTES {
+    if body.len() > MAX_DOWNLOAD_BYTES {
         anyhow::bail!(
-            "remote SKILL.md too large: {} bytes (limit {})",
+            "remote file too large: {} bytes (limit {})",
             body.len(),
-            MAX_SKILL_MD_BYTES
+            MAX_DOWNLOAD_BYTES
         );
     }
 
     let temp = tempfile::tempdir()?;
-    let skill_dir = temp.path().join("downloaded-skill");
-    std::fs::create_dir_all(&skill_dir)?;
-    std::fs::write(skill_dir.join("SKILL.md"), &body)?;
+    let extract_root = temp.path().join("downloaded-skill");
+    std::fs::create_dir_all(&extract_root)?;
+
+    let path_lc = parsed.path().to_lowercase();
+    if path_lc.ends_with(".zip") {
+        extract_zip_bytes(&body, &extract_root)?;
+    } else if path_lc.ends_with(".tar.gz") || path_lc.ends_with(".tgz") {
+        extract_tar_gz_bytes(&body, &extract_root)?;
+    } else if path_lc.ends_with(".tar") {
+        extract_tar_bytes(&body, &extract_root)?;
+    } else {
+        std::fs::write(extract_root.join("SKILL.md"), &body)?;
+    }
+
+    let skill_root = find_skill_root(&extract_root)?;
 
     Ok(ResolvedSkillSource::Remote {
         _temp_dir: temp,
-        path: skill_dir,
+        path: skill_root,
     })
+}
+
+fn find_skill_root(root: &Path) -> Result<PathBuf> {
+    if root.join("SKILL.md").exists() {
+        return Ok(root.to_path_buf());
+    }
+
+    let mut hits = Vec::new();
+    find_skill_md_recursive(root, &mut hits)?;
+    if hits.is_empty() {
+        anyhow::bail!("downloaded source does not contain SKILL.md");
+    }
+
+    if hits.len() > 1 {
+        anyhow::bail!(
+            "downloaded source contains multiple SKILL.md files; please provide a single-skill archive"
+        );
+    }
+
+    let only = hits.into_iter().next().unwrap();
+    let parent = only
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid SKILL.md path in archive"))?;
+    Ok(parent.to_path_buf())
+}
+
+fn find_skill_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            find_skill_md_recursive(&p, out)?;
+        } else if p.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && !path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+}
+
+fn extract_zip_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)?;
+
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i)?;
+        let Some(raw_name) = f.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        if !is_safe_relative_path(&raw_name) {
+            continue;
+        }
+        let outpath = output_dir.join(raw_name);
+        if f.is_dir() {
+            std::fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&outpath)?;
+            std::io::copy(&mut f, &mut out)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_tar_gz_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
+    let cursor = Cursor::new(bytes);
+    let decoder = flate2::read::GzDecoder::new(cursor);
+    let mut archive = tar::Archive::new(decoder);
+    unpack_tar_archive(&mut archive, output_dir)
+}
+
+fn extract_tar_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = tar::Archive::new(cursor);
+    unpack_tar_archive(&mut archive, output_dir)
+}
+
+fn unpack_tar_archive<R: std::io::Read>(archive: &mut tar::Archive<R>, output_dir: &Path) -> Result<()> {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        if !is_safe_relative_path(&path) {
+            continue;
+        }
+        let outpath = output_dir.join(path);
+        if let Some(parent) = outpath.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        entry.unpack(&outpath)?;
+    }
+    Ok(())
 }
 
 fn parse_skill_frontmatter(raw: &str) -> Result<InstallSkillFrontmatter> {

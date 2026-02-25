@@ -21,6 +21,9 @@ console = "0.15"
 serde_json.workspace = true
 libc = "0.2"
 tempfile.workspace = true
+zip = "2"
+tar = "0.4"
+flate2 = "1"
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-memory = { path = "../nanocrab-memory" }
