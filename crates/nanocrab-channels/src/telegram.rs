@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use nanocrab_bus::{EventBus, Topic};
+use nanocrab_schema::BusMessage;
 use nanocrab_gateway::Gateway;
 use nanocrab_schema::{InboundMessage, OutboundMessage};
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, Message, MessageEntityKind};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub struct TelegramAdapter {
@@ -45,14 +48,16 @@ pub struct TelegramBot {
     token: String,
     connector_id: String,
     gateway: Arc<Gateway>,
+    bus: Arc<EventBus>,
 }
 
 impl TelegramBot {
-    pub fn new(token: String, connector_id: String, gateway: Arc<Gateway>) -> Self {
+    pub fn new(token: String, connector_id: String, gateway: Arc<Gateway>, bus: Arc<EventBus>) -> Self {
         Self {
             token,
             connector_id,
             gateway,
+            bus,
         }
     }
 
@@ -60,6 +65,20 @@ impl TelegramBot {
         let bot = Bot::new(&self.token);
         let adapter = Arc::new(TelegramAdapter::new(&self.connector_id));
         let gateway = self.gateway;
+        let bus = self.bus;
+        let connector_id = self.connector_id.clone();
+
+        // Create a bot holder for the delivery listener
+        let bot_holder: Arc<RwLock<Option<Bot>>> = Arc::new(RwLock::new(Some(bot.clone())));
+
+        // Spawn delivery listener for scheduled task announcements
+        let bot_holder_clone = bot_holder.clone();
+        let connector_id_clone = connector_id.clone();
+        tokio::spawn(spawn_delivery_listener(
+            bus,
+            bot_holder_clone,
+            connector_id_clone,
+        ));
 
         let handler = Update::filter_message().endpoint(move |bot: Bot, msg: Message| {
             let adapter = adapter.clone();
@@ -149,6 +168,69 @@ pub fn detect_mention(msg: &Message) -> (bool, Option<String>) {
     }
 
     (false, None)
+}
+
+/// Spawn a listener for DeliverAnnounce messages (for scheduled task delivery)
+async fn spawn_delivery_listener(
+    bus: Arc<EventBus>,
+    bot_holder: Arc<RwLock<Option<Bot>>>,
+    connector_id: String,
+) {
+    let mut rx = bus.subscribe(Topic::DeliverAnnounce).await;
+    while let Some(msg) = rx.recv().await {
+        let BusMessage::DeliverAnnounce {
+            channel_type,
+            connector_id: msg_connector_id,
+            conversation_scope,
+            text,
+        } = msg
+        else {
+            continue;
+        };
+
+        // Only handle messages for this connector
+        if channel_type != "telegram" || msg_connector_id != connector_id {
+            continue;
+        }
+
+        // Get bot client
+        let bot = {
+            let holder = bot_holder.read().await;
+            holder.clone()
+        };
+
+        let Some(bot) = bot else {
+            tracing::warn!("Telegram bot not ready for delivery");
+            continue;
+        };
+
+        // Parse chat ID from conversation_scope (format: "chat:123")
+        let Some(chat_id) = parse_chat_id(&conversation_scope) else {
+            tracing::warn!(
+                "Could not parse chat ID from conversation_scope: {}",
+                conversation_scope
+            );
+            continue;
+        };
+
+        let chat = ChatId(chat_id);
+        if let Err(e) = bot.send_message(chat, &text).await {
+            tracing::error!("Failed to deliver announce message to Telegram: {e}");
+        } else {
+            tracing::info!("Delivered scheduled task result to Telegram chat {}", chat_id);
+        }
+    }
+}
+
+/// Parse chat ID from conversation_scope (format: "chat:123" or "chat:-100123")
+fn parse_chat_id(conversation_scope: &str) -> Option<i64> {
+    let parts: Vec<&str> = conversation_scope.split(':').collect();
+    if parts.len() >= 2 && parts[0] == "chat" {
+        // Handle negative IDs (group chats start with -)
+        parts[1..].join(":").parse().ok()
+    } else {
+        None
+    }
 }
 
 fn utf16_range_to_byte_range(text: &str, offset: usize, length: usize) -> Option<(usize, usize)> {

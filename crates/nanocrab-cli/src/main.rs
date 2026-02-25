@@ -964,6 +964,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                     token,
                     connector.connector_id.clone(),
                     gateway.clone(),
+                    bus.clone(),
                 )));
             }
         }
