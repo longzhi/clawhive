@@ -43,6 +43,7 @@ pub struct Orchestrator {
     personas: HashMap<String, Persona>,
     session_mgr: SessionManager,
     skill_registry: SkillRegistry,
+    skills_root: std::path::PathBuf,
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     runtime: Arc<dyn TaskExecutor>,
@@ -143,6 +144,7 @@ impl Orchestrator {
             agents: agents_map,
             personas,
             session_mgr,
+            skills_root: workspace_root.join("skills"),
             skill_registry,
             memory,
             bus,
@@ -166,6 +168,27 @@ impl Orchestrator {
             .get(agent_id)
             .map(|ws| ws.workspace.root().to_path_buf())
             .unwrap_or_else(|| self.default_workspace_root.clone())
+    }
+
+    fn active_skill_registry(&self) -> SkillRegistry {
+        SkillRegistry::load_from_dir(&self.skills_root).unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to reload skills from {}: {e}",
+                self.skills_root.display()
+            );
+            self.skill_registry.clone()
+        })
+    }
+
+    fn forced_skill_name(input: &str) -> Option<String> {
+        let trimmed = input.trim();
+        let rest = trimmed.strip_prefix("/skill ")?;
+        let name = rest.split_whitespace().next()?.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
     }
 
     fn build_runtime_system_prompt(&self, agent_id: &str, base_prompt: String) -> String {
@@ -277,11 +300,28 @@ impl Orchestrator {
             .get(agent_id)
             .map(|p| p.assembled_system_prompt())
             .unwrap_or_default();
-        let skill_summary = self.skill_registry.summary_prompt();
-        let system_prompt = if skill_summary.is_empty() {
+        let active_skills = self.active_skill_registry();
+        let skill_summary = active_skills.summary_prompt();
+        let mut system_prompt = if skill_summary.is_empty() {
             system_prompt
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
+        };
+        let forced_skill = Self::forced_skill_name(&inbound.text);
+        let merged_permissions = if let Some(ref forced) = forced_skill {
+            if let Some(skill) = active_skills.get(forced) {
+                system_prompt.push_str(&format!(
+                    "\n\n## Forced Skill\nYou must follow skill '{forced}' for this request and prioritize its instructions over generic approaches."
+                ));
+                skill.permissions.as_ref().map(|p| p.to_corral_permissions())
+            } else {
+                system_prompt.push_str(&format!(
+                    "\n\n## Forced Skill\nUser requested skill '{forced}', but it was not found in loaded skills. Tell the user explicitly."
+                ));
+                active_skills.merged_permissions()
+            }
+        } else {
+            active_skills.merged_permissions()
         };
         let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
 
@@ -330,6 +370,7 @@ impl Orchestrator {
                 messages,
                 2048,
                 allowed.as_deref(),
+                merged_permissions,
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
@@ -426,11 +467,28 @@ impl Orchestrator {
             .get(agent_id)
             .map(|p| p.assembled_system_prompt())
             .unwrap_or_default();
-        let skill_summary = self.skill_registry.summary_prompt();
-        let system_prompt = if skill_summary.is_empty() {
+        let active_skills = self.active_skill_registry();
+        let skill_summary = active_skills.summary_prompt();
+        let mut system_prompt = if skill_summary.is_empty() {
             system_prompt
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
+        };
+        let forced_skill = Self::forced_skill_name(&inbound.text);
+        let merged_permissions = if let Some(ref forced) = forced_skill {
+            if let Some(skill) = active_skills.get(forced) {
+                system_prompt.push_str(&format!(
+                    "\n\n## Forced Skill\nYou must follow skill '{forced}' for this request and prioritize its instructions over generic approaches."
+                ));
+                skill.permissions.as_ref().map(|p| p.to_corral_permissions())
+            } else {
+                system_prompt.push_str(&format!(
+                    "\n\n## Forced Skill\nUser requested skill '{forced}', but it was not found in loaded skills. Tell the user explicitly."
+                ));
+                active_skills.merged_permissions()
+            }
+        } else {
+            active_skills.merged_permissions()
         };
         let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
 
@@ -479,6 +537,7 @@ impl Orchestrator {
                 messages,
                 2048,
                 allowed_stream.as_deref(),
+                merged_permissions,
             )
             .await?;
 
@@ -531,6 +590,7 @@ impl Orchestrator {
         initial_messages: Vec<LlmMessage>,
         max_tokens: u32,
         allowed_tools: Option<&[String]>,
+        merged_permissions: Option<corral_core::Permissions>,
     ) -> Result<(nanocrab_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
         let tool_defs: Vec<_> = match allowed_tools {
@@ -577,8 +637,8 @@ impl Orchestrator {
 
             let mut tool_results = Vec::new();
             let recent_messages = collect_recent_messages(&messages, 20);
-            let ctx = match self.skill_registry.merged_permissions() {
-                Some(perms) => ToolContext::new(corral_core::PolicyEngine::new(perms)),
+            let ctx = match merged_permissions.as_ref() {
+                Some(perms) => ToolContext::new(corral_core::PolicyEngine::new(perms.clone())),
                 None => ToolContext::default_policy(&self.workspace_root),
             }
             .with_recent_messages(recent_messages);
