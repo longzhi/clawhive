@@ -387,7 +387,7 @@ impl Orchestrator {
                         at: chrono::Utc::now(),
                     });
                 }
-                super::slash_commands::SlashCommand::Reset { model_hint } => {
+                super::slash_commands::SlashCommand::New { model_hint } => {
                     // Reset the session: clear history and start fresh
                     let _ = self.session_mgr.reset(&session_key).await;
                     let _ = self.session_writer_for(agent_id).clear_session(&session_key.0).await;
@@ -404,17 +404,6 @@ impl Orchestrator {
                     return self
                         .handle_post_reset_flow(inbound, agent_id, agent, &session_key, &post_reset_prompt)
                         .await;
-                }
-                super::slash_commands::SlashCommand::Compact => {
-                    // Placeholder for compact command
-                    return Ok(OutboundMessage {
-                        trace_id: inbound.trace_id,
-                        channel_type: inbound.channel_type,
-                        connector_id: inbound.connector_id,
-                        conversation_scope: inbound.conversation_scope,
-                        text: "⚠️ Compaction is not yet implemented.".to_string(),
-                        at: chrono::Utc::now(),
-                    });
                 }
             }
         }

@@ -9,13 +9,11 @@ use chrono::Utc;
 /// Parsed slash command from user input
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
-    /// /reset or /new - Start a fresh session
+    /// /new - Start a fresh session
     /// Optional model hint (e.g., "/new opus")
-    Reset { model_hint: Option<String> },
+    New { model_hint: Option<String> },
     /// /model - Show current model info
     Model,
-    /// /compact - Request context compaction (placeholder for future)
-    Compact,
     /// /status - Show session status
     Status,
 }
@@ -46,12 +44,11 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
     let rest: Vec<&str> = parts.collect();
 
     match cmd.to_lowercase().as_str() {
-        "/reset" | "/new" => {
+        "/new" => {
             let model_hint = rest.first().map(|s| s.to_string());
-            Some(SlashCommand::Reset { model_hint })
+            Some(SlashCommand::New { model_hint })
         }
         "/model" => Some(SlashCommand::Model),
-        "/compact" => Some(SlashCommand::Compact),
         "/status" => Some(SlashCommand::Status),
         _ => None,
     }
@@ -97,24 +94,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_reset_command() {
-        assert_eq!(
-            parse_command("/reset"),
-            Some(SlashCommand::Reset { model_hint: None })
-        );
+    fn parse_new_command() {
         assert_eq!(
             parse_command("/new"),
-            Some(SlashCommand::Reset { model_hint: None })
+            Some(SlashCommand::New { model_hint: None })
         );
         assert_eq!(
             parse_command("/new opus"),
-            Some(SlashCommand::Reset {
+            Some(SlashCommand::New {
                 model_hint: Some("opus".to_string())
             })
         );
         assert_eq!(
-            parse_command("  /reset  sonnet  "),
-            Some(SlashCommand::Reset {
+            parse_command("  /new  sonnet  "),
+            Some(SlashCommand::New {
                 model_hint: Some("sonnet".to_string())
             })
         );
@@ -132,16 +125,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_compact_command() {
-        assert_eq!(parse_command("/compact"), Some(SlashCommand::Compact));
-    }
-
-    #[test]
     fn parse_not_a_command() {
         assert_eq!(parse_command("hello"), None);
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("not a /command"), None);
         assert_eq!(parse_command("/unknown"), None);
+        assert_eq!(parse_command("/reset"), None); // /reset not supported
     }
 
     #[test]
