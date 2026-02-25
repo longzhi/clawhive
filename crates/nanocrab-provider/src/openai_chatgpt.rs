@@ -49,7 +49,7 @@ impl OpenAiChatGptProvider {
                         tool_type: "function".to_string(),
                         name: t.name.clone(),
                         description: Some(t.description.clone()),
-                        input_schema: Some(t.input_schema.clone()),
+                        parameters: Some(t.input_schema.clone()),
                     })
                     .collect(),
             )
@@ -530,7 +530,7 @@ pub(crate) struct ResponsesTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_schema: Option<serde_json::Value>,
+    pub parameters: Option<serde_json::Value>,
 }
 
 // ============ Response Types ============
@@ -812,6 +812,10 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "get_weather");
         assert_eq!(payload.tool_choice, Some("auto".to_string()));
+        
+        // Debug: print the actual JSON
+        let json = serde_json::to_string_pretty(&tools).unwrap();
+        println!("Tools JSON:\n{}", json);
     }
 
     #[test]
