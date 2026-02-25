@@ -179,10 +179,59 @@ impl ToolExecutor for ScheduleTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "add", "update", "remove", "run"] },
-                    "job": { "type": "object" },
-                    "schedule_id": { "type": "string" },
-                    "patch": { "type": "object" }
+                    "action": { 
+                        "type": "string", 
+                        "enum": ["list", "add", "update", "remove", "run"],
+                        "description": "Action to perform"
+                    },
+                    "job": { 
+                        "type": "object",
+                        "description": "Job definition (required for 'add' action)",
+                        "properties": {
+                            "name": { 
+                                "type": "string",
+                                "description": "Human-readable name for the schedule"
+                            },
+                            "schedule": {
+                                "type": "object",
+                                "description": "When to run. Use {kind:'at', at:'2m'} for relative time, {kind:'at', at:'2026-02-25T10:00:00Z'} for absolute, {kind:'cron', expr:'0 9 * * *', tz:'UTC'} for recurring",
+                                "properties": {
+                                    "kind": { "type": "string", "enum": ["at", "cron", "every"] },
+                                    "at": { "type": "string", "description": "For kind='at': relative (2m, 1h) or ISO timestamp" },
+                                    "expr": { "type": "string", "description": "For kind='cron': cron expression" },
+                                    "tz": { "type": "string", "description": "For kind='cron': timezone (default UTC)" },
+                                    "interval_ms": { "type": "number", "description": "For kind='every': interval in milliseconds" }
+                                },
+                                "required": ["kind"]
+                            },
+                            "task": { 
+                                "type": "string",
+                                "description": "The task/reminder text to deliver"
+                            },
+                            "session_mode": { 
+                                "type": "string", 
+                                "enum": ["isolated", "main"],
+                                "description": "Session mode (default: isolated)"
+                            },
+                            "delete_after_run": { 
+                                "type": "boolean",
+                                "description": "Delete schedule after first run (default: false)"
+                            },
+                            "context_messages": {
+                                "type": "number",
+                                "description": "Number of recent messages to include as context (0-10)"
+                            }
+                        },
+                        "required": ["name", "schedule", "task"]
+                    },
+                    "schedule_id": { 
+                        "type": "string",
+                        "description": "Schedule ID (required for update/remove/run actions)"
+                    },
+                    "patch": { 
+                        "type": "object",
+                        "description": "Partial update for 'update' action"
+                    }
                 },
                 "required": ["action"]
             }),
