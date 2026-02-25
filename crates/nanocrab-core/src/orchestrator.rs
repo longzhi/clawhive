@@ -42,6 +42,8 @@ pub struct Orchestrator {
     agents: HashMap<String, FullAgentConfig>,
     personas: HashMap<String, Persona>,
     session_mgr: SessionManager,
+    session_locks: super::session_lock::SessionLockManager,
+    context_manager: super::context::ContextManager,
     skill_registry: SkillRegistry,
     skills_root: std::path::PathBuf,
     memory: Arc<MemoryStore>,
@@ -140,10 +142,15 @@ impl Orchestrator {
         }
 
         Self {
-            router,
+            router: router.clone(),
             agents: agents_map,
             personas,
             session_mgr,
+            session_locks: super::session_lock::SessionLockManager::with_global_limit(10),
+            context_manager: super::context::ContextManager::new(
+                router.clone(),
+                super::context::ContextConfig::default(),
+            ),
             skills_root: workspace_root.join("skills"),
             skill_registry,
             memory,
@@ -357,6 +364,9 @@ impl Orchestrator {
 
         let session_key = SessionKey::from_inbound(&inbound);
 
+        // Acquire per-session lock to prevent concurrent modifications
+        let _session_guard = self.session_locks.acquire(&session_key.0).await;
+
         // Handle slash commands before LLM
         if let Some(cmd) = super::slash_commands::parse_command(&inbound.text) {
             match cmd {
@@ -468,15 +478,26 @@ impl Orchestrator {
         } else {
             None
         };
-        let system_prompt = self.build_runtime_system_prompt(
-            agent_id,
-            &agent.model_policy.primary,
-            system_prompt,
-        );
 
         let memory_context = self
             .build_memory_context(agent_id, &session_key, &inbound.text)
             .await?;
+
+        // Build system prompt with memory context injected (not fake dialogue)
+        let system_prompt = if memory_context.is_empty() {
+            self.build_runtime_system_prompt(
+                agent_id,
+                &agent.model_policy.primary,
+                system_prompt,
+            )
+        } else {
+            let base_prompt = self.build_runtime_system_prompt(
+                agent_id,
+                &agent.model_policy.primary,
+                system_prompt,
+            );
+            format!("{base_prompt}\n\n## Relevant Memory\n{memory_context}")
+        };
 
         let history_messages = match self
             .session_reader_for(agent_id)
@@ -490,13 +511,8 @@ impl Orchestrator {
             }
         };
 
+        // Build messages from history (no fake memory dialogue)
         let mut messages = Vec::new();
-        if !memory_context.is_empty() {
-            messages.push(LlmMessage::user(format!(
-                "[memory context]\n{memory_context}"
-            )));
-            messages.push(LlmMessage::assistant("Understood, I have the context."));
-        }
         for hist_msg in &history_messages {
             messages.push(LlmMessage {
                 role: hist_msg.role.clone(),
@@ -532,6 +548,9 @@ impl Orchestrator {
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
+
+        // Check for NO_REPLY suppression
+        let reply_text = filter_no_reply(&reply_text);
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
@@ -582,6 +601,10 @@ impl Orchestrator {
             .ok_or_else(|| anyhow!("agent not found: {agent_id}"))?;
 
         let session_key = SessionKey::from_inbound(&inbound);
+
+        // Acquire per-session lock to prevent concurrent modifications
+        let _session_guard = self.session_locks.acquire(&session_key.0).await;
+
         let session_result = self
             .session_mgr
             .get_or_create(&session_key, agent_id)
@@ -640,15 +663,26 @@ impl Orchestrator {
         } else {
             None
         };
-        let system_prompt = self.build_runtime_system_prompt(
-            agent_id,
-            &agent.model_policy.primary,
-            system_prompt,
-        );
 
         let memory_context = self
             .build_memory_context(agent_id, &session_key, &inbound.text)
             .await?;
+
+        // Build system prompt with memory context injected (stream variant)
+        let system_prompt = if memory_context.is_empty() {
+            self.build_runtime_system_prompt(
+                agent_id,
+                &agent.model_policy.primary,
+                system_prompt,
+            )
+        } else {
+            let base_prompt = self.build_runtime_system_prompt(
+                agent_id,
+                &agent.model_policy.primary,
+                system_prompt,
+            );
+            format!("{base_prompt}\n\n## Relevant Memory\n{memory_context}")
+        };
 
         let history_messages = match self
             .session_reader_for(agent_id)
@@ -662,13 +696,8 @@ impl Orchestrator {
             }
         };
 
+        // Build messages from history (no fake memory dialogue, stream variant)
         let mut messages = Vec::new();
-        if !memory_context.is_empty() {
-            messages.push(LlmMessage::user(format!(
-                "[memory context]\n{memory_context}"
-            )));
-            messages.push(LlmMessage::assistant("Understood, I have the context."));
-        }
         for hist_msg in &history_messages {
             messages.push(LlmMessage {
                 role: hist_msg.role.clone(),
@@ -769,6 +798,21 @@ impl Orchestrator {
         let max_iterations = 10;
 
         for _iteration in 0..max_iterations {
+            // Check if we need to compact context
+            let (compacted_messages, compaction_result) = self
+                .context_manager
+                .ensure_within_limits(primary, messages)
+                .await?;
+            messages = compacted_messages;
+
+            if let Some(ref result) = compaction_result {
+                tracing::info!(
+                    "Auto-compacted {} messages, saved {} tokens",
+                    result.compacted_count,
+                    result.tokens_saved
+                );
+            }
+
             let req = LlmRequest {
                 model: primary.into(),
                 system: system.clone(),
@@ -799,7 +843,6 @@ impl Orchestrator {
                 content: resp.content.clone(),
             });
 
-            let mut tool_results = Vec::new();
             let recent_messages = collect_recent_messages(&messages, 20);
             // Build tool context based on whether we have skill permissions
             // - With permissions: external skill context (sandboxed)
@@ -814,24 +857,34 @@ impl Orchestrator {
             } else {
                 ctx
             };
-            for (id, name, input) in tool_uses {
-                let result = match self
-                    .execute_tool_for_agent(agent_id, &name, input, &ctx)
-                    .await
-                {
-                    Ok(output) => ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: output.content,
-                        is_error: output.is_error,
-                    },
-                    Err(e) => ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: format!("Tool execution error: {e}"),
-                        is_error: true,
-                    },
-                };
-                tool_results.push(result);
-            }
+
+            // Execute tools in parallel
+            let tool_futures: Vec<_> = tool_uses
+                .into_iter()
+                .map(|(id, name, input)| {
+                    let ctx = ctx.clone();
+                    let agent_id = agent_id.to_string();
+                    async move {
+                        match self
+                            .execute_tool_for_agent(&agent_id, &name, input, &ctx)
+                            .await
+                        {
+                            Ok(output) => ContentBlock::ToolResult {
+                                tool_use_id: id,
+                                content: output.content,
+                                is_error: output.is_error,
+                            },
+                            Err(e) => ContentBlock::ToolResult {
+                                tool_use_id: id,
+                                content: format!("Tool execution error: {e}"),
+                                is_error: true,
+                            },
+                        }
+                    }
+                })
+                .collect();
+
+            let tool_results = futures::future::join_all(tool_futures).await;
 
             messages.push(LlmMessage {
                 role: "user".into(),
@@ -960,6 +1013,7 @@ impl Orchestrator {
             .await?;
 
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
+        let reply_text = filter_no_reply(&reply_text);
 
         // Record the assistant's response in the fresh session
         if let Err(e) = self
@@ -1068,6 +1122,36 @@ impl Orchestrator {
             _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
+}
+
+/// Filter NO_REPLY responses.
+/// Returns empty string if the response is just "NO_REPLY" (with optional whitespace).
+/// Also strips leading/trailing "NO_REPLY" from responses.
+fn filter_no_reply(text: &str) -> String {
+    let trimmed = text.trim();
+
+    // Exact match
+    if trimmed == "NO_REPLY" || trimmed == "HEARTBEAT_OK" {
+        return String::new();
+    }
+
+    // Strip from beginning or end
+    let text = trimmed
+        .strip_prefix("NO_REPLY")
+        .unwrap_or(trimmed)
+        .strip_suffix("NO_REPLY")
+        .unwrap_or(trimmed)
+        .trim();
+
+    // Also handle HEARTBEAT_OK
+    let text = text
+        .strip_prefix("HEARTBEAT_OK")
+        .unwrap_or(text)
+        .strip_suffix("HEARTBEAT_OK")
+        .unwrap_or(text)
+        .trim();
+
+    text.to_string()
 }
 
 fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {

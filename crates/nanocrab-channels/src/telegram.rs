@@ -101,8 +101,27 @@ impl TelegramBot {
 
                 let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
 
+                let bot_typing = bot.clone();
                 tokio::spawn(async move {
-                    match gateway.handle_inbound(inbound).await {
+                    // Spawn a task to keep typing indicator alive
+                    let typing_handle = tokio::spawn({
+                        let bot = bot_typing.clone();
+                        async move {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                                if bot.send_chat_action(chat_id, ChatAction::Typing).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+
+                    let result = gateway.handle_inbound(inbound).await;
+                    
+                    // Stop typing indicator
+                    typing_handle.abort();
+
+                    match result {
                         Ok(outbound) => {
                             if let Err(err) = bot.send_message(chat_id, outbound.text).await {
                                 tracing::error!("failed to send reply: {err}");

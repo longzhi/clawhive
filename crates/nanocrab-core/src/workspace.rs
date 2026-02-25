@@ -65,9 +65,44 @@ impl Workspace {
         self.root.join("index.db")
     }
 
-    /// Directory for custom prompt overrides (`prompts/`).
+    /// Directory for prompt/persona files (`prompts/`).
     pub fn prompts_dir(&self) -> PathBuf {
         self.root.join("prompts")
+    }
+
+    /// Path to AGENTS.md (operating instructions).
+    pub fn agents_md(&self) -> PathBuf {
+        self.prompts_dir().join("AGENTS.md")
+    }
+
+    /// Path to SOUL.md (personality/vibe).
+    pub fn soul_md(&self) -> PathBuf {
+        self.prompts_dir().join("SOUL.md")
+    }
+
+    /// Path to USER.md (user information).
+    pub fn user_md(&self) -> PathBuf {
+        self.prompts_dir().join("USER.md")
+    }
+
+    /// Path to IDENTITY.md (agent identity).
+    pub fn identity_md(&self) -> PathBuf {
+        self.prompts_dir().join("IDENTITY.md")
+    }
+
+    /// Path to TOOLS.md (environment notes).
+    pub fn tools_md(&self) -> PathBuf {
+        self.prompts_dir().join("TOOLS.md")
+    }
+
+    /// Path to HEARTBEAT.md (periodic tasks).
+    pub fn heartbeat_md(&self) -> PathBuf {
+        self.prompts_dir().join("HEARTBEAT.md")
+    }
+
+    /// Path to BOOTSTRAP.md (first-run guide, deleted after setup).
+    pub fn bootstrap_md(&self) -> PathBuf {
+        self.prompts_dir().join("BOOTSTRAP.md")
     }
 
     /// Create required directories if they don't exist.
@@ -75,7 +110,45 @@ impl Workspace {
         tokio::fs::create_dir_all(&self.root).await?;
         tokio::fs::create_dir_all(self.memory_dir()).await?;
         tokio::fs::create_dir_all(self.sessions_dir()).await?;
+        tokio::fs::create_dir_all(self.prompts_dir()).await?;
         Ok(())
+    }
+
+    /// Initialize workspace with default prompt files if they don't exist.
+    /// Returns true if this is a new workspace (BOOTSTRAP.md was created).
+    pub async fn init_with_defaults(&self) -> Result<bool> {
+        use crate::templates;
+        
+        self.ensure_dirs().await?;
+        
+        let mut is_new = false;
+        
+        // Create prompt files if they don't exist
+        let files = [
+            (self.agents_md(), templates::AGENTS_MD),
+            (self.soul_md(), templates::SOUL_MD),
+            (self.user_md(), templates::USER_MD),
+            (self.identity_md(), templates::IDENTITY_MD),
+            (self.tools_md(), templates::TOOLS_MD),
+            (self.heartbeat_md(), templates::HEARTBEAT_MD),
+        ];
+        
+        for (path, content) in files {
+            if !path.exists() {
+                tokio::fs::write(&path, content).await?;
+            }
+        }
+        
+        // BOOTSTRAP.md is special - only create for truly new workspaces
+        // and it should be deleted after first run
+        let bootstrap_path = self.bootstrap_md();
+        if !bootstrap_path.exists() && !self.long_term_memory().exists() {
+            // No BOOTSTRAP.md and no MEMORY.md = new workspace
+            tokio::fs::write(&bootstrap_path, templates::BOOTSTRAP_MD).await?;
+            is_new = true;
+        }
+        
+        Ok(is_new)
     }
 }
 
@@ -117,6 +190,9 @@ mod tests {
         assert_eq!(ws.long_term_memory(), PathBuf::from("/home/agent/MEMORY.md"));
         assert_eq!(ws.index_db_path(), PathBuf::from("/home/agent/index.db"));
         assert_eq!(ws.prompts_dir(), PathBuf::from("/home/agent/prompts"));
+        assert_eq!(ws.agents_md(), PathBuf::from("/home/agent/prompts/AGENTS.md"));
+        assert_eq!(ws.soul_md(), PathBuf::from("/home/agent/prompts/SOUL.md"));
+        assert_eq!(ws.heartbeat_md(), PathBuf::from("/home/agent/prompts/HEARTBEAT.md"));
     }
 
     #[tokio::test]

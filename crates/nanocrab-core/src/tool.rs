@@ -33,6 +33,7 @@ pub struct ConversationMessage {
 /// - Policy context for permission checks (builtin vs external)
 /// - Recent conversation messages for context-aware tools
 /// - Source channel information for routing responses
+#[derive(Clone)]
 pub struct ToolContext {
     /// Policy context determines permission behavior
     policy_ctx: PolicyContext,

@@ -65,12 +65,19 @@ impl LlmProvider for ThinkingEchoProvider {
 #[async_trait]
 impl LlmProvider for TranscriptProvider {
     async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
-        let text = request
+        // Include system prompt in output for testing
+        let system_part = request
+            .system
+            .as_ref()
+            .map(|s| format!("[system] {}\n\n", s))
+            .unwrap_or_default();
+        let messages_part = request
             .messages
             .iter()
             .map(|m| format!("[{}] {}", m.role, m.text()))
             .collect::<Vec<_>>()
             .join("\n\n");
+        let text = format!("{system_part}{messages_part}");
         Ok(LlmResponse {
             text: text.clone(),
             content: vec![ContentBlock::Text { text }],

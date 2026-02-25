@@ -557,7 +557,7 @@ fn bootstrap(
 
     let router = build_router_from_config(&config);
 
-    let prompts_root = root.join("prompts");
+    // Load personas from workspace directories (OpenClaw-style)
     let mut personas = HashMap::new();
     for agent_config in &config.agents {
         let identity = agent_config.identity.as_ref();
@@ -565,7 +565,15 @@ fn bootstrap(
             .map(|i| i.name.as_str())
             .unwrap_or(&agent_config.agent_id);
         let emoji = identity.and_then(|i| i.emoji.as_deref());
-        match load_persona(&prompts_root, &agent_config.agent_id, name, emoji) {
+        
+        // Resolve workspace path
+        let workspace = Workspace::resolve(
+            root,
+            &agent_config.agent_id,
+            agent_config.workspace.as_deref(),
+        );
+        
+        match load_persona_from_workspace(workspace.root(), &agent_config.agent_id, name, emoji) {
             Ok(persona) => {
                 personas.insert(agent_config.agent_id.clone(), persona);
             }

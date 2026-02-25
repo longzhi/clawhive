@@ -174,8 +174,27 @@ impl EventHandler for DiscordHandler {
 
         let gateway = self.gateway.clone();
         let http = ctx.http.clone();
+        let http_typing = ctx.http.clone();
         tokio::spawn(async move {
-            match gateway.handle_inbound(inbound).await {
+            // Spawn a task to keep typing indicator alive
+            let typing_handle = tokio::spawn({
+                let http = http_typing.clone();
+                async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                        if channel_id.broadcast_typing(&http).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let result = gateway.handle_inbound(inbound).await;
+            
+            // Stop typing indicator
+            typing_handle.abort();
+
+            match result {
                 Ok(outbound) => {
                     if let Err(err) = channel_id.say(&http, outbound.text).await {
                         tracing::error!("failed to send discord reply: {err}");

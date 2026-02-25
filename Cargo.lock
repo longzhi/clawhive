@@ -2024,6 +2024,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "corral-core",
+ "futures",
  "futures-core",
  "htmd",
  "nanocrab-bus",
