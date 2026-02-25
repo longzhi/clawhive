@@ -10,17 +10,38 @@ fn validate_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
     if requested.is_empty() {
         return Err(anyhow!("path must not be empty"));
     }
-    let ws_canon = workspace.canonicalize()?;
+    
+    tracing::debug!(
+        "validate_path: workspace={}, requested={}",
+        workspace.display(),
+        requested
+    );
+    
+    let ws_canon = match workspace.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to canonicalize workspace {}: {}",
+                workspace.display(),
+                e
+            );
+            return Err(anyhow!("workspace path error: {}", e));
+        }
+    };
+    
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
     } else {
         ws_canon.join(requested)
     };
+    
+    tracing::debug!("validate_path: candidate={}", candidate.display());
 
     if let Ok(resolved) = candidate.canonicalize() {
         if !resolved.starts_with(&ws_canon) {
             return Err(anyhow!("path escapes workspace: {}", requested));
         }
+        tracing::debug!("validate_path: resolved={}", resolved.display());
         return Ok(resolved);
     }
 
