@@ -728,9 +728,11 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     aliases
         .entry("opus".to_string())
         .or_insert_with(|| "anthropic/claude-opus-4-6".to_string());
+    // Use gpt-5.3-codex for ChatGPT OAuth compatibility (Codex Responses API)
+    // gpt-4o-mini and other non-Codex models are not supported via ChatGPT OAuth
     aliases
         .entry("gpt".to_string())
-        .or_insert_with(|| "openai/gpt-4o-mini".to_string());
+        .or_insert_with(|| "openai/gpt-5.3-codex".to_string());
 
     let mut global_fallbacks = Vec::new();
     if registry.get("openai").is_ok() {
