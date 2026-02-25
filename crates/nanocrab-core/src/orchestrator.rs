@@ -276,13 +276,13 @@ impl Orchestrator {
         ctx: &ToolContext,
     ) -> Result<super::tool::ToolOutput> {
         match name {
-            "read" => ReadFileTool::new(self.workspace_root_for(agent_id))
+            "read" | "read_file" => ReadFileTool::new(self.workspace_root_for(agent_id))
                 .execute(input, ctx)
                 .await,
-            "write" => WriteFileTool::new(self.workspace_root_for(agent_id))
+            "write" | "write_file" => WriteFileTool::new(self.workspace_root_for(agent_id))
                 .execute(input, ctx)
                 .await,
-            "edit" => EditFileTool::new(self.workspace_root_for(agent_id))
+            "edit" | "edit_file" => EditFileTool::new(self.workspace_root_for(agent_id))
                 .execute(input, ctx)
                 .await,
             "exec" | "execute_command" => {
