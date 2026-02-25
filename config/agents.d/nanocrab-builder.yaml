@@ -8,7 +8,7 @@ identity:
 
 model_policy:
   primary: sonnet
-  fallbacks: [haiku]
+  fallbacks: [haiku, gpt-4o-mini]
 
 tool_policy:
   allow: [read, write, edit, exec]

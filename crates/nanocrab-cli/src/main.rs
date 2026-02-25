@@ -728,8 +728,16 @@ fn build_router_from_config(config: &NanocrabConfig) -> LlmRouter {
     aliases
         .entry("opus".to_string())
         .or_insert_with(|| "anthropic/claude-opus-4-6".to_string());
+    aliases
+        .entry("gpt".to_string())
+        .or_insert_with(|| "openai/gpt-4o-mini".to_string());
 
-    LlmRouter::new(registry, aliases, vec![])
+    let mut global_fallbacks = Vec::new();
+    if registry.get("openai").is_ok() {
+        global_fallbacks.push("gpt".to_string());
+    }
+
+    LlmRouter::new(registry, aliases, global_fallbacks)
 }
 
 fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvider> {
