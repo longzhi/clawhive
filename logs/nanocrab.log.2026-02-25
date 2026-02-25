@@ -1,0 +1,16 @@
+2026-02-25T06:41:19.292642Z  WARN nanocrab: Anthropic API key not set, using stub provider
+2026-02-25T06:41:19.292687Z  WARN nanocrab: OpenAI API key not set (env: OPENAI_API_KEY), skipping
+2026-02-25T06:41:19.294320Z  WARN nanocrab: OpenAI embedding API key not set (env: OPENAI_API_KEY), using stub provider
+2026-02-25T06:41:19.298158Z  WARN nanocrab: OpenAI embedding API key not set (env: OPENAI_API_KEY), using stub provider
+2026-02-25T06:41:19.298217Z  WARN nanocrab: Anthropic API key not set, using stub provider
+2026-02-25T06:41:19.298228Z  WARN nanocrab: OpenAI API key not set (env: OPENAI_API_KEY), skipping
+2026-02-25T06:41:19.298298Z  INFO nanocrab: Hippocampus consolidation scheduler started (every 24h)
+2026-02-25T06:41:19.298308Z  WARN nanocrab: Telegram token is empty for connector tg_main, skipping
+2026-02-25T07:01:20.910395Z  WARN nanocrab: Anthropic API key not set, using stub provider
+2026-02-25T07:01:20.910428Z  WARN nanocrab: OpenAI API key not set (env: OPENAI_API_KEY), skipping
+2026-02-25T07:01:20.911080Z  WARN nanocrab: OpenAI embedding API key not set (env: OPENAI_API_KEY), using stub provider
+2026-02-25T07:01:20.915279Z  WARN nanocrab: OpenAI embedding API key not set (env: OPENAI_API_KEY), using stub provider
+2026-02-25T07:01:20.915304Z  WARN nanocrab: Anthropic API key not set, using stub provider
+2026-02-25T07:01:20.915314Z  WARN nanocrab: OpenAI API key not set (env: OPENAI_API_KEY), skipping
+2026-02-25T07:01:20.915334Z  INFO nanocrab: Hippocampus consolidation scheduler started (every 24h)
+2026-02-25T07:01:20.915343Z  WARN nanocrab: Telegram token is empty for connector tg_main, skipping

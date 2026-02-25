@@ -17,3 +17,4 @@ tracing.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 nanocrab-auth = { path = "../nanocrab-auth" }
+uuid = { workspace = true, features = ["v4"] }
