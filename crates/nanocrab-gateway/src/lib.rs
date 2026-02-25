@@ -185,6 +185,42 @@ pub fn spawn_scheduled_task_listener(
                 continue;
             };
 
+            // For simple reminders (Announce mode with source info), deliver task text directly
+            // without running through the agent. This gives users the reminder content they set.
+            let should_direct_deliver = matches!(delivery_mode, ScheduledDeliveryMode::Announce)
+                && source_channel_type.is_some()
+                && source_connector_id.is_some()
+                && source_conversation_scope.is_some();
+
+            if should_direct_deliver {
+                // Direct delivery: just send the task text as-is
+                let ch_type = source_channel_type.clone().unwrap();
+                let conn_id = source_connector_id.clone().unwrap();
+                let conv_scope = source_conversation_scope.clone().unwrap();
+
+                let _ = bus
+                    .publish(BusMessage::DeliverAnnounce {
+                        channel_type: ch_type,
+                        connector_id: conn_id,
+                        conversation_scope: conv_scope,
+                        text: format!("⏰ {}", task),
+                    })
+                    .await;
+
+                let _ = bus
+                    .publish(BusMessage::ScheduledTaskCompleted {
+                        schedule_id,
+                        status: ScheduledRunStatus::Ok,
+                        error: None,
+                        started_at: triggered_at,
+                        ended_at: chrono::Utc::now(),
+                        response: Some(task),
+                    })
+                    .await;
+                continue;
+            }
+
+            // For other cases, run through the agent
             let conversation_scope = match session_mode {
                 ScheduledSessionMode::Isolated => {
                     format!("schedule:{}:{}", schedule_id, Uuid::new_v4())
