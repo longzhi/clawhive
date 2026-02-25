@@ -55,6 +55,8 @@ struct Cli {
 enum Commands {
     #[command(about = "Start all configured channel bots and HTTP API server")]
     Start {
+        #[arg(long, short = 'd', help = "Run as a background daemon")]
+        daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
         #[arg(long, default_value = "3001", help = "HTTP API server port")]
@@ -64,6 +66,8 @@ enum Commands {
     Stop,
     #[command(about = "Restart nanocrab (stop + start)")]
     Restart {
+        #[arg(long, short = 'd', help = "Run as a background daemon")]
+        daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
         #[arg(long, default_value = "3001", help = "HTTP API server port")]
@@ -226,19 +230,27 @@ async fn main() -> Result<()> {
                 config.routing.bindings.len()
             );
         }
-        Commands::Start { tui, port } => {
-            start_bot(&cli.config_root, tui, port).await?;
+        Commands::Start { daemon, tui, port } => {
+            if daemon {
+                daemonize(&cli.config_root, tui, port)?;
+            } else {
+                start_bot(&cli.config_root, tui, port).await?;
+            }
         }
         Commands::Stop => {
             stop_process(&cli.config_root)?;
         }
-        Commands::Restart { tui, port } => {
+        Commands::Restart { daemon, tui, port } => {
             let was_running = stop_process(&cli.config_root)?;
             if was_running {
                 // Brief pause to let ports release
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            start_bot(&cli.config_root, tui, port).await?;
+            if daemon {
+                daemonize(&cli.config_root, tui, port)?;
+            } else {
+                start_bot(&cli.config_root, tui, port).await?;
+            }
         }
         Commands::Chat { agent } => {
             run_repl(&cli.config_root, &agent).await?;
@@ -821,6 +833,41 @@ fn check_and_clean_pid(root: &Path) -> Result<()> {
         tracing::info!("Removing stale PID file (pid: {pid}, process not running)");
         remove_pid_file(root);
     }
+    Ok(())
+}
+
+/// Daemonize nanocrab by forking to background
+fn daemonize(root: &Path, tui: bool, port: u16) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    if tui {
+        anyhow::bail!("Cannot use --daemon with --tui (TUI requires a terminal)");
+    }
+
+    // Get the current executable path
+    let exe = std::env::current_exe()?;
+
+    // Prepare log files
+    let log_dir = root.join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let stdout_log = std::fs::File::create(log_dir.join("daemon.out"))?;
+    let stderr_log = std::fs::File::create(log_dir.join("daemon.err"))?;
+
+    // Spawn the process in background
+    let child = Command::new(&exe)
+        .arg("--config-root")
+        .arg(root)
+        .arg("start")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log))
+        .spawn()?;
+
+    println!("nanocrab started in background (pid: {})", child.id());
+    println!("Logs: {}/daemon.out", log_dir.display());
+
     Ok(())
 }
 
