@@ -180,15 +180,58 @@ impl Orchestrator {
         })
     }
 
-    fn forced_skill_name(input: &str) -> Option<String> {
+    fn forced_skill_names(input: &str) -> Option<Vec<String>> {
         let trimmed = input.trim();
         let rest = trimmed.strip_prefix("/skill ")?;
-        let name = rest.split_whitespace().next()?.trim();
-        if name.is_empty() {
+        let names_part = rest.split_whitespace().next()?.trim();
+        if names_part.is_empty() {
+            return None;
+        }
+
+        let names: Vec<String> = names_part
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        if names.is_empty() {
             None
         } else {
-            Some(name.to_string())
+            Some(names)
         }
+    }
+
+    fn merge_permissions(
+        perms: impl IntoIterator<Item = corral_core::Permissions>,
+    ) -> Option<corral_core::Permissions> {
+        let mut list: Vec<corral_core::Permissions> = perms.into_iter().collect();
+        if list.is_empty() {
+            return None;
+        }
+
+        let mut merged = corral_core::Permissions::default();
+        for p in list.drain(..) {
+            merged.fs.read.extend(p.fs.read);
+            merged.fs.write.extend(p.fs.write);
+            merged.network.allow.extend(p.network.allow);
+            merged.exec.extend(p.exec);
+            merged.env.extend(p.env);
+            merged.services.extend(p.services);
+        }
+
+        merged.fs.read.sort();
+        merged.fs.read.dedup();
+        merged.fs.write.sort();
+        merged.fs.write.dedup();
+        merged.network.allow.sort();
+        merged.network.allow.dedup();
+        merged.exec.sort();
+        merged.exec.dedup();
+        merged.env.sort();
+        merged.env.dedup();
+
+        Some(merged)
     }
 
     fn build_runtime_system_prompt(&self, agent_id: &str, base_prompt: String) -> String {
@@ -307,21 +350,42 @@ impl Orchestrator {
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
         };
-        let forced_skill = Self::forced_skill_name(&inbound.text);
-        let merged_permissions = if let Some(ref forced) = forced_skill {
-            if let Some(skill) = active_skills.get(forced) {
+        let forced_skills = Self::forced_skill_names(&inbound.text);
+        let merged_permissions = if let Some(ref forced_names) = forced_skills {
+            let mut missing = Vec::new();
+            let selected_perms = forced_names
+                .iter()
+                .filter_map(|forced| {
+                    if let Some(skill) = active_skills.get(forced) {
+                        skill.permissions.as_ref().map(|p| p.to_corral_permissions())
+                    } else {
+                        missing.push(forced.clone());
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if forced_names.len() == 1 {
                 system_prompt.push_str(&format!(
-                    "\n\n## Forced Skill\nYou must follow skill '{forced}' for this request and prioritize its instructions over generic approaches."
+                    "\n\n## Forced Skill\nYou must follow skill '{}' for this request and prioritize its instructions over generic approaches.",
+                    forced_names[0]
                 ));
-                skill.permissions.as_ref().map(|p| p.to_corral_permissions())
             } else {
                 system_prompt.push_str(&format!(
-                    "\n\n## Forced Skill\nUser requested skill '{forced}', but it was not found in loaded skills. Tell the user explicitly."
+                    "\n\n## Forced Skill\nYou must follow only these skills for this request: {}. Prioritize their instructions over generic approaches.",
+                    forced_names.join(", ")
                 ));
-                active_skills.merged_permissions()
             }
+            if !missing.is_empty() {
+                system_prompt.push_str(&format!(
+                    "\nMissing forced skills: {}. Tell the user these were not found.",
+                    missing.join(", ")
+                ));
+            }
+
+            Self::merge_permissions(selected_perms)
         } else {
-            active_skills.merged_permissions()
+            None
         };
         let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
 
@@ -474,21 +538,42 @@ impl Orchestrator {
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
         };
-        let forced_skill = Self::forced_skill_name(&inbound.text);
-        let merged_permissions = if let Some(ref forced) = forced_skill {
-            if let Some(skill) = active_skills.get(forced) {
+        let forced_skills = Self::forced_skill_names(&inbound.text);
+        let merged_permissions = if let Some(ref forced_names) = forced_skills {
+            let mut missing = Vec::new();
+            let selected_perms = forced_names
+                .iter()
+                .filter_map(|forced| {
+                    if let Some(skill) = active_skills.get(forced) {
+                        skill.permissions.as_ref().map(|p| p.to_corral_permissions())
+                    } else {
+                        missing.push(forced.clone());
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if forced_names.len() == 1 {
                 system_prompt.push_str(&format!(
-                    "\n\n## Forced Skill\nYou must follow skill '{forced}' for this request and prioritize its instructions over generic approaches."
+                    "\n\n## Forced Skill\nYou must follow skill '{}' for this request and prioritize its instructions over generic approaches.",
+                    forced_names[0]
                 ));
-                skill.permissions.as_ref().map(|p| p.to_corral_permissions())
             } else {
                 system_prompt.push_str(&format!(
-                    "\n\n## Forced Skill\nUser requested skill '{forced}', but it was not found in loaded skills. Tell the user explicitly."
+                    "\n\n## Forced Skill\nYou must follow only these skills for this request: {}. Prioritize their instructions over generic approaches.",
+                    forced_names.join(", ")
                 ));
-                active_skills.merged_permissions()
             }
+            if !missing.is_empty() {
+                system_prompt.push_str(&format!(
+                    "\nMissing forced skills: {}. Tell the user these were not found.",
+                    missing.join(", ")
+                ));
+            }
+
+            Self::merge_permissions(selected_perms)
         } else {
-            active_skills.merged_permissions()
+            None
         };
         let system_prompt = self.build_runtime_system_prompt(agent_id, system_prompt);
 
