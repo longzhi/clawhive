@@ -20,6 +20,7 @@ dialoguer = "0.11"
 console = "0.15"
 serde_json.workspace = true
 libc = "0.2"
+tempfile.workspace = true
 nanocrab-core = { path = "../nanocrab-core" }
 nanocrab-bus = { path = "../nanocrab-bus" }
 nanocrab-memory = { path = "../nanocrab-memory" }

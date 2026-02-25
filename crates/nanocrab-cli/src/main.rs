@@ -129,13 +129,13 @@ enum SkillCommands {
     },
     #[command(about = "Analyze a skill directory before install")]
     Analyze {
-        #[arg(help = "Path to skill directory containing SKILL.md")]
-        source: PathBuf,
+        #[arg(help = "Path to skill directory, or http(s) URL to SKILL.md")]
+        source: String,
     },
     #[command(about = "Install a skill with permission/risk confirmation")]
     Install {
-        #[arg(help = "Path to skill directory containing SKILL.md")]
-        source: PathBuf,
+        #[arg(help = "Path to skill directory, or http(s) URL to SKILL.md")]
+        source: String,
         #[arg(long, help = "Skip confirmation prompts")]
         yes: bool,
     },
@@ -364,13 +364,21 @@ async fn main() -> Result<()> {
                     }
                 },
                 SkillCommands::Analyze { source } => {
-                    let report = analyze_skill_source(&source)?;
+                    let resolved = resolve_skill_source(&source).await?;
+                    let report = analyze_skill_source(resolved.local_path())?;
                     print_skill_analysis(&report);
                 }
                 SkillCommands::Install { source, yes } => {
-                    let report = analyze_skill_source(&source)?;
+                    let resolved = resolve_skill_source(&source).await?;
+                    let report = analyze_skill_source(resolved.local_path())?;
                     print_skill_analysis(&report);
-                    install_skill_with_confirmation(&cli.config_root.join("skills"), &source, &report, yes)?;
+                    install_skill_with_confirmation(
+                        &cli.config_root,
+                        &cli.config_root.join("skills"),
+                        resolved.local_path(),
+                        &report,
+                        yes,
+                    )?;
                 }
             }
         }
@@ -1108,6 +1116,24 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum ResolvedSkillSource {
+    Local(PathBuf),
+    Remote {
+        _temp_dir: tempfile::TempDir,
+        path: PathBuf,
+    },
+}
+
+impl ResolvedSkillSource {
+    fn local_path(&self) -> &Path {
+        match self {
+            Self::Local(p) => p.as_path(),
+            Self::Remote { path, .. } => path.as_path(),
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct InstallSkillFrontmatter {
     name: String,
@@ -1132,6 +1158,68 @@ struct SkillAnalysisReport {
     description: String,
     permissions: Option<SkillPermissions>,
     findings: Vec<SkillRiskFinding>,
+}
+
+async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return download_remote_skill(source).await;
+    }
+
+    let local = PathBuf::from(source);
+    if !local.exists() {
+        anyhow::bail!("skill source does not exist: {}", local.display());
+    }
+    Ok(ResolvedSkillSource::Local(local))
+}
+
+async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
+    const MAX_SKILL_MD_BYTES: usize = 512 * 1024;
+
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => anyhow::bail!("unsupported URL scheme: {s}"),
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+
+    let resp = client.get(parsed.clone()).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("download failed: HTTP {}", resp.status());
+    }
+
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_SKILL_MD_BYTES {
+            anyhow::bail!(
+                "remote SKILL.md too large: {} bytes (limit {})",
+                len,
+                MAX_SKILL_MD_BYTES
+            );
+        }
+    }
+
+    let body = resp.bytes().await?;
+    if body.len() > MAX_SKILL_MD_BYTES {
+        anyhow::bail!(
+            "remote SKILL.md too large: {} bytes (limit {})",
+            body.len(),
+            MAX_SKILL_MD_BYTES
+        );
+    }
+
+    let temp = tempfile::tempdir()?;
+    let skill_dir = temp.path().join("downloaded-skill");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(skill_dir.join("SKILL.md"), &body)?;
+
+    Ok(ResolvedSkillSource::Remote {
+        _temp_dir: temp,
+        path: skill_dir,
+    })
 }
 
 fn parse_skill_frontmatter(raw: &str) -> Result<InstallSkillFrontmatter> {
@@ -1293,6 +1381,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn install_skill_with_confirmation(
+    config_root: &Path,
     skills_root: &Path,
     source: &Path,
     report: &SkillAnalysisReport,
@@ -1332,6 +1421,24 @@ fn install_skill_with_confirmation(
     }
     copy_dir_recursive(source, &target)?;
     println!("Installed skill '{}' to {}", report.skill_name, target.display());
+
+    let audit_dir = config_root.join("logs");
+    std::fs::create_dir_all(&audit_dir)?;
+    let audit_path = audit_dir.join("skill-installs.jsonl");
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "skill": report.skill_name,
+        "target": target,
+        "findings": report.findings.len(),
+        "high_risk": report.findings.iter().any(|f| f.severity == "high" || f.severity == "critical"),
+        "declared_permissions": report.permissions.is_some(),
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)?;
+    writeln!(f, "{}", serde_json::to_string(&event)?)?;
+
     Ok(())
 }
 
