@@ -127,6 +127,18 @@ enum SkillCommands {
         #[arg(help = "Skill name")]
         skill_name: String,
     },
+    #[command(about = "Analyze a skill directory before install")]
+    Analyze {
+        #[arg(help = "Path to skill directory containing SKILL.md")]
+        source: PathBuf,
+    },
+    #[command(about = "Install a skill with permission/risk confirmation")]
+    Install {
+        #[arg(help = "Path to skill directory containing SKILL.md")]
+        source: PathBuf,
+        #[arg(long, help = "Skip confirmation prompts")]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -351,6 +363,15 @@ async fn main() -> Result<()> {
                         anyhow::bail!("skill not found: {skill_name}");
                     }
                 },
+                SkillCommands::Analyze { source } => {
+                    let report = analyze_skill_source(&source)?;
+                    print_skill_analysis(&report);
+                }
+                SkillCommands::Install { source, yes } => {
+                    let report = analyze_skill_source(&source)?;
+                    print_skill_analysis(&report);
+                    install_skill_with_confirmation(&cli.config_root.join("skills"), &source, &report, yes)?;
+                }
             }
         }
         Commands::Session(cmd) => {
@@ -1084,6 +1105,233 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct InstallSkillFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    permissions: Option<SkillPermissions>,
+}
+
+#[derive(Debug)]
+struct SkillRiskFinding {
+    severity: &'static str,
+    file: PathBuf,
+    line: usize,
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Debug)]
+struct SkillAnalysisReport {
+    source: PathBuf,
+    skill_name: String,
+    description: String,
+    permissions: Option<SkillPermissions>,
+    findings: Vec<SkillRiskFinding>,
+}
+
+fn parse_skill_frontmatter(raw: &str) -> Result<InstallSkillFrontmatter> {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with("---") {
+        anyhow::bail!("SKILL.md must start with YAML frontmatter (---)");
+    }
+    let after_first = &trimmed[3..];
+    let end = after_first
+        .find("---")
+        .ok_or_else(|| anyhow::anyhow!("no closing --- for frontmatter"))?;
+    let yaml_str = &after_first[..end];
+    let fm: InstallSkillFrontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| anyhow::anyhow!("invalid frontmatter: {e}"))?;
+    Ok(fm)
+}
+
+fn analyze_skill_source(source: &Path) -> Result<SkillAnalysisReport> {
+    let skill_md = source.join("SKILL.md");
+    if !skill_md.exists() {
+        anyhow::bail!("{} missing SKILL.md", source.display());
+    }
+
+    let raw = std::fs::read_to_string(&skill_md)?;
+    let fm = parse_skill_frontmatter(&raw)?;
+
+    let mut findings = Vec::new();
+    scan_path_recursive(source, &mut findings)?;
+
+    Ok(SkillAnalysisReport {
+        source: source.to_path_buf(),
+        skill_name: fm.name,
+        description: fm.description,
+        permissions: fm.permissions,
+        findings,
+    })
+}
+
+fn scan_path_recursive(dir: &Path, findings: &mut Vec<SkillRiskFinding>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().and_then(|s| s.to_str()) == Some(".git") {
+            continue;
+        }
+        if path.is_dir() {
+            scan_path_recursive(&path, findings)?;
+            continue;
+        }
+
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for (i, line) in text.lines().enumerate() {
+                scan_line(&path, i + 1, line, findings);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scan_line(path: &Path, line_no: usize, line: &str, findings: &mut Vec<SkillRiskFinding>) {
+    let checks: [(&str, &str, &str, &str); 9] = [
+        ("critical", "rm -rf /", "dangerous delete", "Destructive filesystem wipe command"),
+        ("critical", "mkfs", "disk format", "Potential disk formatting command"),
+        ("high", "curl", "remote fetch", "Network fetch command found; verify intent"),
+        ("high", "wget", "remote fetch", "Network fetch command found; verify intent"),
+        ("high", "| sh", "pipe-to-shell", "Piping content to shell can execute untrusted code"),
+        ("high", "base64 -d", "obfuscation", "Potential obfuscated payload decode"),
+        ("high", "sudo ", "privilege escalation", "Privilege escalation command detected"),
+        ("medium", "~/.ssh", "secret path", "Accessing SSH config/key paths"),
+        ("medium", "~/.aws", "secret path", "Accessing cloud credential paths"),
+    ];
+
+    let normalized = line.to_lowercase();
+    for (severity, pattern, reason, detail) in checks {
+        if normalized.contains(&pattern.to_lowercase()) {
+            findings.push(SkillRiskFinding {
+                severity,
+                file: path.to_path_buf(),
+                line: line_no,
+                pattern,
+                reason: detail,
+            });
+            let _ = reason;
+        }
+    }
+}
+
+fn print_permissions_summary(permissions: &SkillPermissions) {
+    println!("Requested permissions:");
+    if !permissions.fs.read.is_empty() {
+        println!("  fs.read: {}", permissions.fs.read.join(", "));
+    }
+    if !permissions.fs.write.is_empty() {
+        println!("  fs.write: {}", permissions.fs.write.join(", "));
+    }
+    if !permissions.network.allow.is_empty() {
+        println!("  network.allow: {}", permissions.network.allow.join(", "));
+    }
+    if !permissions.exec.is_empty() {
+        println!("  exec: {}", permissions.exec.join(", "));
+    }
+    if !permissions.env.is_empty() {
+        println!("  env: {}", permissions.env.join(", "));
+    }
+    if !permissions.services.is_empty() {
+        println!("  services: {}", permissions.services.keys().cloned().collect::<Vec<_>>().join(", "));
+    }
+}
+
+fn print_skill_analysis(report: &SkillAnalysisReport) {
+    println!("Skill source: {}", report.source.display());
+    println!("Skill name: {}", report.skill_name);
+    println!("Description: {}", report.description);
+
+    match &report.permissions {
+        Some(perms) => {
+            println!("Permissions declared in SKILL.md: yes");
+            print_permissions_summary(perms);
+        }
+        None => {
+            println!("Permissions declared in SKILL.md: no");
+            println!("Effective behavior: default deny-first sandbox policy will be used.");
+        }
+    }
+
+    if report.findings.is_empty() {
+        println!("Risk scan: no obvious unsafe patterns found.");
+    } else {
+        println!("Risk scan findings ({}):", report.findings.len());
+        for f in &report.findings {
+            println!(
+                "  [{}] {}:{} pattern='{}' {}",
+                f.severity,
+                f.file.display(),
+                f.line,
+                f.pattern,
+                f.reason
+            );
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn install_skill_with_confirmation(
+    skills_root: &Path,
+    source: &Path,
+    report: &SkillAnalysisReport,
+    yes: bool,
+) -> Result<()> {
+    let target = skills_root.join(&report.skill_name);
+
+    if !yes {
+        if !dialoguer::Confirm::new()
+            .with_prompt("Install this skill with the above permissions/risk profile?")
+            .default(false)
+            .interact()?
+        {
+            println!("Installation cancelled.");
+            return Ok(());
+        }
+
+        let high_risk = report
+            .findings
+            .iter()
+            .any(|f| f.severity == "high" || f.severity == "critical");
+
+        if high_risk {
+            if !dialoguer::Confirm::new()
+                .with_prompt("High-risk patterns detected. Confirm install anyway?")
+                .default(false)
+                .interact()?
+            {
+                println!("Installation cancelled due to risk findings.");
+                return Ok(());
+            }
+        }
+    }
+
+    if target.exists() {
+        std::fs::remove_dir_all(&target)?;
+    }
+    copy_dir_recursive(source, &target)?;
+    println!("Installed skill '{}' to {}", report.skill_name, target.display());
     Ok(())
 }
 
