@@ -234,6 +234,32 @@ impl Orchestrator {
         Some(merged)
     }
 
+    fn forced_allowed_tools(
+        forced_skills: Option<&[String]>,
+        agent_allowed: Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        // In forced skill mode, require shell execution so skill permissions
+        // are enforced by sandbox preflight/policy.
+        let forced_base = if forced_skills.is_some() {
+            Some(vec!["execute_command".to_string()])
+        } else {
+            None
+        };
+
+        match (forced_base, agent_allowed) {
+            (Some(base), Some(agent)) => {
+                let filtered: Vec<String> = base
+                    .into_iter()
+                    .filter(|t| agent.iter().any(|a| a == t))
+                    .collect();
+                Some(filtered)
+            }
+            (Some(base), None) => Some(base),
+            (None, Some(agent)) => Some(agent),
+            (None, None) => None,
+        }
+    }
+
     fn build_runtime_system_prompt(&self, agent_id: &str, base_prompt: String) -> String {
         let workspace_root = self.workspace_root_for(agent_id);
         format!(
@@ -424,7 +450,10 @@ impl Orchestrator {
             self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
-        let allowed = agent.tool_policy.as_ref().map(|tp| tp.allow.clone());
+        let allowed = Self::forced_allowed_tools(
+            forced_skills.as_deref(),
+            agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
+        );
         let (resp, _messages) = self
             .tool_use_loop(
                 agent_id,
@@ -612,7 +641,10 @@ impl Orchestrator {
             self.runtime.preprocess_input(&inbound.text).await?,
         ));
 
-        let allowed_stream = agent.tool_policy.as_ref().map(|tp| tp.allow.clone());
+        let allowed_stream = Self::forced_allowed_tools(
+            forced_skills.as_deref(),
+            agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
+        );
         let (_resp, final_messages) = self
             .tool_use_loop(
                 agent_id,
