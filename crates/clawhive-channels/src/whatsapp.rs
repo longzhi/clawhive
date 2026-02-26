@@ -122,7 +122,10 @@ pub async fn start_whatsapp(
 
                         match gateway.handle_inbound(inbound).await {
                             Ok(outbound) => {
-                                tracing::debug!("WhatsApp reply: {}", adapter.render_outbound(&outbound));
+                                tracing::debug!(
+                                    "WhatsApp reply: {}",
+                                    adapter.render_outbound(&outbound)
+                                );
                                 // TODO: send reply via client
                                 // client.send_text_message(chat_jid, &outbound.text).await
                             }
@@ -181,7 +184,10 @@ async fn spawn_action_listener(bus: Arc<EventBus>, connector_id: String) {
         }
 
         let Some(_chat_jid) = parse_chat_jid(&action.conversation_scope) else {
-            tracing::warn!("Could not parse WhatsApp chat JID: {}", action.conversation_scope);
+            tracing::warn!(
+                "Could not parse WhatsApp chat JID: {}",
+                action.conversation_scope
+            );
             continue;
         };
 
