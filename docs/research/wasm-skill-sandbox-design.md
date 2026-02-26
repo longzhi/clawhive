@@ -1,4 +1,4 @@
-# nanocrab WASM Skill 沙箱方案设计
+# clawhive WASM Skill 沙箱方案设计
 
 > 目标：将 Agent 的 Skill（工具调用）放入 WasmEdge 沙箱执行，实现 capability-based 权限控制。
 
@@ -17,11 +17,11 @@ WasmEdge + WASI 天然支持你要的四种权限场景。下面逐一说明。
 这是 WASI 最成熟的能力。WASM 模块默认**没有任何文件系统访问权限**，必须由宿主在创建实例时显式授予：
 
 ```rust
-// 宿主侧（nanocrab-runtime）
+// 宿主侧（clawhive-runtime）
 let mut wasi_module = AsyncWasiModule::create(Some(args), Some(envs), Some(preopens))?;
 
 // preopens 指定 WASM 内可见的目录映射
-// 例如：WASM 内的 "/workspace" → 宿主的 "/Users/dragon/workspace/nanocrab/skills/gmail/data"
+// 例如：WASM 内的 "/workspace" → 宿主的 "/Users/dragon/workspace/clawhive/skills/gmail/data"
 let preopens = vec![
     ("/workspace", "/actual/host/path/to/skill/data"),
 ];
@@ -139,7 +139,7 @@ fn host_browser_eval_js(caller: Caller, args: Vec<WasmValue>) -> ...) { ... }
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    nanocrab Core                     │
+│                    clawhive Core                     │
 │                   (Orchestrator)                     │
 │                                                     │
 │   LLM 返回 tool_use: { name: "gmail_send", ... }   │
@@ -288,7 +288,7 @@ fn create_skill_vm(manifest: &SkillManifest) -> Result<Vm> {
 Skill 用 Rust 编写，编译到 `wasm32-wasip1` target。宿主提供一个 SDK crate：
 
 ```rust
-// nanocrab-skill-sdk（Skill 开发者使用）
+// clawhive-skill-sdk（Skill 开发者使用）
 
 /// 发起 HTTP 请求（调用宿主 host function）
 pub fn http_request(req: HttpRequest) -> Result<HttpResponse> {
@@ -319,7 +319,7 @@ Skill 开发者写的代码：
 
 ```rust
 // skills/gmail-sender/src/lib.rs
-use nanocrab_skill_sdk::{http_request, HttpRequest, SkillInput, SkillOutput};
+use clawhive_skill_sdk::{http_request, HttpRequest, SkillInput, SkillOutput};
 
 #[no_mangle]
 pub extern "C" fn handle(input_ptr: i32, input_len: i32) -> i32 {
@@ -390,14 +390,14 @@ Skill 调用 Host Function：
 ## 8. 实现路线建议
 
 ### Phase 1：最小可跑（1-2 周）
-- WasmEdge Rust SDK 集成到 `nanocrab-runtime`
+- WasmEdge Rust SDK 集成到 `clawhive-runtime`
 - 实现 `WasmExecutor`：加载 .wasm + 调用导出函数 + 返回结果
 - WASI preopened dirs 支持（文件系统权限）
 - 一个 hello-world Skill 端到端跑通
 
 ### Phase 2：Host Function 代理（1-2 周）
 - 实现 `host_http_request` host function
-- 实现 `nanocrab-skill-sdk` crate（guest 侧 SDK）
+- 实现 `clawhive-skill-sdk` crate（guest 侧 SDK）
 - URL 白名单策略
 - manifest.yaml 解析 + 按声明注册 host functions
 
@@ -405,7 +405,7 @@ Skill 调用 Host Function：
 - 邮件、浏览器等 host function
 - 资源限制（timeout, memory, fuel）
 - 审计日志
-- Skill 构建工具链（`nanocrab skill build/test/publish`）
+- Skill 构建工具链（`clawhive skill build/test/publish`）
 
 ### Phase 4：生态（持续）
 - Skill marketplace
@@ -419,7 +419,7 @@ Skill 调用 Host Function：
 - **Linux 基金会项目**，长期维护有保障
 - **Rust SDK 成熟**（`wasmedge-sdk` 0.16.1，支持 bundled 静态链接）
 - **macOS aarch64 支持**（你的开发环境可以直接跑）
-- **async-wasi**：异步 WASI 支持，适合 nanocrab 的 tokio 异步架构
+- **async-wasi**：异步 WASI 支持，适合 clawhive 的 tokio 异步架构
 - **WASI-NN 插件**：未来 Skill 可以在沙箱内做本地推理
 - **AOT 编译**：性能可以接近原生
 
@@ -427,7 +427,7 @@ Skill 调用 Host Function：
 
 ## 10. 与现有架构的对接
 
-当前 `nanocrab-runtime` 的 `TaskExecutor` trait 需要扩展：
+当前 `clawhive-runtime` 的 `TaskExecutor` trait 需要扩展：
 
 ```rust
 // 现有

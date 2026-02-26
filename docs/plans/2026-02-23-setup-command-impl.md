@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Replace the one-shot `nanocrab init` with a reentrant `nanocrab setup` dashboard-based configuration manager.
+**Goal:** Replace the one-shot `clawhive init` with a reentrant `clawhive setup` dashboard-based configuration manager.
 
 **Architecture:** Refactor `init.rs` → `setup.rs` with a scan→dashboard→action loop. Reuse existing generate/prompt functions, add config scanning layer and YAML-aware mutation for main.yaml/routing.yaml. Replace `Commands::Init` with `Commands::Setup` in main.rs.
 
@@ -13,9 +13,9 @@
 ### Task 1: Rename init → setup and update Commands enum
 
 **Files:**
-- Rename: `crates/nanocrab-cli/src/init.rs` → `crates/nanocrab-cli/src/setup.rs`
-- Modify: `crates/nanocrab-cli/src/main.rs`
-- Keep: `crates/nanocrab-cli/src/init_ui.rs` (rename to `setup_ui.rs`)
+- Rename: `crates/clawhive-cli/src/init.rs` → `crates/clawhive-cli/src/setup.rs`
+- Modify: `crates/clawhive-cli/src/main.rs`
+- Keep: `crates/clawhive-cli/src/init_ui.rs` (rename to `setup_ui.rs`)
 
 **Step 1: Rename files**
 
@@ -40,7 +40,7 @@ use setup::run_setup;
 
 In the `Commands` enum, replace:
 ```rust
-#[command(about = "Initialize nanocrab configuration")]
+#[command(about = "Initialize clawhive configuration")]
 Init {
     #[arg(long, help = "Force overwrite existing config")]
     force: bool,
@@ -85,7 +85,7 @@ Replace `parses_init_force_flag` test:
 ```rust
 #[test]
 fn parses_setup_force_flag() {
-    let cli = Cli::try_parse_from(["nanocrab", "setup", "--force"]).unwrap();
+    let cli = Cli::try_parse_from(["clawhive", "setup", "--force"]).unwrap();
     assert!(matches!(cli.command, Commands::Setup { force: true }));
 }
 ```
@@ -106,7 +106,7 @@ In `tests/init_test.rs` (rename to `tests/setup_test.rs` if it exists), update a
 
 **Step 8: Run tests and verify**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: All existing tests pass with renamed symbols.
 
 **Step 9: Commit**
@@ -121,8 +121,8 @@ git commit -m "refactor: rename init → setup command"
 ### Task 2: Add config scanning (ConfigState)
 
 **Files:**
-- Create: `crates/nanocrab-cli/src/setup_scan.rs`
-- Modify: `crates/nanocrab-cli/src/main.rs` (add `mod setup_scan;`)
+- Create: `crates/clawhive-cli/src/setup_scan.rs`
+- Modify: `crates/clawhive-cli/src/main.rs` (add `mod setup_scan;`)
 
 **Step 1: Write tests for config scanning**
 
@@ -213,17 +213,17 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("config/agents.d")).unwrap();
         std::fs::write(
             temp.path().join("config/routing.yaml"),
-            "default_agent_id: nanocrab-main\nbindings: []\n",
+            "default_agent_id: clawhive-main\nbindings: []\n",
         ).unwrap();
         let state = scan_config(temp.path());
-        assert_eq!(state.default_agent.as_deref(), Some("nanocrab-main"));
+        assert_eq!(state.default_agent.as_deref(), Some("clawhive-main"));
     }
 }
 ```
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: compile error (setup_scan module not found)
 
 **Step 3: Implement ConfigState and scan_config**
@@ -376,7 +376,7 @@ fn scan_main_and_routing(main_path: &Path, routing_path: &Path) -> (Vec<ChannelI
 
     // Parse main.yaml for channels
     if let Ok(content) = std::fs::read_to_string(main_path) {
-        if let Ok(main) = serde_yaml::from_str::<nanocrab_core::MainConfig>(&content) {
+        if let Ok(main) = serde_yaml::from_str::<clawhive_core::MainConfig>(&content) {
             if let Some(tg) = &main.channels.telegram {
                 if tg.enabled {
                     for c in &tg.connectors {
@@ -403,7 +403,7 @@ fn scan_main_and_routing(main_path: &Path, routing_path: &Path) -> (Vec<ChannelI
     // Parse routing.yaml for default agent
     let default_agent = std::fs::read_to_string(routing_path)
         .ok()
-        .and_then(|content| serde_yaml::from_str::<nanocrab_core::RoutingConfig>(&content).ok())
+        .and_then(|content| serde_yaml::from_str::<clawhive_core::RoutingConfig>(&content).ok())
         .map(|r| r.default_agent_id);
 
     (channels, default_agent)
@@ -414,7 +414,7 @@ fn scan_main_and_routing(main_path: &Path, routing_path: &Path) -> (Vec<ChannelI
 
 **Step 5: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: All scan tests pass.
 
 **Step 6: Commit**
@@ -429,8 +429,8 @@ git commit -m "feat(setup): add config scanning layer"
 ### Task 3: Dashboard display and action menu loop
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs`
-- Modify: `crates/nanocrab-cli/src/setup_ui.rs`
+- Modify: `crates/clawhive-cli/src/setup.rs`
+- Modify: `crates/clawhive-cli/src/setup_ui.rs`
 
 **Step 1: Add dashboard rendering to setup_ui.rs**
 
@@ -579,7 +579,7 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
 
 **Step 4: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: Compile succeeds, existing tests pass (handler functions will be stubs initially).
 
 **Step 5: Commit**
@@ -594,7 +594,7 @@ git commit -m "feat(setup): add dashboard display and action menu loop"
 ### Task 4: Implement Add Provider action
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs`
+- Modify: `crates/clawhive-cli/src/setup.rs`
 
 **Step 1: Implement handle_add_provider**
 
@@ -643,7 +643,7 @@ fn write_provider_config_unchecked(config_root: &Path, provider: ProviderId, aut
 
 **Step 2: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: Pass.
 
 **Step 3: Commit**
@@ -658,7 +658,7 @@ git commit -m "feat(setup): implement Add Provider action"
 ### Task 5: Implement Add Agent action
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs`
+- Modify: `crates/clawhive-cli/src/setup.rs`
 
 **Step 1: Implement handle_add_agent**
 
@@ -673,7 +673,7 @@ fn handle_add_agent(
 ) -> Result<()> {
     let agent_id: String = Input::with_theme(theme)
         .with_prompt("Agent ID")
-        .default("nanocrab-main".to_string())
+        .default("clawhive-main".to_string())
         .interact_text()?;
     let agent_id = agent_id.trim().to_string();
     if agent_id.is_empty() {
@@ -693,7 +693,7 @@ fn handle_add_agent(
 
     let name: String = Input::with_theme(theme)
         .with_prompt("Display name")
-        .default("Nanocrab".to_string())
+        .default("Clawhive".to_string())
         .interact_text()?;
     let emoji: String = Input::with_theme(theme)
         .with_prompt("Emoji")
@@ -761,7 +761,7 @@ fn write_agent_files_unchecked(config_root: &Path, agent_id: &str, name: &str, e
 
 **Step 2: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: Pass.
 
 **Step 3: Commit**
@@ -776,7 +776,7 @@ git commit -m "feat(setup): implement Add Agent action with dynamic model list"
 ### Task 6: Implement Add Channel action with routing update
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs`
+- Modify: `crates/clawhive-cli/src/setup.rs`
 
 **Step 1: Write test for add_channel_to_main_yaml**
 
@@ -786,7 +786,7 @@ fn add_channel_to_existing_main_yaml_preserves_other_channels() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("config")).unwrap();
     // Write initial main.yaml with telegram
-    let initial = generate_main_yaml("nanocrab", Some(ChannelConfig { connector_id: "tg-main".into(), token: "tok1".into() }), None);
+    let initial = generate_main_yaml("clawhive", Some(ChannelConfig { connector_id: "tg-main".into(), token: "tok1".into() }), None);
     std::fs::write(temp.path().join("config/main.yaml"), &initial).unwrap();
 
     // Add discord channel
@@ -867,7 +867,7 @@ fn add_channel_to_config(config_root: &Path, channel_type: &str, cfg: &ChannelCo
         // No main.yaml yet — generate fresh
         let tg = if channel_type == "telegram" { Some(cfg.clone()) } else { None };
         let dc = if channel_type == "discord" { Some(cfg.clone()) } else { None };
-        let yaml = generate_main_yaml("nanocrab", tg, dc);
+        let yaml = generate_main_yaml("clawhive", tg, dc);
         fs::write(&main_path, yaml)?;
         return Ok(());
     }
@@ -969,7 +969,7 @@ fn add_routing_binding(config_root: &Path, channel_type: &str, connector_id: &st
 
 **Step 5: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: All pass including the new YAML mutation test.
 
 **Step 6: Commit**
@@ -984,7 +984,7 @@ git commit -m "feat(setup): implement Add Channel with YAML mutation"
 ### Task 7: Implement Modify and Remove actions
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs`
+- Modify: `crates/clawhive-cli/src/setup.rs`
 
 **Step 1: Implement handle_modify**
 
@@ -1156,7 +1156,7 @@ fn remove_routing_binding(config_root: &Path, connector_id: &str) -> Result<()> 
 
 **Step 4: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 Expected: Pass.
 
 **Step 5: Commit**
@@ -1171,8 +1171,8 @@ git commit -m "feat(setup): implement Modify and Remove actions"
 ### Task 8: Clean up old init code and final integration
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs` (remove dead code from old init flow)
-- Delete: `crates/nanocrab-cli/tests/init_test.rs` if present, replace with `tests/setup_test.rs`
+- Modify: `crates/clawhive-cli/src/setup.rs` (remove dead code from old init flow)
+- Delete: `crates/clawhive-cli/tests/init_test.rs` if present, replace with `tests/setup_test.rs`
 
 **Step 1: Remove dead code**
 

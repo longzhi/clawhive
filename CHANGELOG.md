@@ -59,5 +59,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bounded sub-agent execution
 - Note: WASM sandbox is planned but not yet implemented
 
-[Unreleased]: https://github.com/longzhi/nanocrab/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/longzhi/nanocrab/releases/tag/v0.1.0
+[Unreleased]: https://github.com/longzhi/clawhive/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/longzhi/clawhive/releases/tag/v0.1.0

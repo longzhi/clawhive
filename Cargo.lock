@@ -464,6 +464,274 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "clawhive-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "fd-lock",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "urlencoding",
+ "uuid",
+ "webbrowser",
+ "wiremock",
+]
+
+[[package]]
+name = "clawhive-bus"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clawhive-schema",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-channels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clawhive-bus",
+ "clawhive-gateway",
+ "clawhive-schema",
+ "log",
+ "serde",
+ "serenity",
+ "teloxide",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "clawhive-auth",
+ "clawhive-bus",
+ "clawhive-channels",
+ "clawhive-core",
+ "clawhive-gateway",
+ "clawhive-memory",
+ "clawhive-provider",
+ "clawhive-runtime",
+ "clawhive-scheduler",
+ "clawhive-schema",
+ "clawhive-server",
+ "clawhive-tui",
+ "console",
+ "dialoguer",
+ "flate2",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "clawhive-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clawhive-bus",
+ "clawhive-memory",
+ "clawhive-provider",
+ "clawhive-runtime",
+ "clawhive-scheduler",
+ "clawhive-schema",
+ "corral-core",
+ "futures",
+ "futures-core",
+ "htmd",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "clawhive-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clawhive-bus",
+ "clawhive-core",
+ "clawhive-memory",
+ "clawhive-provider",
+ "clawhive-runtime",
+ "clawhive-scheduler",
+ "clawhive-schema",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlite-vec",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "clawhive-auth",
+ "futures-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "serde",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-scheduler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "clawhive-bus",
+ "clawhive-schema",
+ "cron",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-schema"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "chrono",
+ "clawhive-auth",
+ "clawhive-bus",
+ "clawhive-core",
+ "clawhive-gateway",
+ "clawhive-scheduler",
+ "clawhive-schema",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "clawhive-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clawhive-bus",
+ "clawhive-core",
+ "clawhive-gateway",
+ "clawhive-memory",
+ "clawhive-provider",
+ "clawhive-schema",
+ "crossterm",
+ "ratatui",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1923,274 +2191,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nanocrab-auth"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "fd-lock",
- "rand 0.8.5",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "urlencoding",
- "uuid",
- "webbrowser",
- "wiremock",
-]
-
-[[package]]
-name = "nanocrab-bus"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "nanocrab-schema",
- "serde",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-channels"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "log",
- "nanocrab-bus",
- "nanocrab-gateway",
- "nanocrab-schema",
- "serde",
- "serenity",
- "teloxide",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "console",
- "dialoguer",
- "flate2",
- "libc",
- "nanocrab-auth",
- "nanocrab-bus",
- "nanocrab-channels",
- "nanocrab-core",
- "nanocrab-gateway",
- "nanocrab-memory",
- "nanocrab-provider",
- "nanocrab-runtime",
- "nanocrab-scheduler",
- "nanocrab-schema",
- "nanocrab-server",
- "nanocrab-tui",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "tar",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
- "zip",
-]
-
-[[package]]
-name = "nanocrab-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "corral-core",
- "futures",
- "futures-core",
- "htmd",
- "nanocrab-bus",
- "nanocrab-memory",
- "nanocrab-provider",
- "nanocrab-runtime",
- "nanocrab-scheduler",
- "nanocrab-schema",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "nanocrab-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "nanocrab-bus",
- "nanocrab-core",
- "nanocrab-memory",
- "nanocrab-provider",
- "nanocrab-runtime",
- "nanocrab-scheduler",
- "nanocrab-schema",
- "serde",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-memory"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "sqlite-vec",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-provider"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "bytes",
- "futures-core",
- "nanocrab-auth",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "serde",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-scheduler"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "chrono-tz",
- "cron",
- "nanocrab-bus",
- "nanocrab-schema",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-schema"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "axum",
- "chrono",
- "futures-core",
- "nanocrab-auth",
- "nanocrab-bus",
- "nanocrab-core",
- "nanocrab-gateway",
- "nanocrab-scheduler",
- "nanocrab-schema",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tower",
- "tower-http",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nanocrab-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "crossterm",
- "nanocrab-bus",
- "nanocrab-core",
- "nanocrab-gateway",
- "nanocrab-memory",
- "nanocrab-provider",
- "nanocrab-schema",
- "ratatui",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

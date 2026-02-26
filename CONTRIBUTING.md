@@ -1,6 +1,6 @@
-# Contributing to nanocrab
+# Contributing to clawhive
 
-Thank you for your interest in contributing to nanocrab! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to clawhive! This document provides guidelines and information for contributors.
 
 ## Table of Contents
 
@@ -21,8 +21,8 @@ Be respectful, inclusive, and constructive. We're all here to build something us
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/nanocrab.git`
-3. Add upstream remote: `git remote add upstream https://github.com/longzhi/nanocrab.git`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/clawhive.git`
+3. Add upstream remote: `git remote add upstream https://github.com/longzhi/clawhive.git`
 4. Create a branch: `git checkout -b feature/your-feature-name`
 
 ## Development Setup
@@ -56,7 +56,7 @@ cargo run -- validate
 
 # Local chat mode (no Telegram needed)
 export ANTHROPIC_API_KEY=your-key
-cargo run -- chat --agent nanocrab-main
+cargo run -- chat --agent clawhive-main
 
 # Start with TUI
 cargo run -- start --tui
@@ -142,10 +142,10 @@ feat(core): add hook system for agent lifecycle
 cargo test --workspace
 
 # Specific crate
-cargo test -p nanocrab-core
+cargo test -p clawhive-core
 
 # Specific test
-cargo test -p nanocrab-core session_lock
+cargo test -p clawhive-core session_lock
 
 # With output
 cargo test --workspace -- --nocapture
@@ -170,7 +170,7 @@ cargo test --workspace -- --nocapture
 
 ### Naming
 
-- Crates: `nanocrab-{name}` (lowercase, hyphenated)
+- Crates: `clawhive-{name}` (lowercase, hyphenated)
 - Modules: `snake_case`
 - Types: `PascalCase`
 - Functions/methods: `snake_case`
@@ -219,7 +219,7 @@ pub async fn acquire(&self, session_key: &str) -> SessionLockGuard {
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/longzhi/nanocrab/discussions)
-- Check existing [Issues](https://github.com/longzhi/nanocrab/issues)
+- Open a [Discussion](https://github.com/longzhi/clawhive/discussions)
+- Check existing [Issues](https://github.com/longzhi/clawhive/issues)
 
 Thank you for contributing! 🦀

@@ -1,0 +1,30 @@
+[package]
+name = "clawhive-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio-stream.workspace = true
+futures-core.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-core = { path = "../clawhive-core" }
+clawhive-gateway = { path = "../clawhive-gateway" }
+clawhive-scheduler = { path = "../clawhive-scheduler" }
+clawhive-auth = { path = "../clawhive-auth" }
+
+[dev-dependencies]
+tempfile.workspace = true

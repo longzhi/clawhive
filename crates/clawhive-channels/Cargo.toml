@@ -1,0 +1,26 @@
+[package]
+name = "clawhive-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["telegram", "discord"]
+telegram = ["dep:teloxide", "dep:log"]
+discord = ["dep:serenity"]
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-gateway = { path = "../clawhive-gateway" }
+clawhive-bus = { path = "../clawhive-bus" }
+
+teloxide = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+serenity = { workspace = true, optional = true }

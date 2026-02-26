@@ -1,5 +1,5 @@
 app:
-  name: nanocrab
+  name: clawhive
   env: dev
 
 runtime:

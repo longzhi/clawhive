@@ -1,4 +1,4 @@
-# nanocrab 记忆系统设计方案
+# clawhive 记忆系统设计方案
 
 > 日期：2026-02-13  
 > 状态：设计确认（v2，采纳 OpenClaw 记忆模型）  
@@ -18,11 +18,11 @@
 
 ### 1.1 三层记忆架构
 
-借鉴神经科学的记忆模型，nanocrab 的记忆体系有三个层次：
+借鉴神经科学的记忆模型，clawhive 的记忆体系有三个层次：
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                nanocrab 记忆系统                    │
+│                clawhive 记忆系统                    │
 │                                                    │
 │  ① Session JSONL（感觉记忆 / 工作记忆）            │
 │     sessions/<id>.jsonl                            │
@@ -81,7 +81,7 @@ workspace/
 - 记忆系统：Markdown 为 source of truth
 
 ## 重要事实
-- nanocrab 仓库：/Users/dragon/Workspace/nanocrab/
+- clawhive 仓库：/Users/dragon/Workspace/clawhive/
 - Obsidian vault 会同步到 GitHub
 ```
 
@@ -103,7 +103,7 @@ workspace/
 ```markdown
 # 2026-02-13
 
-## nanocrab 架构 Review
+## clawhive 架构 Review
 - 完成 message flow 审查，确认主路径是 Gateway→Orchestrator 直接调用
 - Bus 定位为 sidecar 广播，不在主路径上
 - 记忆系统从双轨制改为 OpenClaw 模式（Markdown 为 source of truth）
@@ -230,7 +230,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 - `minScore`：0.35（低于此分数的结果丢弃）
 - 两个权重之和归一化为 1.0（可配置调整比例）
 
-> OpenClaw 不使用 recency 权重，依赖 vector + BM25 已足够。如需 recency 加权可作为 nanocrab 扩展。
+> OpenClaw 不使用 recency 权重，依赖 vector + BM25 已足够。如需 recency 加权可作为 clawhive 扩展。
 
 ### 3.3 LLM Memory Tools（对齐 OpenClaw）
 
@@ -302,7 +302,7 @@ From memory/2026-02-12.md:
 
 ## 4. 海马体（Hippocampus）
 
-> **海马体（Hippocampus）** 是 nanocrab 记忆系统的核心进程——定期将短期记忆（daily files + session JSONL）整合为长期记忆（MEMORY.md），如同大脑中海马体在睡眠期间巩固当天经历。
+> **海马体（Hippocampus）** 是 clawhive 记忆系统的核心进程——定期将短期记忆（daily files + session JSONL）整合为长期记忆（MEMORY.md），如同大脑中海马体在睡眠期间巩固当天经历。
 
 ```
 定时 Cron 触发（每日低峰 / 可配置）

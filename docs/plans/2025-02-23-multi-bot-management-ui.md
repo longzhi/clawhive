@@ -16,8 +16,8 @@
 ### Task 1: Backend - Add Connector Status Endpoint
 
 **Files:**
-- Modify: `crates/nanocrab-server/src/routes/channels.rs`
-- Modify: `crates/nanocrab-server/src/main.rs` (if routing needs registration)
+- Modify: `crates/clawhive-server/src/routes/channels.rs`
+- Modify: `crates/clawhive-server/src/main.rs` (if routing needs registration)
 
 **Step 1: Write failing test**
 Create a test that calls `GET /api/channels/status` and expects a 200 OK with a list of connector statuses.
@@ -50,7 +50,7 @@ Expected: PASS
 
 **Step 5: Commit**
 ```bash
-git add crates/nanocrab-server/src/routes/channels.rs
+git add crates/clawhive-server/src/routes/channels.rs
 git commit -m "feat: add channel status endpoint"
 ```
 
@@ -59,7 +59,7 @@ git commit -m "feat: add channel status endpoint"
 ### Task 2: Backend - Add Connector CRUD Endpoints
 
 **Files:**
-- Modify: `crates/nanocrab-server/src/routes/channels.rs`
+- Modify: `crates/clawhive-server/src/routes/channels.rs`
 
 **API Design:**
 - `POST /api/channels/:kind/connectors`: Add a new connector
@@ -81,7 +81,7 @@ Expected: PASS
 
 **Step 5: Commit**
 ```bash
-git add crates/nanocrab-server/src/routes/channels.rs
+git add crates/clawhive-server/src/routes/channels.rs
 git commit -m "feat: add connector CRUD endpoints"
 ```
 

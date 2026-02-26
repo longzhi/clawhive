@@ -1,9 +1,9 @@
-agent_id: nanocrab-main
+agent_id: clawhive-main
 enabled: true
-workspace: ./workspaces/nanocrab-main
+workspace: ./workspaces/clawhive-main
 
 identity:
-  name: nanocrab
+  name: clawhive
   emoji: "🦀"
 
 model_policy:

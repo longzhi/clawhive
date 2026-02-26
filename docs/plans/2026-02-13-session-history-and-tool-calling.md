@@ -4,9 +4,9 @@
 
 **Goal:** Enable multi-turn conversation (wire session history into LLM context) and build the tool calling foundation so LLM can invoke `memory_search` / `memory_get` tools.
 
-**Architecture:** Two phases. Phase A is a quick wiring fix in the Orchestrator to inject session history as LLM messages. Phase B is the structural change: introduce unified `ContentBlock` types in nanocrab-provider, migrate `LlmMessage.content` from `String` to `Vec<ContentBlock>`, build a `ToolRegistry` + execution loop in the Orchestrator, and register the first two memory tools. The `weak_react_loop` is replaced by a `tool_use_loop`.
+**Architecture:** Two phases. Phase A is a quick wiring fix in the Orchestrator to inject session history as LLM messages. Phase B is the structural change: introduce unified `ContentBlock` types in clawhive-provider, migrate `LlmMessage.content` from `String` to `Vec<ContentBlock>`, build a `ToolRegistry` + execution loop in the Orchestrator, and register the first two memory tools. The `weak_react_loop` is replaced by a `tool_use_loop`.
 
-**Tech Stack:** Rust, Anthropic Messages API (tool_use / tool_result content blocks), serde_json, nanocrab-provider, nanocrab-core, nanocrab-memory
+**Tech Stack:** Rust, Anthropic Messages API (tool_use / tool_result content blocks), serde_json, clawhive-provider, clawhive-core, clawhive-memory
 
 ---
 
@@ -15,11 +15,11 @@
 ### Task 1: Inject session history into Orchestrator LLM messages
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/orchestrator.rs:85-148` (handle_inbound)
+- Modify: `crates/clawhive-core/src/orchestrator.rs:85-148` (handle_inbound)
 
 **Step 1: Write the failing test**
 
-Add to `crates/nanocrab-core/tests/mock_server_integration.rs`:
+Add to `crates/clawhive-core/tests/mock_server_integration.rs`:
 
 ```rust
 #[tokio::test]
@@ -42,11 +42,11 @@ async fn mock_server_includes_session_history() {
 
     // First turn
     let first = test_inbound("hello");
-    let _ = orch.handle_inbound(first, "nanocrab-main").await.unwrap();
+    let _ = orch.handle_inbound(first, "clawhive-main").await.unwrap();
 
     // Second turn — session history should now include the first turn
     let second = test_inbound("follow up");
-    let _ = orch.handle_inbound(second, "nanocrab-main").await.unwrap();
+    let _ = orch.handle_inbound(second, "clawhive-main").await.unwrap();
 
     // Verify: the session JSONL should have 4 messages (user+assistant x2)
     let reader = SessionReader::new(tmp.path());
@@ -58,7 +58,7 @@ async fn mock_server_includes_session_history() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test --package nanocrab-core --test mock_server_integration mock_server_includes_session_history -- --nocapture`
+Run: `cargo test --package clawhive-core --test mock_server_integration mock_server_includes_session_history -- --nocapture`
 
 Expected: It should pass trivially for JSONL count (since SessionWriter already writes). But the real verification is that the LLM receives history messages. Since we can't easily inspect the request body in wiremock without custom matchers, this test verifies the end-to-end flow works.
 
@@ -109,7 +109,7 @@ Expected: All tests pass, including the new one.
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-core/src/orchestrator.rs crates/nanocrab-core/tests/mock_server_integration.rs
+git add crates/clawhive-core/src/orchestrator.rs crates/clawhive-core/tests/mock_server_integration.rs
 git commit -m "feat(core): inject session history into LLM context (Issue #3)"
 ```
 
@@ -117,14 +117,14 @@ git commit -m "feat(core): inject session history into LLM context (Issue #3)"
 
 ## Phase B: Tool Calling Foundation
 
-### Task 2: Define unified ContentBlock types in nanocrab-provider
+### Task 2: Define unified ContentBlock types in clawhive-provider
 
 **Files:**
-- Modify: `crates/nanocrab-provider/src/types.rs`
+- Modify: `crates/clawhive-provider/src/types.rs`
 
 **Step 1: Write tests for new types**
 
-Add to bottom of `crates/nanocrab-provider/src/types.rs`, in the test module:
+Add to bottom of `crates/clawhive-provider/src/types.rs`, in the test module:
 
 ```rust
 #[cfg(test)]
@@ -237,13 +237,13 @@ mod tests {
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test --package nanocrab-provider -- --nocapture`
+Run: `cargo test --package clawhive-provider -- --nocapture`
 
 Expected: FAIL — `ContentBlock`, `ToolDef`, `LlmMessage::user()`, etc. don't exist yet.
 
 **Step 3: Implement the new types**
 
-Replace the entire `crates/nanocrab-provider/src/types.rs` with:
+Replace the entire `crates/clawhive-provider/src/types.rs` with:
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -376,14 +376,14 @@ pub struct StreamChunk {
 
 **Step 4: Run tests**
 
-Run: `cargo test --package nanocrab-provider -- --nocapture`
+Run: `cargo test --package clawhive-provider -- --nocapture`
 
 Expected: types tests pass. Other tests in the package may fail due to callsite changes needed.
 
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-provider/src/types.rs
+git add crates/clawhive-provider/src/types.rs
 git commit -m "feat(provider): introduce ContentBlock, ToolDef, and Vec<ContentBlock> message content"
 ```
 
@@ -392,13 +392,13 @@ git commit -m "feat(provider): introduce ContentBlock, ToolDef, and Vec<ContentB
 ### Task 3: Update all callsites for the new LlmMessage type
 
 **Files:**
-- Modify: `crates/nanocrab-provider/src/anthropic.rs` (ApiMessage conversion, response parsing)
-- Modify: `crates/nanocrab-provider/src/lib.rs` (StubProvider)
-- Modify: `crates/nanocrab-core/src/orchestrator.rs` (all LlmMessage constructions)
-- Modify: `crates/nanocrab-core/src/router.rs` (reply method)
-- Modify: `crates/nanocrab-core/src/consolidation.rs`
-- Modify: `crates/nanocrab-core/src/subagent.rs`
-- Modify: `crates/nanocrab-core/tests/mock_server_integration.rs`
+- Modify: `crates/clawhive-provider/src/anthropic.rs` (ApiMessage conversion, response parsing)
+- Modify: `crates/clawhive-provider/src/lib.rs` (StubProvider)
+- Modify: `crates/clawhive-core/src/orchestrator.rs` (all LlmMessage constructions)
+- Modify: `crates/clawhive-core/src/router.rs` (reply method)
+- Modify: `crates/clawhive-core/src/consolidation.rs`
+- Modify: `crates/clawhive-core/src/subagent.rs`
+- Modify: `crates/clawhive-core/tests/mock_server_integration.rs`
 
 This is a mechanical migration. Every `LlmMessage { role: "user".into(), content: "text".into() }` becomes `LlmMessage::user("text")`. Every `LlmMessage { role: "assistant".into(), content: "text".into() }` becomes `LlmMessage::assistant("text")`. Every `m.content.clone()` (where m is LlmMessage) becomes `m.text()`.
 
@@ -439,13 +439,13 @@ git commit -m "refactor: migrate all callsites to Vec<ContentBlock> LlmMessage"
 ### Task 4: Build ToolRegistry and ToolExecutor trait
 
 **Files:**
-- Create: `crates/nanocrab-core/src/tool.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (add `pub mod tool;`)
+- Create: `crates/clawhive-core/src/tool.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (add `pub mod tool;`)
 
 **Step 1: Write tests**
 
 ```rust
-// In crates/nanocrab-core/src/tool.rs
+// In crates/clawhive-core/src/tool.rs
 
 #[cfg(test)]
 mod tests {
@@ -516,7 +516,7 @@ mod tests {
 use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use nanocrab_provider::ToolDef;
+use clawhive_provider::ToolDef;
 
 pub struct ToolOutput {
     pub content: String,
@@ -565,18 +565,18 @@ impl ToolRegistry {
 
 **Step 3: Add module to lib.rs**
 
-Add `pub mod tool;` to `crates/nanocrab-core/src/lib.rs` and `pub use tool::*;`.
+Add `pub mod tool;` to `crates/clawhive-core/src/lib.rs` and `pub use tool::*;`.
 
 **Step 4: Run tests**
 
-Run: `cargo test --package nanocrab-core`
+Run: `cargo test --package clawhive-core`
 
 Expected: All tests pass.
 
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-core/src/tool.rs crates/nanocrab-core/src/lib.rs
+git add crates/clawhive-core/src/tool.rs crates/clawhive-core/src/lib.rs
 git commit -m "feat(core): add ToolRegistry and ToolExecutor trait"
 ```
 
@@ -585,8 +585,8 @@ git commit -m "feat(core): add ToolRegistry and ToolExecutor trait"
 ### Task 5: Implement memory_search and memory_get tools
 
 **Files:**
-- Create: `crates/nanocrab-core/src/memory_tools.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (add module)
+- Create: `crates/clawhive-core/src/memory_tools.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (add module)
 
 **Step 1: Write tests**
 
@@ -594,9 +594,9 @@ git commit -m "feat(core): add ToolRegistry and ToolExecutor trait"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nanocrab_memory::embedding::StubEmbeddingProvider;
-    use nanocrab_memory::search_index::SearchIndex;
-    use nanocrab_memory::{file_store::MemoryFileStore, MemoryStore};
+    use clawhive_memory::embedding::StubEmbeddingProvider;
+    use clawhive_memory::search_index::SearchIndex;
+    use clawhive_memory::{file_store::MemoryFileStore, MemoryStore};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -661,10 +661,10 @@ mod tests {
 use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
-use nanocrab_memory::embedding::EmbeddingProvider;
-use nanocrab_memory::file_store::MemoryFileStore;
-use nanocrab_memory::search_index::SearchIndex;
-use nanocrab_provider::ToolDef;
+use clawhive_memory::embedding::EmbeddingProvider;
+use clawhive_memory::file_store::MemoryFileStore;
+use clawhive_memory::search_index::SearchIndex;
+use clawhive_provider::ToolDef;
 
 use super::tool::{ToolExecutor, ToolOutput};
 
@@ -817,18 +817,18 @@ impl ToolExecutor for MemoryGetTool {
 
 **Step 3: Add module**
 
-Add `pub mod memory_tools;` and `pub use memory_tools::*;` to `crates/nanocrab-core/src/lib.rs`.
+Add `pub mod memory_tools;` and `pub use memory_tools::*;` to `crates/clawhive-core/src/lib.rs`.
 
 **Step 4: Run tests**
 
-Run: `cargo test --package nanocrab-core`
+Run: `cargo test --package clawhive-core`
 
 Expected: All tests pass.
 
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-core/src/memory_tools.rs crates/nanocrab-core/src/lib.rs
+git add crates/clawhive-core/src/memory_tools.rs crates/clawhive-core/src/lib.rs
 git commit -m "feat(core): implement memory_search and memory_get tool executors"
 ```
 
@@ -837,7 +837,7 @@ git commit -m "feat(core): implement memory_search and memory_get tool executors
 ### Task 6: Replace weak_react_loop with tool_use_loop in Orchestrator
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/orchestrator.rs`
+- Modify: `crates/clawhive-core/src/orchestrator.rs`
 
 This is the key architectural change. The Orchestrator gains a `ToolRegistry` field, and the main loop becomes:
 
@@ -847,7 +847,7 @@ This is the key architectural change. The Orchestrator gains a `ToolRegistry` fi
 
 **Step 1: Write the test**
 
-Add to `crates/nanocrab-core/tests/mock_server_integration.rs`:
+Add to `crates/clawhive-core/tests/mock_server_integration.rs`:
 
 ```rust
 #[tokio::test]
@@ -890,7 +890,7 @@ async fn mock_server_tool_use_loop() {
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
 
     let out = orch
-        .handle_inbound(test_inbound("search my memory"), "nanocrab-main")
+        .handle_inbound(test_inbound("search my memory"), "clawhive-main")
         .await
         .unwrap();
     assert!(out.text.contains("Here is what I found"));

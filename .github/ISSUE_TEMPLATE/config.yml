@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question / Discussion
-    url: https://github.com/longzhi/nanocrab/discussions
+    url: https://github.com/longzhi/clawhive/discussions
     about: Ask questions and discuss ideas in GitHub Discussions
   - name: Security Vulnerability
-    url: https://github.com/longzhi/nanocrab/security/advisories/new
+    url: https://github.com/longzhi/clawhive/security/advisories/new
     about: Report security vulnerabilities privately

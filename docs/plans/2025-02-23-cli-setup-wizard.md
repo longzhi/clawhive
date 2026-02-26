@@ -1,8 +1,8 @@
-# CLI Setup Wizard (nanocrab init) Implementation Plan
+# CLI Setup Wizard (clawhive init) Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Provide an interactive CLI wizard (`nanocrab init`) that guides users through creating a working configuration, generating all necessary YAML files in the `config/` directory. The wizard should have a polished visual experience with colors, progress indicators, and styled output — similar to `create-next-app` or Astro's CLI.
+**Goal:** Provide an interactive CLI wizard (`clawhive init`) that guides users through creating a working configuration, generating all necessary YAML files in the `config/` directory. The wizard should have a polished visual experience with colors, progress indicators, and styled output — similar to `create-next-app` or Astro's CLI.
 
 **Architecture:** 
 - Add a new `Init` subcommand to the CLI.
@@ -10,9 +10,9 @@
 - Use `console` crate for styled/colored terminal output (bold headers, colored step indicators, success/error styling).
 - Implement a `Wizard` struct that handles the flow and data collection.
 - Use template-based generation for `main.yaml`, `providers.d/`, `agents.d/`, `routing.yaml`, and `prompts/<agent_id>/system.md`.
-- Provider auth supports both API Key and OAuth paths (PKCE for OpenAI, setup-token for Anthropic) — depends on `nanocrab-auth` crate from the OAuth plan.
+- Provider auth supports both API Key and OAuth paths (PKCE for OpenAI, setup-token for Anthropic) — depends on `clawhive-auth` crate from the OAuth plan.
 - Channel bot tokens are stored as plaintext in `main.yaml` (no env var indirection).
-- Integration test will verify the generated files against the `load_config` logic in `nanocrab-core`.
+- Integration test will verify the generated files against the `load_config` logic in `clawhive-core`.
 
 **Visual Style:**
 - ASCII art logo at startup
@@ -35,8 +35,8 @@
 ### Task 1: Add Dependencies and Command Scaffold
 
 **Files:**
-- Modify: `crates/nanocrab-cli/Cargo.toml`
-- Modify: `crates/nanocrab-cli/src/main.rs`
+- Modify: `crates/clawhive-cli/Cargo.toml`
+- Modify: `crates/clawhive-cli/src/main.rs`
 
 **Step 1: Add `dialoguer` and `console` to Cargo.toml**
 
@@ -48,7 +48,7 @@ Add `dialoguer = "0.11"`, `console = "0.15"`, and `serde_json` to dependencies. 
 #[derive(Subcommand)]
 enum Commands {
     // ...
-    #[command(about = "Initialize nanocrab configuration")]
+    #[command(about = "Initialize clawhive configuration")]
     Init {
         #[arg(long, help = "Force overwrite existing config")]
         force: bool,
@@ -67,7 +67,7 @@ Commands::Init { force } => {
 
 **Step 4: Add UI helper module**
 
-Create `crates/nanocrab-cli/src/init_ui.rs` with reusable styling helpers:
+Create `crates/clawhive-cli/src/init_ui.rs` with reusable styling helpers:
 
 ```rust
 use console::{style, Emoji, Term};
@@ -79,7 +79,7 @@ pub static CRAB: Emoji<'_, '_> = Emoji("🦀 ", "");
 pub fn print_logo(term: &Term) {
     term.write_line(&format!("{}", style("
   ┌─────────────────────────┐
-  │    nanocrab  setup       │
+  │    clawhive  setup       │
   └─────────────────────────┘
 ").cyan())).ok();
 }
@@ -100,15 +100,15 @@ pub fn print_done(term: &Term, msg: &str) {
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-cli/Cargo.toml crates/nanocrab-cli/src/main.rs crates/nanocrab-cli/src/init_ui.rs
+git add crates/clawhive-cli/Cargo.toml crates/clawhive-cli/src/main.rs crates/clawhive-cli/src/init_ui.rs
 git commit -m "feat: add init subcommand scaffold with dialoguer and console"
 ```
 
 ### Task 2: Implement Provider Setup Step
 
 **Files:**
-- Create: `crates/nanocrab-cli/src/init.rs`
-- Modify: `crates/nanocrab-cli/src/main.rs` (to export init module)
+- Create: `crates/clawhive-cli/src/init.rs`
+- Modify: `crates/clawhive-cli/src/main.rs` (to export init module)
 
 **Step 1: Define Wizard State and Provider Selection**
 
@@ -124,7 +124,7 @@ After provider selection, prompt for auth method:
     API Key
 ```
 
-- **OAuth path**: Trigger the corresponding flow from `nanocrab-auth`:
+- **OAuth path**: Trigger the corresponding flow from `clawhive-auth`:
   - OpenAI → PKCE OAuth flow (opens browser, local callback)
   - Anthropic → setup-token paste prompt
   - Store result in `auth-profiles.json` via `TokenManager`
@@ -167,20 +167,20 @@ models:
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/init.rs
+git add crates/clawhive-cli/src/init.rs
 git commit -m "feat: implement provider setup step with OAuth and API key paths"
 ```
 
-> **Dependency note**: OAuth flow requires `nanocrab-auth` crate (Tasks 1-5 of the OAuth plan). If implementing the wizard before OAuth is ready, the OAuth option can be gated behind a feature flag or shown as "coming soon".
+> **Dependency note**: OAuth flow requires `clawhive-auth` crate (Tasks 1-5 of the OAuth plan). If implementing the wizard before OAuth is ready, the OAuth option can be gated behind a feature flag or shown as "coming soon".
 
 ### Task 3: Implement Agent and Identity Setup Step
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/init.rs`
+- Modify: `crates/clawhive-cli/src/init.rs`
 
 **Step 1: Prompt for Agent ID and Identity**
 
-Prompt for `agent_id` (default: `nanocrab-main`) and identity name/emoji.
+Prompt for `agent_id` (default: `clawhive-main`) and identity name/emoji.
 
 **Step 2: Configure Model Policy**
 
@@ -189,10 +189,10 @@ Select primary model from the configured provider's models.
 **Step 3: Implement Template Generation for Agent**
 
 ```yaml
-agent_id: nanocrab-main
+agent_id: clawhive-main
 enabled: true
 identity:
-  name: "Nanocrab"
+  name: "Clawhive"
   emoji: "🦀"
 model_policy:
   primary: "anthropic/claude-3-5-sonnet-latest"
@@ -209,7 +209,7 @@ memory_policy:
 Create `prompts/<agent_id>/system.md` with a sensible default:
 
 ```markdown
-You are {{agent_name}}, a helpful AI assistant powered by nanocrab.
+You are {{agent_name}}, a helpful AI assistant powered by clawhive.
 
 You are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.
 ```
@@ -219,14 +219,14 @@ The wizard should create the file only if it doesn't already exist (respect `--f
 **Step 6: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/init.rs
+git add crates/clawhive-cli/src/init.rs
 git commit -m "feat: implement agent setup with default persona prompts"
 ```
 
 ### Task 4: Implement Routing and Channel Setup Step
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/init.rs`
+- Modify: `crates/clawhive-cli/src/init.rs`
 
 **Step 1: Prompt for Telegram/Discord enablement**
 
@@ -255,26 +255,26 @@ Generate `routing.yaml` with `default_agent_id` and bindings for enabled channel
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/init.rs
+git add crates/clawhive-cli/src/init.rs
 git commit -m "feat: implement routing and channel setup step"
 ```
 
 ### Task 5: Final Validation and Directory Creation
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/init.rs`
+- Modify: `crates/clawhive-cli/src/init.rs`
 
 **Step 1: Ensure directory structure exists**
 
 Create `config/agents.d`, `config/providers.d`, `prompts/`, `skills/`, `data/`, `logs/`.
 
-**Step 2: Call `nanocrab validate` logic**
+**Step 2: Call `clawhive validate` logic**
 
-Import and run `load_config` from `nanocrab-core` to verify the generated files.
+Import and run `load_config` from `clawhive-core` to verify the generated files.
 
 **Step 3: Print Styled Success Summary**
 
-Display a summary panel listing all generated files (with green checkmarks), followed by a boxed "Next Steps" section with colored instructions for setting env vars and running `nanocrab start`. Example:
+Display a summary panel listing all generated files (with green checkmarks), followed by a boxed "Next Steps" section with colored instructions for setting env vars and running `clawhive start`. Example:
 
 ```
 ✅ Configuration complete!
@@ -282,17 +282,17 @@ Display a summary panel listing all generated files (with green checkmarks), fol
   Generated files:
     ✅ config/main.yaml
     ✅ config/providers.d/anthropic.yaml
-    ✅ config/agents.d/nanocrab-main.yaml
+    ✅ config/agents.d/clawhive-main.yaml
     ✅ config/routing.yaml
-    ✅ prompts/nanocrab-main/system.md
+    ✅ prompts/clawhive-main/system.md
 
   ┌─ Next Steps ───────────────────────────┐
   │                                         │
-  │  1. Validate: nanocrab validate         │
-  │  2. Start:    nanocrab start            │
+  │  1. Validate: clawhive validate         │
+  │  2. Start:    clawhive start            │
   │                                         │
   │  (Optional) Edit your agent persona:    │
-  │  prompts/nanocrab-main/system.md        │
+  │  prompts/clawhive-main/system.md        │
   │                                         │
   └─────────────────────────────────────────┘
 ```
@@ -302,14 +302,14 @@ Note: No environment variable setup needed — OAuth tokens are in `auth-profile
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/init.rs
+git add crates/clawhive-cli/src/init.rs
 git commit -m "feat: add final validation and directory creation to init"
 ```
 
 ### Task 6: Integration Testing for Wizard
 
 **Files:**
-- Create: `crates/nanocrab-cli/tests/init_test.rs`
+- Create: `crates/clawhive-cli/tests/init_test.rs`
 
 **Step 1: Write test that mocks user input (if possible) or verifies generated files**
 
@@ -326,11 +326,11 @@ fn test_standard_config_generation() {
 
 **Step 2: Run tests**
 
-Run: `cargo test -p nanocrab-cli`
+Run: `cargo test -p clawhive-cli`
 
 **Step 3: Commit**
 
 ```bash
-git add crates/nanocrab-cli/tests/init_test.rs
+git add crates/clawhive-cli/tests/init_test.rs
 git commit -m "test: add integration test for config generation"
 ```

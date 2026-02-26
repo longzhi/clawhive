@@ -153,7 +153,7 @@ finalScore = 0.7 × vectorScore + 0.3 × textScore(BM25)
 
 ---
 
-## 9. 对 nanocrab 的启示
+## 9. 对 clawhive 的启示
 
 ### 可直接借鉴
 1. **混合搜索 70/30 配比**：向量 + BM25，经 OpenClaw 和 memsearch 验证有效
@@ -162,7 +162,7 @@ finalScore = 0.7 × vectorScore + 0.3 × textScore(BM25)
 4. **Chunk ID 设计**：包含 model_version，换模型自动失效旧索引
 5. **Watch + 自动重建索引**：文件变更 → debounce → 重新索引
 
-### nanocrab 的差异化优势
+### clawhive 的差异化优势
 1. **结构化知识**：concepts 表（类型/置信度/状态/证据链）— OpenClaw 和 memsearch 都没有
 2. **自动记录**：每条消息自动写入 episodes，不依赖 LLM 主动性
 3. **巩固机制**：Consolidator 从 episodes 自动提取 concepts，有证据链关联

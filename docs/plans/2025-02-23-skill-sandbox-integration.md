@@ -15,8 +15,8 @@
 ### Task 1: SkillFrontmatter 添加 permissions 字段
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/skill.rs`
-- Modify: `crates/nanocrab-core/Cargo.toml`（已有 corral-core 依赖，无需改动）
+- Modify: `crates/clawhive-core/src/skill.rs`
+- Modify: `crates/clawhive-core/Cargo.toml`（已有 corral-core 依赖，无需改动）
 
 **Step 1: 写失败测试**
 
@@ -56,7 +56,7 @@ fn parse_frontmatter_without_permissions_is_none() {
 
 **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p nanocrab-core -- skill::tests::parse_frontmatter_with_permissions -v`
+Run: `cargo test -p clawhive-core -- skill::tests::parse_frontmatter_with_permissions -v`
 Expected: FAIL — `SkillFrontmatter` 没有 `permissions` 字段
 
 **Step 3: 实现**
@@ -98,13 +98,13 @@ permissions:
 
 **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p nanocrab-core -- skill::tests -v`
+Run: `cargo test -p clawhive-core -- skill::tests -v`
 Expected: ALL PASS
 
 **Step 5: Commit**
 
 ```
-git add crates/nanocrab-core/src/skill.rs
+git add crates/clawhive-core/src/skill.rs
 git commit -m "feat(skill): add permissions field to SkillFrontmatter with corral Permissions mapping"
 ```
 
@@ -113,9 +113,9 @@ git commit -m "feat(skill): add permissions field to SkillFrontmatter with corra
 ### Task 2: ToolContext — 在 tool 执行链路中传递 PolicyEngine
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/tool.rs`
+- Modify: `crates/clawhive-core/src/tool.rs`
 - Modify: 所有 tool 实现文件的 `execute` 签名（shell_tool, file_tools, web_fetch_tool, web_search_tool, memory_tools, subagent_tool）
-- Modify: `crates/nanocrab-core/src/orchestrator.rs`（tool_use_loop 传递 context）
+- Modify: `crates/clawhive-core/src/orchestrator.rs`（tool_use_loop 传递 context）
 
 **Step 1: 写失败测试**
 
@@ -217,7 +217,7 @@ let result = match self.tool_registry.execute(&name, input, &ctx).await { ... };
 
 **Step 4: 跑全量测试**
 
-Run: `cargo test -p nanocrab-core -v`
+Run: `cargo test -p clawhive-core -v`
 Expected: ALL PASS（行为无变化，只是签名改了）
 
 **Step 5: Commit**
@@ -231,8 +231,8 @@ git commit -m "refactor(tool): add ToolContext to ToolExecutor trait for permiss
 ### Task 3: Orchestrator 计算有效权限
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/orchestrator.rs`
-- Modify: `crates/nanocrab-core/src/skill.rs`（SkillRegistry 添加合并方法）
+- Modify: `crates/clawhive-core/src/orchestrator.rs`
+- Modify: `crates/clawhive-core/src/skill.rs`（SkillRegistry 添加合并方法）
 
 **Step 1: 写失败测试**
 
@@ -350,7 +350,7 @@ let ctx = match self.skill_registry.merged_permissions() {
 
 **Step 4: 跑测试**
 
-Run: `cargo test -p nanocrab-core -v`
+Run: `cargo test -p clawhive-core -v`
 Expected: ALL PASS
 
 **Step 5: Commit**
@@ -364,7 +364,7 @@ git commit -m "feat(skill): compute merged permissions from active skills and wi
 ### Task 4: file_tools 接入 PolicyEngine（Layer 1）
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/file_tools.rs`
+- Modify: `crates/clawhive-core/src/file_tools.rs`
 
 **Step 1: 写失败测试**
 
@@ -440,7 +440,7 @@ if !ctx.check_read(relative.to_str().unwrap_or("")) {
 
 **Step 4: 跑测试**
 
-Run: `cargo test -p nanocrab-core -- file_tools -v`
+Run: `cargo test -p clawhive-core -- file_tools -v`
 Expected: ALL PASS
 
 **Step 5: Commit**
@@ -454,7 +454,7 @@ git commit -m "feat(file_tools): enforce PolicyEngine read/write checks from ski
 ### Task 5: web_fetch_tool 接入 PolicyEngine（Layer 1）
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/web_fetch_tool.rs`
+- Modify: `crates/clawhive-core/src/web_fetch_tool.rs`
 
 **Step 1: 写失败测试**
 
@@ -510,7 +510,7 @@ if let Ok(parsed) = url::Url::parse(url) {
 
 **Step 4: 跑测试**
 
-Run: `cargo test -p nanocrab-core -- web_fetch -v`
+Run: `cargo test -p clawhive-core -- web_fetch -v`
 Expected: ALL PASS
 
 **Step 5: Commit**
@@ -524,7 +524,7 @@ git commit -m "feat(web_fetch): enforce PolicyEngine network checks from skill p
 ### Task 6: shell_tool 使用 Skill 来源的权限构建 Sandbox（Layer 2）
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/shell_tool.rs`
+- Modify: `crates/clawhive-core/src/shell_tool.rs`
 
 **Step 1: 写失败测试**
 
@@ -596,7 +596,7 @@ fn sandbox_from_policy(workspace: &Path, policy: &PolicyEngine) -> Result<Sandbo
 
 **Step 4: 跑测试**
 
-Run: `cargo test -p nanocrab-core -- shell_tool -v`
+Run: `cargo test -p clawhive-core -- shell_tool -v`
 Expected: ALL PASS
 
 **Step 5: Commit**
@@ -645,7 +645,7 @@ git commit -m "docs(skills): add permissions declarations to existing skills"
 ### Task 8: 集成测试 — 端到端验证
 
 **Files:**
-- Create: `crates/nanocrab-core/tests/sandbox_integration.rs`
+- Create: `crates/clawhive-core/tests/sandbox_integration.rs`
 
 写一个集成测试：
 

@@ -10,7 +10,7 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via email to: **security@nanocrab.dev** (or create a private security advisory on GitHub).
+Instead, please report them via email to: **security@clawhive.dev** (or create a private security advisory on GitHub).
 
 ### What to Include
 
@@ -52,7 +52,7 @@ Instead, please report them via email to: **security@nanocrab.dev** (or create a
 
 ### Best Practices for Deployment
 
-1. Run nanocrab with minimal privileges
+1. Run clawhive with minimal privileges
 2. Use a dedicated user account
 3. Configure restrictive tool allowlists
 4. Set appropriate rate limits
@@ -62,7 +62,7 @@ Instead, please report them via email to: **security@nanocrab.dev** (or create a
 ## Scope
 
 This security policy applies to:
-- The nanocrab binary and all official crates
+- The clawhive binary and all official crates
 - Official Docker images (when available)
 - The install.sh script
 

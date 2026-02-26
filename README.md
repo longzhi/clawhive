@@ -1,10 +1,10 @@
-# nanocrab
+# clawhive
 
 A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and Telegram-first deployment.
 
 ## 🔐 Security First
 
-nanocrab implements a **two-layer security architecture** that provides defense-in-depth for AI agent tool execution:
+clawhive implements a **two-layer security architecture** that provides defense-in-depth for AI agent tool execution:
 
 ### Hard Baseline (Always Enforced)
 
@@ -66,7 +66,7 @@ permissions:
 
 ## Overview
 
-nanocrab is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
+clawhive is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
 
 The memory system follows a "Markdown as source of truth" philosophy. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 is used only as a search index layer, enabling hybrid vector + full-text retrieval.
 
@@ -74,7 +74,7 @@ Each agent has its own persona (system prompts), model policy (primary + fallbac
 
 ## Technical Differentiators (vs OpenClaw)
 
-| Aspect | nanocrab | OpenClaw |
+| Aspect | clawhive | OpenClaw |
 |--------|----------|----------|
 | **Runtime** | Pure Rust binary, embedded SQLite | Node.js runtime |
 | **Security Model** | Two-layer policy (hard baseline + origin trust) | Tool allowlist |
@@ -133,16 +133,16 @@ Telegram ──→ Gateway ──→ Orchestrator ──→ LLM Provider (Anthro
 
 ```
 crates/
-├── nanocrab-cli/               # CLI binary (clap) — start, chat, validate, consolidate, agent/skill/session/task
-├── nanocrab-core/              # Orchestrator, session mgmt, config, persona, skill system, sub-agent, LLM router
-├── nanocrab-memory/            # Memory system — file store (MEMORY.md + daily), session JSONL, SQLite index, chunker, embedding
-├── nanocrab-gateway/           # Gateway with agent routing and per-user rate limiting
-├── nanocrab-bus/               # Topic-based in-process event bus (pub/sub)
-├── nanocrab-provider/          # LLM provider trait + Anthropic Claude adapter (streaming, retry)
-├── nanocrab-channels-telegram/ # Telegram adapter via teloxide
-├── nanocrab-schema/            # Shared DTOs (InboundMessage, OutboundMessage, BusMessage, SessionKey)
-├── nanocrab-runtime/           # Task executor abstraction (native + WASM skeleton)
-└── nanocrab-tui/               # Real-time terminal dashboard (ratatui)
+├── clawhive-cli/               # CLI binary (clap) — start, chat, validate, consolidate, agent/skill/session/task
+├── clawhive-core/              # Orchestrator, session mgmt, config, persona, skill system, sub-agent, LLM router
+├── clawhive-memory/            # Memory system — file store (MEMORY.md + daily), session JSONL, SQLite index, chunker, embedding
+├── clawhive-gateway/           # Gateway with agent routing and per-user rate limiting
+├── clawhive-bus/               # Topic-based in-process event bus (pub/sub)
+├── clawhive-provider/          # LLM provider trait + Anthropic Claude adapter (streaming, retry)
+├── clawhive-channels-telegram/ # Telegram adapter via teloxide
+├── clawhive-schema/            # Shared DTOs (InboundMessage, OutboundMessage, BusMessage, SessionKey)
+├── clawhive-runtime/           # Task executor abstraction (native + WASM skeleton)
+└── clawhive-tui/               # Real-time terminal dashboard (ratatui)
 
 config/
 ├── main.yaml                   # App settings, channel configuration
@@ -156,52 +156,52 @@ skills/                         # Skill definitions (SKILL.md with frontmatter)
 
 ## Installation (End Users)
 
-Download prebuilt binaries from [GitHub Releases](https://github.com/longzhi/nanocrab/releases).
+Download prebuilt binaries from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
 
 ### macOS (Intel)
 
 ```bash
-curl -LO https://github.com/longzhi/nanocrab/releases/download/vX.Y.Z/nanocrab-vX.Y.Z-x86_64-apple-darwin.tar.gz
-tar -xzf nanocrab-vX.Y.Z-x86_64-apple-darwin.tar.gz
-chmod +x nanocrab
-sudo mv nanocrab /usr/local/bin/
+curl -LO https://github.com/longzhi/clawhive/releases/download/vX.Y.Z/clawhive-vX.Y.Z-x86_64-apple-darwin.tar.gz
+tar -xzf clawhive-vX.Y.Z-x86_64-apple-darwin.tar.gz
+chmod +x clawhive
+sudo mv clawhive /usr/local/bin/
 ```
 
 ### macOS (Apple Silicon)
 
 ```bash
-curl -LO https://github.com/longzhi/nanocrab/releases/download/vX.Y.Z/nanocrab-vX.Y.Z-aarch64-apple-darwin.tar.gz
-tar -xzf nanocrab-vX.Y.Z-aarch64-apple-darwin.tar.gz
-chmod +x nanocrab
-sudo mv nanocrab /usr/local/bin/
+curl -LO https://github.com/longzhi/clawhive/releases/download/vX.Y.Z/clawhive-vX.Y.Z-aarch64-apple-darwin.tar.gz
+tar -xzf clawhive-vX.Y.Z-aarch64-apple-darwin.tar.gz
+chmod +x clawhive
+sudo mv clawhive /usr/local/bin/
 ```
 
 ### Ubuntu (x86_64)
 
 ```bash
-curl -LO https://github.com/longzhi/nanocrab/releases/download/vX.Y.Z/nanocrab-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf nanocrab-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
-chmod +x nanocrab
-sudo mv nanocrab /usr/local/bin/
+curl -LO https://github.com/longzhi/clawhive/releases/download/vX.Y.Z/clawhive-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf clawhive-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+chmod +x clawhive
+sudo mv clawhive /usr/local/bin/
 ```
 
 ### Run
 
 ```bash
 # Validate configuration
-nanocrab validate
+clawhive validate
 
 # Chat mode (local REPL)
 export ANTHROPIC_API_KEY=your-key
-nanocrab chat --agent nanocrab-main
+clawhive chat --agent clawhive-main
 
 # Start Telegram bot
 export TELEGRAM_BOT_TOKEN=your-token
 export ANTHROPIC_API_KEY=your-key
-nanocrab start
+clawhive start
 
 # Start with TUI dashboard
-nanocrab start --tui
+clawhive start --tui
 ```
 
 ## Quick Start (Developers)
@@ -210,8 +210,8 @@ Prerequisites: Rust 1.75+
 
 ```bash
 # Clone
-git clone https://github.com/longzhi/nanocrab.git
-cd nanocrab
+git clone https://github.com/longzhi/clawhive.git
+cd clawhive
 
 # Build
 cargo build --workspace
@@ -221,7 +221,7 @@ cargo run -- validate
 
 # Chat mode (local REPL, no Telegram needed)
 export ANTHROPIC_API_KEY=your-key
-cargo run -- chat --agent nanocrab-main
+cargo run -- chat --agent clawhive-main
 
 # Start Telegram bot
 export TELEGRAM_BOT_TOKEN=your-token
@@ -243,7 +243,7 @@ Model aliases: `sonnet` → `claude-sonnet-4-5`, `haiku` → `claude-3-5-haiku-l
 
 ## Memory System
 
-nanocrab uses a three-layer memory architecture inspired by neuroscience:
+clawhive uses a three-layer memory architecture inspired by neuroscience:
 
 1. **Session JSONL** (`sessions/<id>.jsonl`) — append-only conversation log, typed entries (message, tool_call, tool_result, compaction, model_change). Used for session recovery and audit trail.
 2. **Daily Files** (`memory/YYYY-MM-DD.md`) — daily observations written by LLM during conversations. Fallback summary generated if LLM didn't write anything in a session.

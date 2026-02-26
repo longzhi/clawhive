@@ -1,0 +1,20 @@
+[package]
+name = "clawhive-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures-core.workspace = true
+async-stream.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+clawhive-auth = { path = "../clawhive-auth" }
+uuid = { workspace = true, features = ["v4"] }

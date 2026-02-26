@@ -5,7 +5,7 @@
 **Goal:** Implement a scheduled task system that triggers agent actions via the existing Gateway/Orchestrator flow. Tasks can be created three ways: YAML config files, CLI/Web UI, or by the AI agent itself during conversation (via a `schedule` tool).
 
 **Architecture:**
-- New `nanocrab-scheduler` crate: `ScheduleConfig`, `ScheduleManager`, schedule computation, state persistence.
+- New `clawhive-scheduler` crate: `ScheduleConfig`, `ScheduleManager`, schedule computation, state persistence.
 - `ScheduleManager` loads configs from `config/schedules.d/`, manages tokio timers, publishes `ScheduledTaskTriggered` events to `EventBus`.
 - `Gateway` subscribes to the event and injects `InboundMessage(channel_type: "scheduler")` into the standard flow — **Orchestrator needs zero modification**.
 - A `schedule` tool is exposed to agents, allowing the AI to autonomously create/manage scheduled tasks during conversation (e.g. "remind me in 20 minutes"). Agent-created schedules take effect immediately (hot-add to running ScheduleManager) and persist to YAML for restart survival.
@@ -19,7 +19,7 @@ schedule:
   kind: cron
   expr: "0 9 * * *"
   tz: "Asia/Shanghai"
-agent_id: nanocrab-main
+agent_id: clawhive-main
 session_mode: isolated
 task: "Summarize yesterday's key events and today's calendar."
 timeout_seconds: 300
@@ -34,24 +34,24 @@ delivery:
 
 ---
 
-### Task 1: Create `nanocrab-scheduler` crate and define schemas
+### Task 1: Create `clawhive-scheduler` crate and define schemas
 
 **Files:**
-- Create: `crates/nanocrab-scheduler/Cargo.toml`
-- Create: `crates/nanocrab-scheduler/src/lib.rs`
-- Create: `crates/nanocrab-scheduler/src/config.rs`
+- Create: `crates/clawhive-scheduler/Cargo.toml`
+- Create: `crates/clawhive-scheduler/src/lib.rs`
+- Create: `crates/clawhive-scheduler/src/config.rs`
 - Modify: `Cargo.toml` (workspace members)
 
 **Step 1: Create the crate structure**
 
 ```toml
 [package]
-name = "nanocrab-scheduler"
+name = "clawhive-scheduler"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nanocrab-schema = { path = "../nanocrab-schema" }
+clawhive-schema = { path = "../clawhive-schema" }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
@@ -62,7 +62,7 @@ uuid = { version = "1.0", features = ["v4"] }
 **Step 2: Define `ScheduleConfig`**
 
 ```rust
-// crates/nanocrab-scheduler/src/config.rs
+// crates/clawhive-scheduler/src/config.rs
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduleConfig {
@@ -142,7 +142,7 @@ pub enum DeliveryMode {
 **Step 3: Define `ScheduleState` (runtime state, separate from config)**
 
 ```rust
-// crates/nanocrab-scheduler/src/state.rs
+// crates/clawhive-scheduler/src/state.rs
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScheduleState {
@@ -181,7 +181,7 @@ pub struct RunRecord {
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-scheduler
+git add crates/clawhive-scheduler
 git commit -m "feat(scheduler): initialize scheduler crate with config and state schemas"
 ```
 
@@ -190,13 +190,13 @@ git commit -m "feat(scheduler): initialize scheduler crate with config and state
 ### Task 2: Implement Schedule Computation Logic
 
 **Files:**
-- Create: `crates/nanocrab-scheduler/src/logic.rs`
-- Test: `crates/nanocrab-scheduler/src/logic.rs`
+- Create: `crates/clawhive-scheduler/src/logic.rs`
+- Test: `crates/clawhive-scheduler/src/logic.rs`
 
 **Step 1: Implement `compute_next_run_at_ms()`**
 
 ```rust
-// crates/nanocrab-scheduler/src/compute.rs
+// crates/clawhive-scheduler/src/compute.rs
 
 use cron::Schedule as CronSchedule;
 use chrono::{Utc, TimeZone};
@@ -313,7 +313,7 @@ mod tests {
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-scheduler/src/compute.rs
+git add crates/clawhive-scheduler/src/compute.rs
 git commit -m "feat(scheduler): implement schedule computation with cron, at, and every"
 ```
 
@@ -322,13 +322,13 @@ git commit -m "feat(scheduler): implement schedule computation with cron, at, an
 ### Task 3: Build `ScheduleManager` and Timer Loop
 
 **Files:**
-- Create: `crates/nanocrab-scheduler/src/manager.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (to initialize manager)
+- Create: `crates/clawhive-scheduler/src/manager.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (to initialize manager)
 
 **Step 1: Define `ScheduleEntry` (config + runtime state combined)**
 
 ```rust
-// crates/nanocrab-scheduler/src/manager.rs
+// crates/clawhive-scheduler/src/manager.rs
 
 /// A schedule entry in the manager — config + live state.
 pub struct ScheduleEntry {
@@ -471,7 +471,7 @@ impl ScheduleManager {
 }
 ```
 
-**Step 3: Wire into startup** (`crates/nanocrab-cli/src/main.rs`)
+**Step 3: Wire into startup** (`crates/clawhive-cli/src/main.rs`)
 
 Reference the existing `ConsolidationScheduler::start()` pattern:
 
@@ -489,7 +489,7 @@ let _schedule_handle = tokio::spawn(async move {
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-scheduler/src/manager.rs crates/nanocrab-cli/src/main.rs
+git add crates/clawhive-scheduler/src/manager.rs crates/clawhive-cli/src/main.rs
 git commit -m "feat(scheduler): implement ScheduleManager with smart timer and hot-add"
 ```
 
@@ -498,13 +498,13 @@ git commit -m "feat(scheduler): implement ScheduleManager with smart timer and h
 ### Task 4: EventBus Integration and Gateway Handler
 
 **Files:**
-- Modify: `crates/nanocrab-bus/src/lib.rs`
-- Modify: `crates/nanocrab-gateway/src/lib.rs`
+- Modify: `crates/clawhive-bus/src/lib.rs`
+- Modify: `crates/clawhive-gateway/src/lib.rs`
 
-**Step 1: Add topic and message variant to `nanocrab-bus`**
+**Step 1: Add topic and message variant to `clawhive-bus`**
 
 ```rust
-// crates/nanocrab-bus/src/lib.rs
+// crates/clawhive-bus/src/lib.rs
 
 pub enum Topic {
     // ... existing topics
@@ -536,7 +536,7 @@ pub enum BusMessage {
 **Step 2: Subscribe in Gateway and construct `InboundMessage`**
 
 ```rust
-// crates/nanocrab-gateway/src/lib.rs
+// crates/clawhive-gateway/src/lib.rs
 
 /// Called during Gateway startup — subscribe to schedule events.
 async fn listen_for_scheduled_tasks(gateway: Arc<Gateway>, bus: Arc<EventBus>) {
@@ -601,7 +601,7 @@ The manager listens for completion events to record results, update `consecutive
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-bus/src/lib.rs crates/nanocrab-gateway/src/lib.rs crates/nanocrab-scheduler/src/manager.rs
+git add crates/clawhive-bus/src/lib.rs crates/clawhive-gateway/src/lib.rs crates/clawhive-scheduler/src/manager.rs
 git commit -m "feat(scheduler): EventBus integration with Gateway trigger and completion loop"
 ```
 
@@ -610,15 +610,15 @@ git commit -m "feat(scheduler): EventBus integration with Gateway trigger and co
 ### Task 5: State Persistence and Run History
 
 **Files:**
-- Create: `crates/nanocrab-scheduler/src/state.rs`
-- Modify: `crates/nanocrab-scheduler/src/manager.rs`
+- Create: `crates/clawhive-scheduler/src/state.rs`
+- Modify: `crates/clawhive-scheduler/src/manager.rs`
 
 **Step 1: Implement `StateStore` for `data/schedules/state.json`**
 
 Persists all `ScheduleState` entries as a JSON object keyed by `schedule_id`. Loaded at startup, written after every state change.
 
 ```rust
-// crates/nanocrab-scheduler/src/persistence.rs
+// crates/clawhive-scheduler/src/persistence.rs
 
 pub struct StateStore {
     path: PathBuf,  // data/schedules/state.json
@@ -683,7 +683,7 @@ impl HistoryStore {
 **Step 3: Commit**
 
 ```bash
-git add crates/nanocrab-scheduler/src/persistence.rs
+git add crates/clawhive-scheduler/src/persistence.rs
 git commit -m "feat(scheduler): add state persistence and JSONL run history"
 ```
 
@@ -692,12 +692,12 @@ git commit -m "feat(scheduler): add state persistence and JSONL run history"
 ### Task 6: Error Handling and Backoff Logic
 
 **Files:**
-- Modify: `crates/nanocrab-scheduler/src/manager.rs`
+- Modify: `crates/clawhive-scheduler/src/manager.rs`
 
 **Step 1: Implement exponential backoff schedule (5 levels)**
 
 ```rust
-// crates/nanocrab-scheduler/src/backoff.rs
+// crates/clawhive-scheduler/src/backoff.rs
 
 const ERROR_BACKOFF_MS: &[u64] = &[
     30_000,       // 1st error  →  30s
@@ -807,7 +807,7 @@ fn test_consecutive_errors_trigger_disable() {
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-scheduler/src/backoff.rs crates/nanocrab-scheduler/src/manager.rs
+git add crates/clawhive-scheduler/src/backoff.rs crates/clawhive-scheduler/src/manager.rs
 git commit -m "feat(scheduler): implement 5-level exponential backoff and auto-disable"
 ```
 
@@ -819,17 +819,17 @@ git commit -m "feat(scheduler): implement 5-level exponential backoff and auto-d
 > When a user says "remind me in 20 minutes to check the oven", the agent calls this tool.
 
 **Files:**
-- Create: `crates/nanocrab-core/src/schedule_tool.rs`
-- Modify: `crates/nanocrab-core/src/orchestrator.rs` (register tool)
+- Create: `crates/clawhive-core/src/schedule_tool.rs`
+- Modify: `crates/clawhive-core/src/orchestrator.rs` (register tool)
 
 **Step 1: Define tool schema**
 
 The tool exposes CRUD operations to the LLM via function calling:
 
 ```rust
-// crates/nanocrab-core/src/schedule_tool.rs
+// crates/clawhive-core/src/schedule_tool.rs
 
-use nanocrab_scheduler::{ScheduleConfig, ScheduleType, SessionMode, DeliveryConfig, ScheduleManager};
+use clawhive_scheduler::{ScheduleConfig, ScheduleType, SessionMode, DeliveryConfig, ScheduleManager};
 
 pub const SCHEDULE_TOOL_NAME: &str = "schedule";
 
@@ -986,7 +986,7 @@ impl ToolExecutor for ScheduleTool {
 **Step 3: Register tool in orchestrator**
 
 ```rust
-// In orchestrator tool registration (crates/nanocrab-core/src/orchestrator.rs)
+// In orchestrator tool registration (crates/clawhive-core/src/orchestrator.rs)
 // Add alongside existing tools (file_tools, web_fetch, shell_tool, etc.)
 
 let schedule_tool = ScheduleTool { manager: schedule_manager.clone() };
@@ -996,7 +996,7 @@ tools.insert(SCHEDULE_TOOL_NAME.to_string(), Box::new(schedule_tool));
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-core/src/schedule_tool.rs crates/nanocrab-core/src/orchestrator.rs
+git add crates/clawhive-core/src/schedule_tool.rs crates/clawhive-core/src/orchestrator.rs
 git commit -m "feat(scheduler): expose schedule tool to agents for autonomous task management"
 ```
 
@@ -1005,7 +1005,7 @@ git commit -m "feat(scheduler): expose schedule tool to agents for autonomous ta
 ### Task 8: CLI Management Commands
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs`
+- Modify: `crates/clawhive-cli/src/main.rs`
 
 **Step 1: Add `schedule` subcommand group**
 
@@ -1084,7 +1084,7 @@ ScheduleCommands::History { schedule_id, limit } => {
 **Step 3: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/main.rs
+git add crates/clawhive-cli/src/main.rs
 git commit -m "feat(cli): add schedule list/run/enable/disable/history commands"
 ```
 
@@ -1093,13 +1093,13 @@ git commit -m "feat(cli): add schedule list/run/enable/disable/history commands"
 ### Task 9: Backend API Endpoints
 
 **Files:**
-- Create: `crates/nanocrab-server/src/routes/schedules.rs`
-- Modify: `crates/nanocrab-server/src/routes/mod.rs` (register routes)
+- Create: `crates/clawhive-server/src/routes/schedules.rs`
+- Modify: `crates/clawhive-server/src/routes/mod.rs` (register routes)
 
 **Step 1: Define API response types**
 
 ```rust
-// crates/nanocrab-server/src/routes/schedules.rs
+// crates/clawhive-server/src/routes/schedules.rs
 
 #[derive(Serialize)]
 pub struct ScheduleListItem {
@@ -1156,7 +1156,7 @@ async fn schedule_history(
 **Step 3: Register routes**
 
 ```rust
-// crates/nanocrab-server/src/routes/mod.rs
+// crates/clawhive-server/src/routes/mod.rs
 pub fn api_routes(state: AppState) -> Router {
     Router::new()
         // ... existing routes
@@ -1171,7 +1171,7 @@ pub fn api_routes(state: AppState) -> Router {
 **Step 4: Commit**
 
 ```bash
-git add crates/nanocrab-server/src/routes/schedules.rs crates/nanocrab-server/src/routes/mod.rs
+git add crates/clawhive-server/src/routes/schedules.rs crates/clawhive-server/src/routes/mod.rs
 git commit -m "feat(api): add schedule management REST endpoints"
 ```
 
@@ -1282,7 +1282,7 @@ git commit -m "feat(web): add schedules management page with status and controls
 ### Task 11: Integration Tests
 
 **Files:**
-- Create: `crates/nanocrab-scheduler/tests/integration.rs`
+- Create: `crates/clawhive-scheduler/tests/integration.rs`
 
 **Step 1: Test schedule computation**
 
@@ -1297,7 +1297,7 @@ schedule:
   kind: cron
   expr: "0 9 * * *"
   tz: "Asia/Shanghai"
-agent_id: nanocrab-main
+agent_id: clawhive-main
 session_mode: isolated
 task: "Test task"
 "#;
@@ -1395,12 +1395,12 @@ async fn test_schedule_tool_add_hot_loads() {
 **Step 5: Run all tests**
 
 ```bash
-cargo test -p nanocrab-scheduler
+cargo test -p clawhive-scheduler
 ```
 
 **Step 6: Commit**
 
 ```bash
-git add crates/nanocrab-scheduler/tests/
+git add crates/clawhive-scheduler/tests/
 git commit -m "test(scheduler): add integration tests for config, trigger, backoff, and agent tool"
 ```

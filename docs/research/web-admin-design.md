@@ -25,8 +25,8 @@ Design a professional, responsive web admin interface for NanoCrab, supporting b
 ## Architecture Decision
 
 ### Current State
-- **No HTTP API exists** - nanocrab is CLI/TUI/Telegram only
-- Need to build `nanocrab-server` (axum) as API layer
+- **No HTTP API exists** - clawhive is CLI/TUI/Telegram only
+- Need to build `clawhive-server` (axum) as API layer
 - Configuration is YAML-file-driven, memory is Markdown-file-driven
 
 ### Recommended Backend: Axum
@@ -170,7 +170,7 @@ GET    /api/metrics              - System metrics snapshot
 - [OpenAI Codex TUI](https://github.com/openai/codex) - Rust streaming patterns
 
 ## Prerequisites (before implementation)
-1. Extract `bootstrap()` to `nanocrab-core` (shared with devtui plan)
+1. Extract `bootstrap()` to `clawhive-core` (shared with devtui plan)
 2. Add `axum`, `tower-http`, `tokio-tungstenite` to workspace dependencies
-3. Create `crates/nanocrab-server/` crate
+3. Create `crates/clawhive-server/` crate
 4. Design API authentication strategy (API key? JWT? Local-only?)

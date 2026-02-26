@@ -1,20 +1,20 @@
 # Setup Command Redesign
 
-Replace the one-shot `nanocrab init` wizard with a reentrant `nanocrab setup` configuration manager.
+Replace the one-shot `clawhive init` wizard with a reentrant `clawhive setup` configuration manager.
 
 ## Problem
 
-`nanocrab init` is all-or-nothing: it either crashes on existing files or `--force` overwrites everything. Users cannot incrementally add a provider, channel, or agent after initial setup without hand-editing YAML.
+`clawhive init` is all-or-nothing: it either crashes on existing files or `--force` overwrites everything. Users cannot incrementally add a provider, channel, or agent after initial setup without hand-editing YAML.
 
 ## Design
 
 ### Entry Point
 
 ```
-nanocrab setup [--force]
+clawhive setup [--force]
 ```
 
-- `nanocrab init` is **removed** (or aliased to `setup` with a deprecation notice).
+- `clawhive init` is **removed** (or aliased to `setup` with a deprecation notice).
 - `--force` skips confirmation prompts on Reconfigure/Remove (power-user escape hatch).
 
 ### Flow
@@ -29,21 +29,21 @@ nanocrab setup [--force]
 ### Dashboard Display
 
 ```
-🦀 nanocrab configuration
+🦀 clawhive configuration
 
   Providers
     ✓ anthropic    API key (env: ANTHROPIC_API_KEY)
     ✓ openai       OAuth (dragon@gmail.com)
 
   Agents
-    ✓ nanocrab-main   🤖 nanocrab (claude-sonnet-4-5)
+    ✓ clawhive-main   🤖 clawhive (claude-sonnet-4-5)
 
   Channels
     ✓ tg-main      Telegram
     ✓ dc-main      Discord
 
   Routing
-    ✓ default → nanocrab-main
+    ✓ default → clawhive-main
 ```
 
 Rules:
@@ -125,10 +125,10 @@ Connector ID: [tg-main]
 Bot token: ****
 
 Route messages to which agent?
-❯ nanocrab-main
+❯ clawhive-main
   my-agent
 
-✓ Channel tg-main configured, routed to nanocrab-main.
+✓ Channel tg-main configured, routed to clawhive-main.
 ```
 
 Agent list is **dynamically generated** from configured agents.
@@ -143,4 +143,4 @@ Not independently editable. Routing is configured as part of the Add/Modify Chan
 - Reuse existing prompt functions from `init.rs` (prompt_provider, prompt_agent_setup, prompt_channel_config) — refactor from write-all-at-end to write-per-action.
 - Config scanning: use `load_config()` for validation, but also read individual YAML files directly for dashboard display (need provider auth details that load_config may normalize away).
 - YAML mutation for main.yaml/routing.yaml: read → parse → modify section → write back. Do not regenerate from scratch.
-- The `nanocrab init` command should be replaced by `nanocrab setup`. Remove the Init variant from Commands enum and add Setup.
+- The `clawhive init` command should be replaced by `clawhive setup`. Remove the Init variant from Commands enum and add Setup.

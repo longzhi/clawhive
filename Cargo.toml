@@ -1,20 +1,20 @@
 [workspace]
 resolver = "2"
-default-members = ["crates/nanocrab-cli"]
+default-members = ["crates/clawhive-cli"]
 members = [
-  "crates/nanocrab-schema",
-  "crates/nanocrab-bus",
-  "crates/nanocrab-core",
-  "crates/nanocrab-gateway",
-  "crates/nanocrab-memory",
-  "crates/nanocrab-runtime",
-  "crates/nanocrab-provider",
-  "crates/nanocrab-auth",
-  "crates/nanocrab-channels",
-  "crates/nanocrab-cli",
-  "crates/nanocrab-tui",
-  "crates/nanocrab-server",
-  "crates/nanocrab-scheduler",
+  "crates/clawhive-schema",
+  "crates/clawhive-bus",
+  "crates/clawhive-core",
+  "crates/clawhive-gateway",
+  "crates/clawhive-memory",
+  "crates/clawhive-runtime",
+  "crates/clawhive-provider",
+  "crates/clawhive-auth",
+  "crates/clawhive-channels",
+  "crates/clawhive-cli",
+  "crates/clawhive-tui",
+  "crates/clawhive-server",
+  "crates/clawhive-scheduler",
 ]
 
 [workspace.package]

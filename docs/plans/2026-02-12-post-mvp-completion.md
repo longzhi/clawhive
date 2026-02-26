@@ -4,7 +4,7 @@
 
 **Goal:** Complete all spec-defined features beyond the MVP milestone — skill system, consolidation scheduling, sub-agent lifecycle, CLI/TUI maturity, and gateway hardening.
 
-**Architecture:** Extend existing crate modules. No new crates needed. Skill system goes in nanocrab-core as a new module. Gateway rate limiting uses in-memory token bucket. TUI subscribes to real bus events via mpsc channel bridge.
+**Architecture:** Extend existing crate modules. No new crates needed. Skill system goes in clawhive-core as a new module. Gateway rate limiting uses in-memory token bucket. TUI subscribes to real bus events via mpsc channel bridge.
 
 **Tech Stack:** Rust 2021, tokio, ratatui, crossterm, serde_yaml (frontmatter parsing)
 
@@ -27,19 +27,19 @@ T6: Gateway Rate Limiting
 
 ### Task T1: Skill System
 
-**Crate:** `nanocrab-core` (new module `skill.rs`)
+**Crate:** `clawhive-core` (new module `skill.rs`)
 **Estimated:** ~200 lines
 
 **Files:**
-- Create: `crates/nanocrab-core/src/skill.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (add `pub mod skill; pub use skill::*;`)
-- Modify: `crates/nanocrab-core/src/orchestrator.rs` (inject skill summary into system prompt)
+- Create: `crates/clawhive-core/src/skill.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (add `pub mod skill; pub use skill::*;`)
+- Modify: `crates/clawhive-core/src/orchestrator.rs` (inject skill summary into system prompt)
 - Create: `skills/example/SKILL.md` (sample skill for testing)
 
 **Design:**
 
 ```rust
-// crates/nanocrab-core/src/skill.rs
+// crates/clawhive-core/src/skill.rs
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
@@ -221,12 +221,12 @@ fn bin_exists(name: &str) -> bool {
 
 ### Task T2: Consolidation Cron Scheduler
 
-**Crate:** `nanocrab-core` (extend `consolidation.rs`)
+**Crate:** `clawhive-core` (extend `consolidation.rs`)
 **Estimated:** ~60 lines
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/consolidation.rs` (add `ConsolidationScheduler`)
-- Modify: `crates/nanocrab-cli/src/main.rs` (start scheduler in `start_bot`, add `consolidate` subcommand)
+- Modify: `crates/clawhive-core/src/consolidation.rs` (add `ConsolidationScheduler`)
+- Modify: `crates/clawhive-cli/src/main.rs` (start scheduler in `start_bot`, add `consolidate` subcommand)
 
 **Design:**
 
@@ -295,11 +295,11 @@ enum Commands {
 
 ### Task T3: Sub-Agent cancel + result_merge
 
-**Crate:** `nanocrab-core` (extend `subagent.rs`)
+**Crate:** `clawhive-core` (extend `subagent.rs`)
 **Estimated:** ~100 lines
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/subagent.rs`
+- Modify: `crates/clawhive-core/src/subagent.rs`
 
 **Design:**
 
@@ -376,12 +376,12 @@ impl SubAgentRunner {
 
 ### Task T6: Gateway Rate Limiting
 
-**Crate:** `nanocrab-gateway` (extend `lib.rs`)
+**Crate:** `clawhive-gateway` (extend `lib.rs`)
 **Estimated:** ~120 lines
 
 **Files:**
-- Modify: `crates/nanocrab-gateway/src/lib.rs`
-- Modify: `crates/nanocrab-core/src/config.rs` (add rate limit config structs)
+- Modify: `crates/clawhive-gateway/src/lib.rs`
+- Modify: `crates/clawhive-core/src/config.rs` (add rate limit config structs)
 
 **Design — Token Bucket rate limiter:**
 
@@ -485,11 +485,11 @@ rate_limit:
 ### Task T4: CLI Completion
 
 **Depends on:** T1 (skill system), T2 (consolidation scheduler)
-**Crate:** `nanocrab-cli`
+**Crate:** `clawhive-cli`
 **Estimated:** ~150 lines
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs`
+- Modify: `crates/clawhive-cli/src/main.rs`
 
 **New subcommands:**
 
@@ -497,7 +497,7 @@ rate_limit:
 #[derive(Subcommand)]
 enum Commands {
     Start,
-    Chat { #[arg(long, default_value = "nanocrab-main")] agent: String },
+    Chat { #[arg(long, default_value = "clawhive-main")] agent: String },
     Validate,
     Consolidate,
     #[command(subcommand, about = "Agent management")]
@@ -535,12 +535,12 @@ enum SkillCommands {
 ### Task T5: TUI Real-Time
 
 **Depends on:** EventBus (already exists)
-**Crate:** `nanocrab-tui`
+**Crate:** `clawhive-tui`
 **Estimated:** ~350 lines
 
 **Files:**
-- Rewrite: `crates/nanocrab-tui/src/main.rs`
-- Modify: `crates/nanocrab-tui/Cargo.toml` (add nanocrab-core, nanocrab-memory, nanocrab-provider, nanocrab-gateway deps)
+- Rewrite: `crates/clawhive-tui/src/main.rs`
+- Modify: `crates/clawhive-tui/Cargo.toml` (add clawhive-core, clawhive-memory, clawhive-provider, clawhive-gateway deps)
 
 **Design — 4-panel layout:**
 
@@ -554,7 +554,7 @@ enum SkillCommands {
 │  (sub-agent status)  │  (filtered by trace) │
 │                      │                      │
 └──────────────────────┴──────────────────────┘
-  [q] quit  [Tab] focus  [↑↓] scroll  nanocrab TUI v0.2.0
+  [q] quit  [Tab] focus  [↑↓] scroll  clawhive TUI v0.2.0
 ```
 
 - Uses tokio runtime (switch main to async)
@@ -579,11 +579,11 @@ enum SkillCommands {
 **Steps:**
 1. `cargo build` — full workspace
 2. `cargo test` — all tests pass
-3. `nanocrab validate --config-root .` — config validation
-4. `nanocrab agent list --config-root .` — lists agents
-5. `nanocrab skill list --config-root .` — lists skills
-6. `nanocrab chat --config-root .` — REPL responds (uses stub provider if no API key)
-7. `nanocrab consolidate --config-root .` — runs consolidation
+3. `clawhive validate --config-root .` — config validation
+4. `clawhive agent list --config-root .` — lists agents
+5. `clawhive skill list --config-root .` — lists skills
+6. `clawhive chat --config-root .` — REPL responds (uses stub provider if no API key)
+7. `clawhive consolidate --config-root .` — runs consolidation
 8. Verify no warnings, clean diagnostics
 
 ---

@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add OpenAI-compatible LLM provider (chat + streaming + tool calling) and Discord channel adapter, while merging all channel adapters into a single `nanocrab-channels` crate with feature flags and a `ChannelBot` trait.
+**Goal:** Add OpenAI-compatible LLM provider (chat + streaming + tool calling) and Discord channel adapter, while merging all channel adapters into a single `clawhive-channels` crate with feature flags and a `ChannelBot` trait.
 
-**Architecture:** Three parallel workstreams: (1) `nanocrab-provider/src/openai.rs` implementing `LlmProvider` with OpenAI Chat Completions API format conversion, (2) `nanocrab-channels` crate replacing `nanocrab-channels-telegram` with feature-gated `telegram` and `discord` modules plus a shared `ChannelBot` trait, (3) CLI and config wiring to register both providers and start all enabled channel bots generically.
+**Architecture:** Three parallel workstreams: (1) `clawhive-provider/src/openai.rs` implementing `LlmProvider` with OpenAI Chat Completions API format conversion, (2) `clawhive-channels` crate replacing `clawhive-channels-telegram` with feature-gated `telegram` and `discord` modules plus a shared `ChannelBot` trait, (3) CLI and config wiring to register both providers and start all enabled channel bots generically.
 
 **Tech Stack:** reqwest + async-stream for OpenAI HTTP/SSE, serenity 0.12 for Discord gateway, teloxide 0.13 (existing) for Telegram.
 
@@ -13,8 +13,8 @@
 ## Task 1: Create OpenAI provider implementation
 
 **Files:**
-- Create: `crates/nanocrab-provider/src/openai.rs`
-- Modify: `crates/nanocrab-provider/src/lib.rs` — add `pub mod openai; pub use openai::OpenAiProvider;`
+- Create: `crates/clawhive-provider/src/openai.rs`
+- Modify: `crates/clawhive-provider/src/lib.rs` — add `pub mod openai; pub use openai::OpenAiProvider;`
 
 **What to implement:**
 
@@ -60,18 +60,18 @@ SSE streaming: parse `data: {...}` lines, emit `StreamChunk` for `choices[0].del
 
 ---
 
-## Task 2: Create `nanocrab-channels` crate with ChannelBot trait
+## Task 2: Create `clawhive-channels` crate with ChannelBot trait
 
 **Files:**
-- Create: `crates/nanocrab-channels/Cargo.toml`
-- Create: `crates/nanocrab-channels/src/lib.rs` — ChannelBot trait + feature-gated re-exports
-- Create: `crates/nanocrab-channels/src/telegram.rs` — move from `nanocrab-channels-telegram/src/lib.rs`
-- Create: `crates/nanocrab-channels/src/discord.rs` — new Discord adapter
+- Create: `crates/clawhive-channels/Cargo.toml`
+- Create: `crates/clawhive-channels/src/lib.rs` — ChannelBot trait + feature-gated re-exports
+- Create: `crates/clawhive-channels/src/telegram.rs` — move from `clawhive-channels-telegram/src/lib.rs`
+- Create: `crates/clawhive-channels/src/discord.rs` — new Discord adapter
 
 **Cargo.toml:**
 ```toml
 [package]
-name = "nanocrab-channels"
+name = "clawhive-channels"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -89,8 +89,8 @@ uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
-nanocrab-schema = { path = "../nanocrab-schema" }
-nanocrab-gateway = { path = "../nanocrab-gateway" }
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-gateway = { path = "../clawhive-gateway" }
 
 teloxide = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
@@ -100,7 +100,7 @@ serenity = { workspace = true, optional = true }
 **lib.rs:**
 ```rust
 use std::sync::Arc;
-use nanocrab_gateway::Gateway;
+use clawhive_gateway::Gateway;
 
 #[async_trait::async_trait]
 pub trait ChannelBot: Send {
@@ -116,7 +116,7 @@ pub mod telegram;
 pub mod discord;
 ```
 
-**telegram.rs:** Copy from `nanocrab-channels-telegram/src/lib.rs`, add `impl ChannelBot for TelegramBot`.
+**telegram.rs:** Copy from `clawhive-channels-telegram/src/lib.rs`, add `impl ChannelBot for TelegramBot`.
 
 **discord.rs:** New implementation:
 - `DiscordAdapter` with `to_inbound(guild_id: Option<u64>, channel_id: u64, user_id: u64, text)` → `InboundMessage`
@@ -130,27 +130,27 @@ pub mod discord;
 
 ---
 
-## Task 3: Remove old `nanocrab-channels-telegram` crate
+## Task 3: Remove old `clawhive-channels-telegram` crate
 
 **Files:**
-- Delete: `crates/nanocrab-channels-telegram/` (entire directory)
-- Modify: `Cargo.toml` (workspace) — remove `nanocrab-channels-telegram` from members, add `nanocrab-channels`, add `serenity` to workspace.dependencies
-- Modify: `crates/nanocrab-cli/Cargo.toml` — replace `nanocrab-channels-telegram` with `nanocrab-channels`
+- Delete: `crates/clawhive-channels-telegram/` (entire directory)
+- Modify: `Cargo.toml` (workspace) — remove `clawhive-channels-telegram` from members, add `clawhive-channels`, add `serenity` to workspace.dependencies
+- Modify: `crates/clawhive-cli/Cargo.toml` — replace `clawhive-channels-telegram` with `clawhive-channels`
 
-**Commit:** `refactor: remove old nanocrab-channels-telegram crate in favor of nanocrab-channels`
+**Commit:** `refactor: remove old clawhive-channels-telegram crate in favor of clawhive-channels`
 
 ---
 
 ## Task 4: Wire OpenAI provider + Discord channel into CLI
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs`
-  - Import `OpenAiProvider` from nanocrab-provider
-  - Import `ChannelBot` trait + `TelegramBot`, `DiscordBot` from nanocrab-channels
+- Modify: `crates/clawhive-cli/src/main.rs`
+  - Import `OpenAiProvider` from clawhive-provider
+  - Import `ChannelBot` trait + `TelegramBot`, `DiscordBot` from clawhive-channels
   - Add `"openai"` arm in `build_router_from_config` match
   - Refactor `start_bot()` to collect `Vec<Box<dyn ChannelBot>>` and spawn all
-- Modify: `crates/nanocrab-provider/src/lib.rs` — add `pub use openai::OpenAiProvider;`
-- Modify: `crates/nanocrab-core/src/config.rs`:
+- Modify: `crates/clawhive-provider/src/lib.rs` — add `pub use openai::OpenAiProvider;`
+- Modify: `crates/clawhive-core/src/config.rs`:
   - Add `DiscordConnectorConfig`, `DiscordChannelConfig`
   - Add `discord: Option<DiscordChannelConfig>` to `ChannelsConfig`
   - Update `resolve_main_env` for discord connectors

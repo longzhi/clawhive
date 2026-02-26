@@ -1,0 +1,22 @@
+[package]
+name = "clawhive-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-bus = { path = "../clawhive-bus" }
+anyhow.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz = "0.9"
+cron = "0.12"
+uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

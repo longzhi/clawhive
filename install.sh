@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# nanocrab installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/longzhi/nanocrab/main/install.sh | bash
+# clawhive installer
+# Usage: curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | bash
 #
 # Environment variables:
-#   NANOCRAB_VERSION  - specific version to install (default: latest)
-#   NANOCRAB_INSTALL  - installation directory (default: ~/.local/bin)
+#   CLAWHIVE_VERSION  - specific version to install (default: latest)
+#   CLAWHIVE_INSTALL  - installation directory (default: ~/.local/bin)
 #
 
 set -euo pipefail
 
 # --- Configuration ---
-REPO="longzhi/nanocrab"
-BINARY_NAME="nanocrab"
+REPO="longzhi/clawhive"
+BINARY_NAME="clawhive"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
 # --- Colors ---
@@ -87,18 +87,18 @@ main() {
     info "Detected platform: $platform"
 
     # Get version
-    local version="${NANOCRAB_VERSION:-}"
+    local version="${CLAWHIVE_VERSION:-}"
     if [[ -z "$version" ]]; then
         info "Fetching latest version..."
         version=$(get_latest_version)
         if [[ -z "$version" ]]; then
-            error "Could not determine latest version. Please set NANOCRAB_VERSION."
+            error "Could not determine latest version. Please set CLAWHIVE_VERSION."
         fi
     fi
     info "Version: $version"
 
     # Prepare paths
-    local install_dir="${NANOCRAB_INSTALL:-$DEFAULT_INSTALL_DIR}"
+    local install_dir="${CLAWHIVE_INSTALL:-$DEFAULT_INSTALL_DIR}"
     local archive_name="${BINARY_NAME}-${version}-${platform}.tar.gz"
     local download_url="https://github.com/${REPO}/releases/download/${version}/${archive_name}"
     local tmp_dir

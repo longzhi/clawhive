@@ -30,7 +30,7 @@ What actually happened instead.
 
 - **OS**: [e.g., macOS 14.0, Ubuntu 22.04]
 - **Architecture**: [e.g., x86_64, arm64]
-- **nanocrab version**: [e.g., 0.1.0]
+- **clawhive version**: [e.g., 0.1.0]
 - **Rust version** (if building from source): [e.g., 1.75.0]
 - **Channel**: [e.g., Telegram, Discord, CLI]
 

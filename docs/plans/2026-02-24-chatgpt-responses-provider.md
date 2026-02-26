@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Replace the broken id_token→API key exchange with a ChatGPT Responses API provider that uses OAuth access_token directly, enabling ChatGPT Plus/Pro users to use OpenAI via `nanocrab setup`.
+**Goal:** Replace the broken id_token→API key exchange with a ChatGPT Responses API provider that uses OAuth access_token directly, enabling ChatGPT Plus/Pro users to use OpenAI via `clawhive setup`.
 
 **Architecture:** Create a new `OpenAiChatGptProvider` implementing `LlmProvider` that calls `chatgpt.com/backend-api/codex/responses` with OAuth access_token + chatgpt-account-id header. The existing `OpenAiProvider` remains for API key users. Provider selection happens at startup in `main.rs` based on whether the config has `auth_profile` (→ ChatGPT provider) or `api_key` (→ standard provider).
 
@@ -13,13 +13,13 @@
 ### Task 1: Add `chatgpt_account_id` to AuthProfile and JWT extraction
 
 **Files:**
-- Modify: `crates/nanocrab-auth/src/profile.rs` (lines 12-16, OpenAiOAuth variant)
-- Modify: `crates/nanocrab-auth/src/oauth/openai.rs` (add function + export)
-- Modify: `crates/nanocrab-auth/src/oauth/mod.rs` (add export)
+- Modify: `crates/clawhive-auth/src/profile.rs` (lines 12-16, OpenAiOAuth variant)
+- Modify: `crates/clawhive-auth/src/oauth/openai.rs` (add function + export)
+- Modify: `crates/clawhive-auth/src/oauth/mod.rs` (add export)
 
 **Step 1: Update `AuthProfile::OpenAiOAuth` to include `chatgpt_account_id`**
 
-In `crates/nanocrab-auth/src/profile.rs`, change the `OpenAiOAuth` variant:
+In `crates/clawhive-auth/src/profile.rs`, change the `OpenAiOAuth` variant:
 
 ```rust
 OpenAiOAuth {
@@ -35,7 +35,7 @@ Update tests in the same file — the existing `auth_store_roundtrips_json` test
 
 **Step 2: Add `extract_chatgpt_account_id` function to `openai.rs`**
 
-At the end of `crates/nanocrab-auth/src/oauth/openai.rs` (before `#[cfg(test)]`), add:
+At the end of `crates/clawhive-auth/src/oauth/openai.rs` (before `#[cfg(test)]`), add:
 
 ```rust
 /// Extract the ChatGPT account ID from an OAuth access_token JWT.
@@ -81,7 +81,7 @@ pub fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
 
 **Step 3: Export the new function**
 
-In `crates/nanocrab-auth/src/oauth/mod.rs`, add `extract_chatgpt_account_id` to the `pub use openai::{ ... }` list.
+In `crates/clawhive-auth/src/oauth/mod.rs`, add `extract_chatgpt_account_id` to the `pub use openai::{ ... }` list.
 
 **Step 4: Add tests for JWT extraction in `openai.rs`**
 
@@ -126,9 +126,9 @@ fn extract_chatgpt_account_id_returns_none_for_garbage() {
 **Step 5: Fix all existing code that constructs `AuthProfile::OpenAiOAuth`**
 
 Search for `AuthProfile::OpenAiOAuth {` across the workspace. Every construction site must add `chatgpt_account_id: None` (or the extracted value). Known locations:
-- `crates/nanocrab-cli/src/setup.rs` ~line 711
-- `crates/nanocrab-provider/src/openai.rs` test ~line 779
-- `crates/nanocrab-auth/src/profile.rs` test ~line 39
+- `crates/clawhive-cli/src/setup.rs` ~line 711
+- `crates/clawhive-provider/src/openai.rs` test ~line 779
+- `crates/clawhive-auth/src/profile.rs` test ~line 39
 
 The `#[serde(default)]` on the field ensures old JSON profiles deserialize correctly.
 
@@ -149,10 +149,10 @@ feat(auth): add chatgpt_account_id to OpenAiOAuth profile and JWT extraction
 ### Task 2: Update setup flow — remove token exchange, store access_token + account_id
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/setup.rs` (lines 681-742, `run_oauth_auth` function)
-- Modify: `crates/nanocrab-cli/src/setup.rs` (line 8, imports)
-- Modify: `crates/nanocrab-cli/src/setup.rs` (line 48, `api_base` for OpenAI OAuth)
-- Modify: `crates/nanocrab-cli/src/setup.rs` (line 783, `generate_provider_yaml` for OAuth)
+- Modify: `crates/clawhive-cli/src/setup.rs` (lines 681-742, `run_oauth_auth` function)
+- Modify: `crates/clawhive-cli/src/setup.rs` (line 8, imports)
+- Modify: `crates/clawhive-cli/src/setup.rs` (line 48, `api_base` for OpenAI OAuth)
+- Modify: `crates/clawhive-cli/src/setup.rs` (line 783, `generate_provider_yaml` for OAuth)
 
 **Step 1: Update the `run_oauth_auth` function for OpenAI**
 
@@ -188,11 +188,11 @@ ProviderId::OpenAi => {
 
 In `setup.rs` line 8, change:
 ```rust
-use nanocrab_auth::oauth::{exchange_id_token_for_api_key, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
+use clawhive_auth::oauth::{exchange_id_token_for_api_key, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 ```
 to:
 ```rust
-use nanocrab_auth::oauth::{extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
+use clawhive_auth::oauth::{extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
 ```
 
 **Step 3: Update `generate_provider_yaml` for OAuth**
@@ -234,12 +234,12 @@ feat(setup): use access_token directly for OpenAI OAuth, skip broken token excha
 ### Task 3: Create `OpenAiChatGptProvider` — Responses API implementation
 
 **Files:**
-- Create: `crates/nanocrab-provider/src/openai_chatgpt.rs`
-- Modify: `crates/nanocrab-provider/src/lib.rs` (add module + export)
+- Create: `crates/clawhive-provider/src/openai_chatgpt.rs`
+- Modify: `crates/clawhive-provider/src/lib.rs` (add module + export)
 
 **Step 1: Create the new provider file**
 
-Create `crates/nanocrab-provider/src/openai_chatgpt.rs` with:
+Create `crates/clawhive-provider/src/openai_chatgpt.rs` with:
 
 1. **Request structs** — `ResponsesRequest`, `ResponsesInput`, `ResponsesInputContent`, `ResponsesTextOptions`, `ResponsesReasoningOptions`
 2. **Response/SSE structs** — event types for streaming
@@ -262,7 +262,7 @@ pub struct OpenAiChatGptProvider {
 
 Key implementation details:
 - Endpoint: `{api_base}/responses`
-- Headers: `Authorization: Bearer {access_token}`, `OpenAI-Beta: responses=experimental`, `originator: nanocrab`, `chatgpt-account-id: {id}`, `accept: text/event-stream`
+- Headers: `Authorization: Bearer {access_token}`, `OpenAI-Beta: responses=experimental`, `originator: clawhive`, `chatgpt-account-id: {id}`, `accept: text/event-stream`
 - System prompt goes to `instructions` field (NOT in `input` array)
 - User messages use `input_text` content type
 - Assistant messages use `output_text` content type
@@ -277,7 +277,7 @@ For the `stream()` method: parse SSE events, yield `StreamChunk` for each `respo
 
 **Step 2: Add module and export**
 
-In `crates/nanocrab-provider/src/lib.rs`:
+In `crates/clawhive-provider/src/lib.rs`:
 ```rust
 pub mod openai_chatgpt;
 // ...
@@ -309,7 +309,7 @@ feat(provider): add OpenAiChatGptProvider for Responses API via ChatGPT backend
 ### Task 4: Wire up provider selection in main.rs
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs` (~lines 614-629, OpenAI provider init)
+- Modify: `crates/clawhive-cli/src/main.rs` (~lines 614-629, OpenAI provider init)
 
 **Step 1: Update OpenAI provider initialization**
 
@@ -353,7 +353,7 @@ Change to:
 }
 ```
 
-Add `use nanocrab_provider::OpenAiChatGptProvider;` to imports at top of main.rs.
+Add `use clawhive_provider::OpenAiChatGptProvider;` to imports at top of main.rs.
 
 **Step 2: Run tests and clippy**
 
@@ -373,9 +373,9 @@ feat(start): select ChatGPT provider for OAuth users, standard provider for API 
 ### Task 5: Clean up dead code and unused imports
 
 **Files:**
-- Modify: `crates/nanocrab-auth/src/oauth/openai.rs` — `exchange_id_token_for_api_key` may become unused externally
-- Modify: `crates/nanocrab-auth/src/oauth/mod.rs` — update exports
-- Modify: `crates/nanocrab-cli/src/commands/auth.rs` — if it references token exchange
+- Modify: `crates/clawhive-auth/src/oauth/openai.rs` — `exchange_id_token_for_api_key` may become unused externally
+- Modify: `crates/clawhive-auth/src/oauth/mod.rs` — update exports
+- Modify: `crates/clawhive-cli/src/commands/auth.rs` — if it references token exchange
 
 **Step 1: Check if `exchange_id_token_for_api_key` is still used anywhere**
 
@@ -414,14 +414,14 @@ cargo build --release --target aarch64-apple-darwin
 
 ```bash
 # Stop running process first
-ssh macstudio 'kill $(cat ~/.nanocrab/nanocrab.pid 2>/dev/null) 2>/dev/null; sleep 1'
-scp target/aarch64-apple-darwin/release/nanocrab macstudio:~/.nanocrab/nanocrab
+ssh macstudio 'kill $(cat ~/.clawhive/clawhive.pid 2>/dev/null) 2>/dev/null; sleep 1'
+scp target/aarch64-apple-darwin/release/clawhive macstudio:~/.clawhive/clawhive
 ```
 
 **Step 3: Re-run setup to add OpenAI via OAuth**
 
 ```bash
-ssh macstudio '~/.nanocrab/nanocrab setup'
+ssh macstudio '~/.clawhive/clawhive setup'
 # Choose: Add Provider → OpenAI → OAuth Login
 # Complete browser flow
 # Verify: profile saved with chatgpt_account_id
@@ -430,7 +430,7 @@ ssh macstudio '~/.nanocrab/nanocrab setup'
 **Step 4: Start the server and test**
 
 ```bash
-ssh macstudio '~/.nanocrab/nanocrab start --port 3001 &'
+ssh macstudio '~/.clawhive/clawhive start --port 3001 &'
 # Send a test message through Telegram or API
 # Verify OpenAI responses work
 ```

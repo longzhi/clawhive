@@ -1,4 +1,4 @@
-# nanocrab Code Review Issues
+# clawhive Code Review Issues
 
 > 来源：2026-02-13 消息入口链路 review（Telegram → Agent）  
 > 状态标记：🔴 待修复 | 🟡 待讨论 | 🟢 已解决
@@ -8,7 +8,7 @@
 ## Issue #1: Bus 是旁路，非主链路驱动
 
 **状态：** 🟡 M2/M3 延期  
-**模块：** `nanocrab-gateway`, `nanocrab-bus`  
+**模块：** `clawhive-gateway`, `clawhive-bus`  
 **描述：**  
 当前消息流是 TelegramBot → Gateway → Orchestrator 的直接同步调用链，Bus 仅用于旁路通知（`MessageAccepted` / `ReplyReady` / `TaskFailed`）。与 MVP 技术文档 §3 设计的「Command/Event 驱动」模式有差距。  
 **影响：** 模块耦合度高于预期，后续接入新通道或做异步编排时需要重构调用方式。  
@@ -21,7 +21,7 @@
 ## Issue #2: 无消息队列缓冲，LLM 慢响应会积压
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-channels-telegram`  
+**模块：** `clawhive-channels-telegram`  
 **描述：**  
 `TelegramBot::run()` 的 endpoint closure 直接 await Gateway 返回。如果 LLM 响应慢（数秒甚至超时），teloxide dispatcher 的并发处理能力受限，可能导致消息积压或丢失。  
 **影响：** 高并发场景下用户体验差，消息处理可能超时。  
@@ -32,7 +32,7 @@
 ## Issue #3: Session 不加载历史对话
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-core/orchestrator.rs`  
+**模块：** `clawhive-core/orchestrator.rs`  
 **描述：**  
 `Orchestrator::handle_inbound()` 中 `SessionManager::get_or_create()` 只管理 session 元数据（创建/续期/过期），没有将 session 内的历史对话消息加入 LLM 的 messages 列表。当前每次对话只有：
 - 记忆召回的 episodes（作为 `[memory context]`）
@@ -47,7 +47,7 @@
 ## Issue #4: Runtime `execute()` 语义不明确
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-runtime`  
+**模块：** `clawhive-core/orchestrator.rs`, `clawhive-runtime`  
 **描述：**  
 `runtime.execute()` 在 `handle_inbound` 中被调用了两次：
 1. 处理用户输入文本：`self.runtime.execute(&inbound.text)`
@@ -62,7 +62,7 @@
 ## Issue #5: Weak ReAct 缺少 Prompt 指令
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-core/persona.rs`  
+**模块：** `clawhive-core/orchestrator.rs`, `clawhive-core/persona.rs`  
 **描述：**  
 `weak_react_loop()` 依赖 LLM 输出特定标记（`[think]`、`[action]`、`[finish]`）来驱动循环，但当前没有看到在 system prompt 中注入这些标记的使用说明。Persona 的 `assembled_system_prompt()` 和 Skill 的 `summary_prompt()` 中是否包含 ReAct 指令需要确认。  
 **影响：** 如果 LLM 不知道这些标记的存在，永远不会输出 `[think]`/`[action]`，ReAct 循环实际上退化为单轮调用。  
@@ -73,7 +73,7 @@
 ## Issue #6: TelegramBot endpoint 阻塞 dispatcher
 
 **状态：** 🟢 已解决（同 Issue #2）  
-**模块：** `nanocrab-channels-telegram`  
+**模块：** `clawhive-channels-telegram`  
 **描述：**  
 当前 TelegramBot 的 endpoint handler 直接 `await gateway.handle_inbound(inbound)`，LLM 响应期间（5-30 秒）阻塞 teloxide dispatcher。多用户并发时后续消息排队等待，严重时可能因 long polling 超时导致消息丢失。  
 **影响：** 并发场景下用户体验差，消息处理可能超时或丢失。  
@@ -84,7 +84,7 @@
 ## Issue #7: Bus 事件无消费者
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-bus`  
+**模块：** `clawhive-bus`  
 **描述：**  
 Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，但没有任何代码订阅和消费这些事件。Bus 处于"发了没人听"的状态。  
 **影响：** Bus 占用代码但无实际作用，TUI 面板和审计日志也没有数据源。  
@@ -95,7 +95,7 @@ Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，
 ## Issue #8: SubAgentRunner 未接入 Orchestrator
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-core/orchestrator.rs`, `nanocrab-core/subagent.rs`  
+**模块：** `clawhive-core/orchestrator.rs`, `clawhive-core/subagent.rs`  
 **描述：**  
 `SubAgentRunner` 骨架已实现（spawn/cancel/wait_result/result_merge），但 Orchestrator 中没有任何代码使用它。Sub-Agent 能力处于"写了但没接上"的状态。  
 **影响：** MVP 文档 §6 明确要求 Sub-Agent 为必做项，当前无法使用。  
@@ -106,7 +106,7 @@ Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，
 ## Issue #9: 流式输出链路未打通（Provider 已实现，上层未接入）
 
 **状态：** 🟢 已解决  
-**模块：** `nanocrab-core/router.rs`, `nanocrab-core/orchestrator.rs`, `nanocrab-tui`  
+**模块：** `clawhive-core/router.rs`, `clawhive-core/orchestrator.rs`, `clawhive-tui`  
 **描述：**  
 `AnthropicProvider::stream()` 和 `StreamChunk` 类型已完整实现（SSE 解析、三种事件类型），但上层链路完全未接入：
 - `LlmRouter` 只有 `chat()` 没有 `stream()`

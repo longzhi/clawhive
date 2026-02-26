@@ -1,6 +1,6 @@
 # Corral 集成改进建议
 
-> **来自**: nanocrab 项目（Rust-native multi-agent framework）
+> **来自**: clawhive 项目（Rust-native multi-agent framework）
 > **给到**: Corral 开发团队
 > **日期**: 2025-02-20
 > **版本**: Draft v1
@@ -9,9 +9,9 @@
 
 ## 1. 应用场景
 
-### 1.1 nanocrab 是什么
+### 1.1 clawhive 是什么
 
-nanocrab 是一个 Rust-native 的多 Agent 框架，当前以 Telegram + CLI 为主要交互通道。核心流程：
+clawhive 是一个 Rust-native 的多 Agent 框架，当前以 Telegram + CLI 为主要交互通道。核心流程：
 
 ```
 用户消息 → Gateway → Orchestrator → LLM (Claude/GPT)
@@ -27,7 +27,7 @@ Agent 在与用户对话时，会根据 **Skill**（能力描述）来决定使�
 
 ### 1.2 Skill 的形态
 
-nanocrab 的 Skill 是 **Markdown 文件 + 可选的附属脚本**，不是独立可执行程序：
+clawhive 的 Skill 是 **Markdown 文件 + 可选的附属脚本**，不是独立可执行程序：
 
 ```
 skills/
@@ -47,7 +47,7 @@ skills/
 
 ### 1.3 安全缺口在哪里
 
-当前 nanocrab 的 `execute_command` 实现（`shell_tool.rs`）：
+当前 clawhive 的 `execute_command` 实现（`shell_tool.rs`）：
 
 ```rust
 // 当前实现 —— 完全无沙箱
@@ -114,15 +114,15 @@ Corral 是唯一一个**在正确的抽象层解决问题**的方案：它理解
 
 ### 2.2 集成差距
 
-nanocrab 的使用模式与 Corral 当前假设的差异：
+clawhive 的使用模式与 Corral 当前假设的差异：
 
-| 维度 | Corral 当前假设 | nanocrab 实际需求 |
+| 维度 | Corral 当前假设 | clawhive 实际需求 |
 |------|----------------|------------------|
 | **调用粒度** | 整个 Skill 脚本从 entry point 启动到结束 | LLM 发起的**单次命令执行**（每次 `execute_command` 调用） |
 | **调用方式** | CLI (`corral run --skill ./path`) | Rust 库调用（`ExecuteCommandTool` 内部直接调 API） |
-| **权限来源** | `skill.yaml` 文件 | nanocrab 的 `SKILL.md` frontmatter 或 agent config |
+| **权限来源** | `skill.yaml` 文件 | clawhive 的 `SKILL.md` frontmatter 或 agent config |
 | **生命周期** | 一次性：创建沙箱 → 执行 → 销毁 | 会话式：一个 Skill 激活期间，LLM 可能发起多次沙箱执行 |
-| **Broker 需求** | 必需（脚本通过 sandbox-call 与 Broker 通信） | 可选（nanocrab 的 tool 系统已经提供了类似的能力代理） |
+| **Broker 需求** | 必需（脚本通过 sandbox-call 与 Broker 通信） | 可选（clawhive 的 tool 系统已经提供了类似的能力代理） |
 | **权限构建** | 从 YAML 文件解析 | 从代码中程序化构建（可能融合多个来源：skill + agent config + global policy） |
 
 ### 2.3 具体的技术差距
@@ -131,7 +131,7 @@ nanocrab 的使用模式与 Corral 当前假设的差异：
 
 Corral 当前只有两个 workspace member：`corral`（CLI binary）和 `sdk/sandbox-call`。所有沙箱核心逻辑（policy engine、platform runtime、broker）都在 `corral` 这个 binary crate 里。
 
-nanocrab 无法 `cargo` 依赖一个 binary crate。需要把核心逻辑拆到独立的 library crate 中。
+clawhive 无法 `cargo` 依赖一个 binary crate。需要把核心逻辑拆到独立的 library crate 中。
 
 **差距 2：`PolicyEngine` 只接受 `Manifest` 整体**
 
@@ -154,7 +154,7 @@ pub trait Runtime {
 }
 ```
 
-这个 trait 假设"执行"是"跑一个 entry point 脚本"。nanocrab 需要的是"在沙箱约束下执行一条任意命令"。
+这个 trait 假设"执行"是"跑一个 entry point 脚本"。clawhive 需要的是"在沙箱约束下执行一条任意命令"。
 
 **差距 4：沙箱每次从头创建**
 
@@ -162,7 +162,7 @@ pub trait Runtime {
 
 **差距 5：Broker 是强依赖**
 
-`runtime.execute(&broker)` 签名要求必须有 `BrokerHandle`。但 nanocrab 已经有自己的 tool 系统（`ToolRegistry`），提供了 `web_fetch`、`memory_search`、`read_file` 等能力。对于 nanocrab 来说，Corral 的 Broker 服务代理是**可选的增值功能**，不应该是沙箱执行的前置条件。
+`runtime.execute(&broker)` 签名要求必须有 `BrokerHandle`。但 clawhive 已经有自己的 tool 系统（`ToolRegistry`），提供了 `web_fetch`、`memory_search`、`read_file` 等能力。对于 clawhive 来说，Corral 的 Broker 服务代理是**可选的增值功能**，不应该是沙箱执行的前置条件。
 
 ---
 
@@ -292,10 +292,10 @@ impl SandboxBuilder {
 }
 ```
 
-**使用示例（nanocrab 集成）**：
+**使用示例（clawhive 集成）**：
 
 ```rust
-// nanocrab 的 ExecuteCommandTool 内部
+// clawhive 的 ExecuteCommandTool 内部
 let sandbox = SandboxBuilder::new()
     .allow_fs_read(&["$SKILL_DIR/**"])
     .allow_fs_write(&["$WORK_DIR/**"])
@@ -405,7 +405,7 @@ impl Permissions {
 }
 ```
 
-**为什么需要合并**：nanocrab 的权限可能来自多层：
+**为什么需要合并**：clawhive 的权限可能来自多层：
 
 ```
 最终权限 = skill 声明 ∩ agent 策略 ∩ global 策略
@@ -473,9 +473,9 @@ pub trait PlatformSandbox: Send + Sync {
 
 **原因**：
 
-1. nanocrab 已经有自己的 `ToolRegistry`，提供了文件读写、网络请求、内存搜索等能力。这些能力是 LLM 通过 tool call 触发的，不需要脚本通过 `sandbox-call` 来请求。
+1. clawhive 已经有自己的 `ToolRegistry`，提供了文件读写、网络请求、内存搜索等能力。这些能力是 LLM 通过 tool call 触发的，不需要脚本通过 `sandbox-call` 来请求。
 
-2. 但是，如果 Skill 的脚本需要调用系统服务（日历、提醒事项、通知），Broker 就有价值了 — 它提供了 nanocrab 当前没有的能力。
+2. 但是，如果 Skill 的脚本需要调用系统服务（日历、提醒事项、通知），Broker 就有价值了 — 它提供了 clawhive 当前没有的能力。
 
 **建议的模块化**：
 
@@ -564,9 +564,9 @@ void policy_init(void) {
 
 ---
 
-## 4. 集成示意（nanocrab 视角）
+## 4. 集成示意（clawhive 视角）
 
-展示 nanocrab 如何使用改进后的 Corral：
+展示 clawhive 如何使用改进后的 Corral：
 
 ### 4.1 Skill 权限声明
 
@@ -594,10 +594,10 @@ permissions:                      # ← 新增，Corral 消费
 ...
 ```
 
-### 4.2 nanocrab 内部集成
+### 4.2 clawhive 内部集成
 
 ```rust
-// nanocrab-core/src/shell_tool.rs（改造后）
+// clawhive-core/src/shell_tool.rs（改造后）
 
 use corral_core::{Sandbox, SandboxBuilder, Permissions};
 
@@ -739,17 +739,17 @@ impl ToolExecutor for ExecuteCommandTool {
 
 3. **权限变量（`$SKILL_DIR` 等）的解析时机**：当前 `PolicyEngine` 在匹配路径时需要知道 `$SKILL_DIR` 的实际值。这个解析应该在 `SandboxBuilder::build()` 时做（传入实际路径），还是在 `PolicyEngine` 内部做？
 
-4. **对 `read_file` / `write_file` 等非 shell 工具的沙箱覆盖**：nanocrab 不只有 `execute_command`，还有 `read_file`、`write_file` 等 Rust 代码直接实现的 tool。这些操作不经过 `sh -c`，libsandbox 拦截不到。是否需要在 Rust 层提供路径检查 API（复用 `PolicyEngine::check_file_read/write`）？
+4. **对 `read_file` / `write_file` 等非 shell 工具的沙箱覆盖**：clawhive 不只有 `execute_command`，还有 `read_file`、`write_file` 等 Rust 代码直接实现的 tool。这些操作不经过 `sh -c`，libsandbox 拦截不到。是否需要在 Rust 层提供路径检查 API（复用 `PolicyEngine::check_file_read/write`）？
 
 5. **多 Skill 并发的沙箱隔离**：如果一个 Agent 同时激活多个 Skill（每个有不同的 permissions），沙箱实例如何管理？每个 Skill 一个独立的 `Sandbox` 实例，还是合并权限？
 
 ---
 
-## 附录 A：nanocrab 当前架构参考
+## 附录 A：clawhive 当前架构参考
 
 ```
 crates/
-├── nanocrab-core/
+├── clawhive-core/
 │   ├── src/
 │   │   ├── tool.rs              ← ToolExecutor trait + ToolRegistry
 │   │   ├── shell_tool.rs        ← execute_command 实现（需要沙箱包裹的核心位置）
@@ -757,11 +757,11 @@ crates/
 │   │   ├── skill.rs             ← SkillFrontmatter + SkillRegistry
 │   │   ├── orchestrator.rs      ← tool_use_loop（LLM ↔ Tool 循环）
 │   │   └── config.rs            ← ToolPolicyConfig（当前只有 tool 名称白名单）
-├── nanocrab-runtime/
+├── clawhive-runtime/
 │   └── src/lib.rs               ← TaskExecutor trait（NativeExecutor / WasmExecutor stub）
 ```
 
-**技术栈重叠**：nanocrab 和 Corral 共享 tokio、serde、serde_yaml、anyhow、thiserror、clap、tracing — 集成不会引入新的重型依赖。
+**技术栈重叠**：clawhive 和 Corral 共享 tokio、serde、serde_yaml、anyhow、thiserror、clap、tracing — 集成不会引入新的重型依赖。
 
 ## 附录 B：Corral 当前源码结构参考
 

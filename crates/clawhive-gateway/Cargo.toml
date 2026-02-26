@@ -1,0 +1,23 @@
+[package]
+name = "clawhive-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+clawhive-core = { path = "../clawhive-core" }
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-provider = { path = "../clawhive-provider" }
+clawhive-memory = { path = "../clawhive-memory" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-scheduler = { path = "../clawhive-scheduler" }
+tokio.workspace = true
+
+[dev-dependencies]
+clawhive-runtime = { path = "../clawhive-runtime" }
+tempfile.workspace = true

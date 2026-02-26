@@ -1,9 +1,9 @@
-agent_id: nanocrab-builder
+agent_id: clawhive-builder
 enabled: true
-workspace: ./workspaces/nanocrab-builder
+workspace: ./workspaces/clawhive-builder
 
 identity:
-  name: nanocrab-builder
+  name: clawhive-builder
   emoji: "🛠️"
 
 model_policy:

@@ -1,0 +1,28 @@
+[package]
+name = "clawhive-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-core = { path = "../clawhive-core" }
+clawhive-memory = { path = "../clawhive-memory" }
+clawhive-provider = { path = "../clawhive-provider" }
+clawhive-gateway = { path = "../clawhive-gateway" }
+
+[lib]
+name = "clawhive_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clawhive-tui"
+path = "src/main.rs"

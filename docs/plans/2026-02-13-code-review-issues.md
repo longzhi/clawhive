@@ -6,20 +6,20 @@
 
 **Architecture:** Issues span three layers: runtime semantics (#4), core orchestration (#8 sub-agent tool, #9 streaming), and documentation (#1, #7). The approach is bottom-up: runtime trait first, then core wiring, then streaming pipeline, then doc updates last.
 
-**Tech Stack:** Rust, async_trait, tokio, futures-core/tokio-stream (streaming), serde_json (tool I/O), nanocrab workspace crates.
+**Tech Stack:** Rust, async_trait, tokio, futures-core/tokio-stream (streaming), serde_json (tool I/O), clawhive workspace crates.
 
 ---
 
 ## Task 1: Split `TaskExecutor::execute()` into `preprocess_input()` / `postprocess_output()` (Issue #4)
 
 **Files:**
-- Modify: `crates/nanocrab-runtime/src/lib.rs` (trait + impls + tests)
-- Modify: `crates/nanocrab-core/src/orchestrator.rs:164-177` (callsites)
-- Modify: `crates/nanocrab-core/tests/integration.rs` (uses `NativeExecutor` via `Arc<dyn TaskExecutor>`)
+- Modify: `crates/clawhive-runtime/src/lib.rs` (trait + impls + tests)
+- Modify: `crates/clawhive-core/src/orchestrator.rs:164-177` (callsites)
+- Modify: `crates/clawhive-core/tests/integration.rs` (uses `NativeExecutor` via `Arc<dyn TaskExecutor>`)
 
 **Step 1: Update the trait and implementations**
 
-In `crates/nanocrab-runtime/src/lib.rs`, replace the `TaskExecutor` trait and both implementations:
+In `crates/clawhive-runtime/src/lib.rs`, replace the `TaskExecutor` trait and both implementations:
 
 ```rust
 #[async_trait]
@@ -101,7 +101,7 @@ mod tests {
 
 **Step 3: Update orchestrator callsites**
 
-In `crates/nanocrab-core/src/orchestrator.rs`:
+In `crates/clawhive-core/src/orchestrator.rs`:
 
 Line 165 — change:
 ```rust
@@ -129,7 +129,7 @@ Expected: All tests pass. The integration tests use `NativeExecutor` which is pa
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-runtime/src/lib.rs crates/nanocrab-core/src/orchestrator.rs
+git add crates/clawhive-runtime/src/lib.rs crates/clawhive-core/src/orchestrator.rs
 git commit -m "refactor(runtime): split execute() into preprocess_input()/postprocess_output() (Issue #4)"
 ```
 
@@ -138,20 +138,20 @@ git commit -m "refactor(runtime): split execute() into preprocess_input()/postpr
 ## Task 2: Create `SubAgentTool` and wire into Orchestrator (Issue #8)
 
 **Files:**
-- Create: `crates/nanocrab-core/src/subagent_tool.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (add module + re-export)
-- Modify: `crates/nanocrab-core/src/orchestrator.rs` (wrap router in Arc, create SubAgentRunner, register SubAgentTool)
+- Create: `crates/clawhive-core/src/subagent_tool.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (add module + re-export)
+- Modify: `crates/clawhive-core/src/orchestrator.rs` (wrap router in Arc, create SubAgentRunner, register SubAgentTool)
 
 ### Step 1: Create `subagent_tool.rs`
 
-Create `crates/nanocrab-core/src/subagent_tool.rs`:
+Create `crates/clawhive-core/src/subagent_tool.rs`:
 
 ```rust
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use nanocrab_provider::ToolDef;
+use clawhive_provider::ToolDef;
 use uuid::Uuid;
 
 use super::subagent::{SubAgentRequest, SubAgentRunner};
@@ -250,7 +250,7 @@ impl ToolExecutor for SubAgentTool {
 mod tests {
     use super::*;
     use crate::{FullAgentConfig, ModelPolicy};
-    use nanocrab_provider::{ProviderRegistry, StubProvider};
+    use clawhive_provider::{ProviderRegistry, StubProvider};
     use std::collections::HashMap;
 
     fn make_sub_agent_tool() -> SubAgentTool {
@@ -338,7 +338,7 @@ mod tests {
 
 ### Step 2: Add module to `lib.rs`
 
-In `crates/nanocrab-core/src/lib.rs`, add after `pub mod subagent;`:
+In `crates/clawhive-core/src/lib.rs`, add after `pub mod subagent;`:
 
 ```rust
 pub mod subagent_tool;
@@ -352,7 +352,7 @@ pub use subagent_tool::*;
 
 ### Step 3: Wire into Orchestrator
 
-In `crates/nanocrab-core/src/orchestrator.rs`:
+In `crates/clawhive-core/src/orchestrator.rs`:
 
 **3a. Change router field from `LlmRouter` to `Arc<LlmRouter>`:**
 
@@ -412,7 +412,7 @@ Expected: All existing tests pass + new subagent_tool tests pass.
 ### Step 5: Commit
 
 ```bash
-git add crates/nanocrab-core/src/subagent_tool.rs crates/nanocrab-core/src/lib.rs crates/nanocrab-core/src/orchestrator.rs
+git add crates/clawhive-core/src/subagent_tool.rs crates/clawhive-core/src/lib.rs crates/clawhive-core/src/orchestrator.rs
 git commit -m "feat(core): add SubAgentTool and wire into Orchestrator (Issue #8)"
 ```
 
@@ -421,7 +421,7 @@ git commit -m "feat(core): add SubAgentTool and wire into Orchestrator (Issue #8
 ## Task 3: Add `Router::stream()` method (Issue #9, part 1)
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/router.rs` (add `stream()` method + tests)
+- Modify: `crates/clawhive-core/src/router.rs` (add `stream()` method + tests)
 
 ### Step 1: Add the `stream()` method
 
@@ -430,7 +430,7 @@ Add these imports at the top of `router.rs`:
 ```rust
 use std::pin::Pin;
 use futures_core::Stream;
-use nanocrab_provider::StreamChunk;
+use clawhive_provider::StreamChunk;
 ```
 
 Add `stream()` method to `impl LlmRouter`, after `chat_with_tools()`:
@@ -482,7 +482,7 @@ pub async fn stream(
 Add to the existing `mod tests` in `router.rs`:
 
 ```rust
-use nanocrab_provider::StreamChunk;
+use clawhive_provider::StreamChunk;
 use tokio_stream::StreamExt;
 
 struct StubStreamProvider;
@@ -577,7 +577,7 @@ async fn stream_falls_back_on_failure() {
 
 ### Step 3: Check `Cargo.toml` dependencies
 
-Ensure `crates/nanocrab-core/Cargo.toml` has `futures-core` and `tokio-stream` as dependencies (they may already be transitive through `nanocrab-provider`). If not:
+Ensure `crates/clawhive-core/Cargo.toml` has `futures-core` and `tokio-stream` as dependencies (they may already be transitive through `clawhive-provider`). If not:
 
 ```toml
 futures-core = "0.3"
@@ -592,7 +592,7 @@ Expected: All pass including new streaming tests.
 ### Step 5: Commit
 
 ```bash
-git add crates/nanocrab-core/src/router.rs
+git add crates/clawhive-core/src/router.rs
 git commit -m "feat(core): add Router::stream() with fallback support (Issue #9 part 1)"
 ```
 
@@ -601,13 +601,13 @@ git commit -m "feat(core): add Router::stream() with fallback support (Issue #9 
 ## Task 4: Add `StreamDelta` to Bus/Schema and wire TUI (Issue #9, part 2)
 
 **Files:**
-- Modify: `crates/nanocrab-schema/src/lib.rs` (add `StreamDelta` variant to `BusMessage`)
-- Modify: `crates/nanocrab-bus/src/lib.rs` (add `StreamDelta` topic)
-- Modify: `crates/nanocrab-tui/src/lib.rs` (handle `StreamDelta`, add receiver)
+- Modify: `crates/clawhive-schema/src/lib.rs` (add `StreamDelta` variant to `BusMessage`)
+- Modify: `crates/clawhive-bus/src/lib.rs` (add `StreamDelta` topic)
+- Modify: `crates/clawhive-tui/src/lib.rs` (handle `StreamDelta`, add receiver)
 
 ### Step 1: Add `StreamDelta` to `BusMessage`
 
-In `crates/nanocrab-schema/src/lib.rs`, add to the `BusMessage` enum (after `ConsolidationCompleted`):
+In `crates/clawhive-schema/src/lib.rs`, add to the `BusMessage` enum (after `ConsolidationCompleted`):
 
 ```rust
 StreamDelta {
@@ -619,7 +619,7 @@ StreamDelta {
 
 ### Step 2: Add `StreamDelta` topic to Bus
 
-In `crates/nanocrab-bus/src/lib.rs`:
+In `crates/clawhive-bus/src/lib.rs`:
 
 Add to `Topic` enum:
 ```rust
@@ -633,7 +633,7 @@ BusMessage::StreamDelta { .. } => Topic::StreamDelta,
 
 ### Step 3: Update TUI
 
-In `crates/nanocrab-tui/src/lib.rs`:
+In `crates/clawhive-tui/src/lib.rs`:
 
 **3a.** Add field to `BusReceivers`:
 ```rust
@@ -676,7 +676,7 @@ BusMessage::StreamDelta {
 
 ### Step 4: Fix existing tests
 
-The `topic_from_message_covers_all_variants` test in `crates/nanocrab-bus/src/lib.rs` and the `bus_message_serde_roundtrip`-related tests may need updating. Add a `StreamDelta` case to the `topic_from_message_covers_all_variants` test:
+The `topic_from_message_covers_all_variants` test in `crates/clawhive-bus/src/lib.rs` and the `bus_message_serde_roundtrip`-related tests may need updating. Add a `StreamDelta` case to the `topic_from_message_covers_all_variants` test:
 
 ```rust
 (
@@ -689,7 +689,7 @@ The `topic_from_message_covers_all_variants` test in `crates/nanocrab-bus/src/li
 ),
 ```
 
-Also add a serde test for the new variant in `nanocrab-schema` tests:
+Also add a serde test for the new variant in `clawhive-schema` tests:
 
 ```rust
 let msg = BusMessage::StreamDelta {
@@ -716,7 +716,7 @@ Expected: All pass.
 ### Step 6: Commit
 
 ```bash
-git add crates/nanocrab-schema/src/lib.rs crates/nanocrab-bus/src/lib.rs crates/nanocrab-tui/src/lib.rs
+git add crates/clawhive-schema/src/lib.rs crates/clawhive-bus/src/lib.rs crates/clawhive-tui/src/lib.rs
 git commit -m "feat(schema/bus/tui): add StreamDelta event type and TUI handler (Issue #9 part 2)"
 ```
 
@@ -725,8 +725,8 @@ git commit -m "feat(schema/bus/tui): add StreamDelta event type and TUI handler 
 ## Task 5: Add `Orchestrator::handle_inbound_stream()` (Issue #9, part 3)
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/orchestrator.rs` (add `handle_inbound_stream()`)
-- Modify: `crates/nanocrab-core/tests/integration.rs` (add streaming integration test)
+- Modify: `crates/clawhive-core/src/orchestrator.rs` (add `handle_inbound_stream()`)
+- Modify: `crates/clawhive-core/tests/integration.rs` (add streaming integration test)
 
 ### Step 1: Add imports
 
@@ -735,7 +735,7 @@ At top of `orchestrator.rs`, add:
 ```rust
 use std::pin::Pin;
 use futures_core::Stream;
-use nanocrab_provider::StreamChunk;
+use clawhive_provider::StreamChunk;
 ```
 
 ### Step 2: Add `handle_inbound_stream()` method
@@ -804,7 +804,7 @@ pub async fn handle_inbound_stream(
     for hist_msg in &history_messages {
         messages.push(LlmMessage {
             role: hist_msg.role.clone(),
-            content: vec![nanocrab_provider::ContentBlock::Text {
+            content: vec![clawhive_provider::ContentBlock::Text {
                 text: hist_msg.content.clone(),
             }],
         });
@@ -865,23 +865,23 @@ pub async fn handle_inbound_stream(
 
 ### Step 3: Add integration test
 
-In `crates/nanocrab-core/tests/integration.rs`, add:
+In `crates/clawhive-core/tests/integration.rs`, add:
 
 ```rust
 #[tokio::test]
 async fn handle_inbound_stream_yields_chunks() {
-    use nanocrab_provider::StubProvider;
+    use clawhive_provider::StubProvider;
     use tokio_stream::StreamExt;
 
     let mut registry = ProviderRegistry::new();
     registry.register("stub", Arc::new(StubProvider));
     let aliases = HashMap::from([("stub".to_string(), "stub/model".to_string())]);
-    let agents = vec![test_full_agent("nanocrab-main", "stub", vec![])];
+    let agents = vec![test_full_agent("clawhive-main", "stub", vec![])];
     let (orch, _tmp) = make_orchestrator(registry, aliases, agents);
 
     let inbound = test_inbound("hello stream");
     let mut stream = orch
-        .handle_inbound_stream(inbound, "nanocrab-main")
+        .handle_inbound_stream(inbound, "clawhive-main")
         .await
         .unwrap();
 
@@ -902,7 +902,7 @@ async fn handle_inbound_stream_yields_chunks() {
 
 ### Step 4: Check Cargo.toml
 
-Ensure `crates/nanocrab-core/Cargo.toml` has:
+Ensure `crates/clawhive-core/Cargo.toml` has:
 ```toml
 tokio-stream = "0.1"
 futures-core = "0.3"
@@ -916,7 +916,7 @@ Expected: All pass.
 ### Step 6: Commit
 
 ```bash
-git add crates/nanocrab-core/src/orchestrator.rs crates/nanocrab-core/tests/integration.rs crates/nanocrab-core/Cargo.toml
+git add crates/clawhive-core/src/orchestrator.rs crates/clawhive-core/tests/integration.rs crates/clawhive-core/Cargo.toml
 git commit -m "feat(core): add Orchestrator::handle_inbound_stream() (Issue #9 part 3)"
 ```
 

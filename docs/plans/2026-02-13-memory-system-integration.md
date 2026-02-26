@@ -14,13 +14,13 @@
 
 | File | Role |
 |------|------|
-| `crates/nanocrab-core/src/config.rs` | YAML config structs + deserialization |
-| `crates/nanocrab-cli/src/main.rs` | Bootstrap + wiring (line 364: stub provider) |
-| `crates/nanocrab-memory/src/embedding.rs` | `OpenAiEmbeddingProvider` (already complete) |
-| `crates/nanocrab-memory/src/search_index.rs` | `SearchIndex` with hybrid search |
-| `crates/nanocrab-core/src/consolidation.rs` | `HippocampusConsolidator` + `ConsolidationScheduler` |
-| `crates/nanocrab-core/src/orchestrator.rs` | `build_memory_context()` uses search (line 543) |
-| `crates/nanocrab-memory/src/migrations.rs` | SQLite schema migrations |
+| `crates/clawhive-core/src/config.rs` | YAML config structs + deserialization |
+| `crates/clawhive-cli/src/main.rs` | Bootstrap + wiring (line 364: stub provider) |
+| `crates/clawhive-memory/src/embedding.rs` | `OpenAiEmbeddingProvider` (already complete) |
+| `crates/clawhive-memory/src/search_index.rs` | `SearchIndex` with hybrid search |
+| `crates/clawhive-core/src/consolidation.rs` | `HippocampusConsolidator` + `ConsolidationScheduler` |
+| `crates/clawhive-core/src/orchestrator.rs` | `build_memory_context()` uses search (line 543) |
+| `crates/clawhive-memory/src/migrations.rs` | SQLite schema migrations |
 | `config/main.yaml` | Runtime config file |
 
 ## Existing Patterns to Follow
@@ -37,7 +37,7 @@
 ### Task 1: Add EmbeddingConfig to Config System
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/config.rs`
+- Modify: `crates/clawhive-core/src/config.rs`
 - Modify: `config/main.yaml`
 
 **Step 1: Add EmbeddingConfig struct to config.rs**
@@ -127,13 +127,13 @@ embedding:
 
 **Step 5: Run tests**
 
-Run: `cargo test -p nanocrab-core config`
+Run: `cargo test -p clawhive-core config`
 Expected: All existing config tests pass. The `serde(default)` on `embedding` ensures backward-compatible deserialization.
 
 **Step 6: Commit**
 
 ```bash
-git add crates/nanocrab-core/src/config.rs config/main.yaml
+git add crates/clawhive-core/src/config.rs config/main.yaml
 git commit -m "feat(config): add EmbeddingConfig to main config"
 ```
 
@@ -142,14 +142,14 @@ git commit -m "feat(config): add EmbeddingConfig to main config"
 ### Task 2: Wire Real Embedding Provider in Bootstrap
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs` (bootstrap function, ~line 364)
+- Modify: `crates/clawhive-cli/src/main.rs` (bootstrap function, ~line 364)
 
 **Step 1: Add helper function to build embedding provider from config**
 
 Add after `build_router_from_config()` (after line 460):
 
 ```rust
-fn build_embedding_provider(config: &NanocrabConfig) -> Arc<dyn EmbeddingProvider> {
+fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingProvider> {
     let embedding_config = &config.main.embedding;
 
     if !embedding_config.enabled || embedding_config.provider != "openai" {
@@ -205,12 +205,12 @@ let embedding_provider = build_embedding_provider(&config);
 Make sure `OpenAiEmbeddingProvider` is imported in main.rs. Check existing imports and add if missing:
 
 ```rust
-use nanocrab_memory::embedding::{EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider};
+use clawhive_memory::embedding::{EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider};
 ```
 
 **Step 4: Run build**
 
-Run: `cargo build -p nanocrab-cli`
+Run: `cargo build -p clawhive-cli`
 Expected: Compiles without errors.
 
 **Step 5: Run all tests**
@@ -221,7 +221,7 @@ Expected: All tests pass. Tests use StubProvider directly, not bootstrap().
 **Step 6: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/main.rs
+git add crates/clawhive-cli/src/main.rs
 git commit -m "feat(cli): wire real OpenAI embedding provider from config"
 ```
 
@@ -230,7 +230,7 @@ git commit -m "feat(cli): wire real OpenAI embedding provider from config"
 ### Task 3: Add Post-Consolidation Re-indexing
 
 **Files:**
-- Modify: `crates/nanocrab-core/src/consolidation.rs`
+- Modify: `crates/clawhive-core/src/consolidation.rs`
 
 **Step 1: Write the failing test**
 
@@ -249,12 +249,12 @@ async fn consolidation_triggers_reindex_after_write() -> Result<()> {
         .await?;
 
     let db = {
-        use nanocrab_memory::store::MemoryStore;
+        use clawhive_memory::store::MemoryStore;
         let store = MemoryStore::open_in_memory()?;
         store.db()
     };
-    let search_index = nanocrab_memory::search_index::SearchIndex::new(db.clone());
-    let provider = nanocrab_memory::embedding::StubEmbeddingProvider::new(8);
+    let search_index = clawhive_memory::search_index::SearchIndex::new(db.clone());
+    let provider = clawhive_memory::embedding::StubEmbeddingProvider::new(8);
 
     let consolidator = HippocampusConsolidator::new(
         file_store.clone(),
@@ -263,7 +263,7 @@ async fn consolidation_triggers_reindex_after_write() -> Result<()> {
         vec![],
     )
     .with_search_index(search_index.clone())
-    .with_embedding_provider(Arc::new(provider.clone()) as Arc<dyn nanocrab_memory::embedding::EmbeddingProvider>)
+    .with_embedding_provider(Arc::new(provider.clone()) as Arc<dyn clawhive_memory::embedding::EmbeddingProvider>)
     .with_file_store_for_reindex(file_store);
 
     let report = consolidator.consolidate().await?;
@@ -280,7 +280,7 @@ async fn consolidation_triggers_reindex_after_write() -> Result<()> {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p nanocrab-core consolidation_triggers_reindex`
+Run: `cargo test -p clawhive-core consolidation_triggers_reindex`
 Expected: FAIL — `with_search_index`, `with_embedding_provider`, `with_file_store_for_reindex` methods don't exist, `reindexed` field doesn't exist.
 
 **Step 3: Add optional fields to HippocampusConsolidator**
@@ -288,8 +288,8 @@ Expected: FAIL — `with_search_index`, `with_embedding_provider`, `with_file_st
 Update the struct and builder methods:
 
 ```rust
-use nanocrab_memory::embedding::EmbeddingProvider;
-use nanocrab_memory::search_index::SearchIndex;
+use clawhive_memory::embedding::EmbeddingProvider;
+use clawhive_memory::search_index::SearchIndex;
 
 pub struct HippocampusConsolidator {
     file_store: MemoryFileStore,
@@ -365,7 +365,7 @@ Then use `reindexed` in the return value.
 
 **Step 6: Run test to verify it passes**
 
-Run: `cargo test -p nanocrab-core consolidation_triggers_reindex`
+Run: `cargo test -p clawhive-core consolidation_triggers_reindex`
 Expected: PASS
 
 **Step 7: Run all tests to check no regressions**
@@ -376,7 +376,7 @@ Expected: All tests pass (existing tests construct ConsolidationReport with new 
 **Step 8: Commit**
 
 ```bash
-git add crates/nanocrab-core/src/consolidation.rs
+git add crates/clawhive-core/src/consolidation.rs
 git commit -m "feat(consolidation): add post-consolidation re-indexing via SearchIndex"
 ```
 
@@ -385,7 +385,7 @@ git commit -m "feat(consolidation): add post-consolidation re-indexing via Searc
 ### Task 4: Wire Re-index into CLI Consolidation Paths
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs` (start_bot + run_consolidate)
+- Modify: `crates/clawhive-cli/src/main.rs` (start_bot + run_consolidate)
 
 **Step 1: Update start_bot() consolidator creation (line 468-475)**
 
@@ -393,7 +393,7 @@ Pass search_index, embedding_provider, and file_store to the consolidator:
 
 ```rust
 let workspace_dir = root.to_path_buf();
-let file_store_for_consolidation = nanocrab_memory::file_store::MemoryFileStore::new(&workspace_dir);
+let file_store_for_consolidation = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
 let embedding_provider_for_consolidation = build_embedding_provider(&config);
 
 // Re-use search_index from bootstrap — we need to extract it before Orchestrator consumes it.
@@ -405,7 +405,7 @@ NOTE: `SearchIndex` derives `Clone` (see search_index.rs line 11-14). The bootst
 The simplest approach: `bootstrap()` already returns `memory` (MemoryStore) which has `.db()`. Create a new SearchIndex from it:
 
 ```rust
-let consolidation_search_index = nanocrab_memory::search_index::SearchIndex::new(memory.db());
+let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
 ```
 
 Then:
@@ -438,13 +438,13 @@ let (bus, memory, gateway, config) = bootstrap(root)?;
 
 **Step 4: Run build and tests**
 
-Run: `cargo build -p nanocrab-cli && cargo test --workspace`
+Run: `cargo build -p clawhive-cli && cargo test --workspace`
 Expected: Compiles and all tests pass.
 
 **Step 5: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/main.rs
+git add crates/clawhive-cli/src/main.rs
 git commit -m "feat(cli): wire post-consolidation re-indexing with real embedding provider"
 ```
 
@@ -453,8 +453,8 @@ git commit -m "feat(cli): wire post-consolidation re-indexing with real embeddin
 ### Task 5: Search Quality Tuning — Adjust Hybrid Scoring & min_score
 
 **Files:**
-- Modify: `crates/nanocrab-memory/src/search_index.rs`
-- Modify: `crates/nanocrab-core/src/orchestrator.rs`
+- Modify: `crates/clawhive-memory/src/search_index.rs`
+- Modify: `crates/clawhive-core/src/orchestrator.rs`
 
 **Step 1: Write search quality test**
 
@@ -521,7 +521,7 @@ async fn search_vector_only_fallback_on_fts_error() -> Result<()> {
 
 **Step 2: Run tests**
 
-Run: `cargo test -p nanocrab-memory search_scores_are_normalized search_vector_only`
+Run: `cargo test -p clawhive-memory search_scores_are_normalized search_vector_only`
 Expected: Should pass with current implementation (scores are 0.7*cosine + 0.3*bm25, both in [0,1]).
 
 **Step 3: Make BM25 search resilient to FTS5 MATCH errors**
@@ -590,7 +590,7 @@ Expected: All pass.
 **Step 7: Commit**
 
 ```bash
-git add crates/nanocrab-memory/src/search_index.rs crates/nanocrab-core/src/orchestrator.rs
+git add crates/clawhive-memory/src/search_index.rs crates/clawhive-core/src/orchestrator.rs
 git commit -m "feat(search): normalize hybrid scores, add BM25 fallback, lower min_score"
 ```
 
@@ -599,8 +599,8 @@ git commit -m "feat(search): normalize hybrid scores, add BM25 fallback, lower m
 ### Task 6: Replace O(n) Vector Scan with sqlite-vec ANN Search
 
 **Files:**
-- Modify: `crates/nanocrab-memory/src/migrations.rs` (new migration for vec0 virtual table)
-- Modify: `crates/nanocrab-memory/src/search_index.rs` (use vec_search instead of full scan)
+- Modify: `crates/clawhive-memory/src/migrations.rs` (new migration for vec0 virtual table)
+- Modify: `crates/clawhive-memory/src/search_index.rs` (use vec_search instead of full scan)
 
 **Step 1: Write failing test for vec0-based search**
 
@@ -640,7 +640,7 @@ async fn search_uses_vec_index() -> Result<()> {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p nanocrab-memory search_uses_vec_index`
+Run: `cargo test -p clawhive-memory search_uses_vec_index`
 Expected: FAIL — `chunks_vec` table doesn't exist.
 
 **Step 3: Add migration 6 for vec0 virtual table**
@@ -825,7 +825,7 @@ self.ensure_vec_table(provider.dimensions())?;
 
 **Step 7: Run tests**
 
-Run: `cargo test -p nanocrab-memory`
+Run: `cargo test -p clawhive-memory`
 Expected: All tests pass, including the new `search_uses_vec_index` test.
 
 **Step 8: Run full workspace tests**
@@ -836,7 +836,7 @@ Expected: All pass.
 **Step 9: Commit**
 
 ```bash
-git add crates/nanocrab-memory/src/search_index.rs crates/nanocrab-memory/src/migrations.rs
+git add crates/clawhive-memory/src/search_index.rs crates/clawhive-memory/src/migrations.rs
 git commit -m "feat(search): replace O(n) vector scan with sqlite-vec ANN search"
 ```
 
@@ -845,7 +845,7 @@ git commit -m "feat(search): replace O(n) vector scan with sqlite-vec ANN search
 ### Task 7: Startup Index Initialization
 
 **Files:**
-- Modify: `crates/nanocrab-cli/src/main.rs`
+- Modify: `crates/clawhive-cli/src/main.rs`
 
 **Step 1: Add startup indexing after bootstrap**
 
@@ -885,13 +885,13 @@ Then after creating the orchestrator, spawn the background task.
 
 **Step 2: Run build and tests**
 
-Run: `cargo build -p nanocrab-cli && cargo test --workspace`
+Run: `cargo build -p clawhive-cli && cargo test --workspace`
 Expected: All pass.
 
 **Step 3: Commit**
 
 ```bash
-git add crates/nanocrab-cli/src/main.rs
+git add crates/clawhive-cli/src/main.rs
 git commit -m "feat(cli): add startup memory indexing in background"
 ```
 

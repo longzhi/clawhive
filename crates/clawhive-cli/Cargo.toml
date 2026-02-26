@@ -1,0 +1,45 @@
+[package]
+name = "clawhive-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde_yaml.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+dialoguer = "0.11"
+console = "0.15"
+serde_json.workspace = true
+libc = "0.2"
+tempfile.workspace = true
+zip = "2"
+tar = "0.4"
+flate2 = "1"
+clawhive-core = { path = "../clawhive-core" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-memory = { path = "../clawhive-memory" }
+clawhive-provider = { path = "../clawhive-provider" }
+clawhive-gateway = { path = "../clawhive-gateway" }
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-channels = { path = "../clawhive-channels" }
+clawhive-runtime = { path = "../clawhive-runtime" }
+clawhive-tui = { path = "../clawhive-tui" }
+clawhive-auth = { path = "../clawhive-auth" }
+clawhive-scheduler = { path = "../clawhive-scheduler" }
+clawhive-server = { path = "../clawhive-server" }
+
+[[bin]]
+name = "clawhive"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

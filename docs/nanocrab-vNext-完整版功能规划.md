@@ -1,6 +1,6 @@
-# nanocrab vNext：完整版功能规划（非 MVP）
+# clawhive vNext：完整版功能规划（非 MVP）
 
-> 目的：沉淀 nanocrab 下一阶段（vNext/完整版）设计，不挤占 MVP 开发节奏。
+> 目的：沉淀 clawhive 下一阶段（vNext/完整版）设计，不挤占 MVP 开发节奏。
 
 ---
 
@@ -164,7 +164,7 @@ vNext 重点是：
 
 ### 9.2 统一 Tool 类型
 
-放置于 `nanocrab-schema` 或 `nanocrab-provider/types.rs`：
+放置于 `clawhive-schema` 或 `clawhive-provider/types.rs`：
 
 ```rust
 /// 工具定义：注册到 ToolRegistry，传递给 LLM Provider
@@ -237,7 +237,7 @@ struct LlmResponse {
 适配策略：
 
 ```
-nanocrab-core（统一抽象）          nanocrab-provider（各 Adapter）
+clawhive-core（统一抽象）          clawhive-provider（各 Adapter）
 ┌───────────────────────┐         ┌──────────────────────────┐
 │ ToolDef               │         │ AnthropicAdapter         │
 │ ToolCall              │────────▶│  → tools content blocks  │
@@ -465,11 +465,11 @@ tool_result: { output: "研究报告..." }
 
 ## 12. 结论
 
-nanocrab 在 vNext 采用“Capability-based, per-task least-privilege”模型，将显著提升：
+clawhive 在 vNext 采用“Capability-based, per-task least-privilege”模型，将显著提升：
 
 - 安全性（默认最小授权）
 - 可控性（审批与策略分层）
 - 可解释性（审计可追溯）
 - 可扩展性（WASM 与宿主代理共存）
 
-该模型建议作为 nanocrab 完整版核心能力之一。
+该模型建议作为 clawhive 完整版核心能力之一。

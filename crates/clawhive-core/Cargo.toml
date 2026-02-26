@@ -1,0 +1,42 @@
+[package]
+name = "clawhive-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+futures-core = "0.3"
+futures = "0.3"
+tokio-stream = "0.1"
+clawhive-provider = { path = "../clawhive-provider" }
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-memory = { path = "../clawhive-memory" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-runtime = { path = "../clawhive-runtime" }
+clawhive-scheduler = { path = "../clawhive-scheduler" }
+reqwest.workspace = true
+htmd = "0.5"
+corral-core = { git = "https://github.com/longzhi/corral", package = "corral-core", default-features = false, features = ["broker"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+clawhive-provider = { path = "../clawhive-provider" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-schema = { path = "../clawhive-schema" }
+clawhive-memory = { path = "../clawhive-memory" }
+tokio = { workspace = true, features = ["full", "test-util"] }
+async-trait.workspace = true
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json.workspace = true
+anyhow.workspace = true
+wiremock.workspace = true

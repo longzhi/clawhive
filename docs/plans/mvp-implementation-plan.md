@@ -43,7 +43,7 @@ Now I'm reorganizing the dependency structure more carefully. I see that Wave 0 
 
 Continuing through the remaining waves, the gateway rewrite depends on config, EventBus, and orchestrator, then endpoints follow with Telegram bot and CLI. The memory features in Wave 4 handle episode recording, search and retrieval, and injection. Wave 5 covers the evolution features like consolidation, conflict detection, the WASM skeleton, sub-agents, and a minimal TUI. Let me reconsider this structure...
 
-Actually, I need to think through the config system more carefully. There's no dedicated config crate right now, so I need to decide where config types and parsing should live—either create a new `nanocrab-config` crate, add them to the schema crate as shared types, or put them in core since that's what orchestrates everything. A dedicated config crate is cleanest architecturally, but it requires workspace changes. Putting config in schema makes sense since it's already the shared types layer, though core as the orchestrator also has merit.
+Actually, I need to think through the config system more carefully. There's no dedicated config crate right now, so I need to decide where config types and parsing should live—either create a new `clawhive-config` crate, add them to the schema crate as shared types, or put them in core since that's what orchestrates everything. A dedicated config crate is cleanest architecturally, but it requires workspace changes. Putting config in schema makes sense since it's already the shared types layer, though core as the orchestrator also has merit.
 
 The real constraint is that both the CLI and telegram crate need config access, and the CLI already depends on core, so I can have telegram depend on core too. I think the right split is storing config structs in schema and putting the config loading logic in a module within core—that keeps the shared types separate from the loading mechanism.
 
@@ -58,15 +58,15 @@ Now I'm thinking through the Rust struct definitions needed to deserialize these
 Now I'm laying out the complete implementation plan with specific crates, files, dependencies, and concrete deliverables for each component.
 我正在使用 **writing-plans** skill 来创建完整的实现计划。
 
-Dragon，以下是 nanocrab MVP 完整的并行任务图实现计划。
+Dragon，以下是 clawhive MVP 完整的并行任务图实现计划。
 
 ---
 
-# nanocrab MVP Implementation Plan
+# clawhive MVP Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** 将 nanocrab 从 ~600 行半成品推进为可工作的端到端多 Agent AI 框架（M1 可跑通 + M2 可用 + M3 可演进）
+**Goal:** 将 clawhive 从 ~600 行半成品推进为可工作的端到端多 Agent AI 框架（M1 可跑通 + M2 可用 + M3 可演进）
 
 **Architecture:** Bus-centric event-driven architecture. Telegram -> Gateway -> Bus(Command) -> Core/Orchestrator -> Memory/Provider -> Bus(Event) -> Gateway -> Telegram. 所有模块通过 EventBus topic routing 解耦。Memory 使用 SQLite 双层（episodes + concepts + links）。
 
@@ -124,20 +124,20 @@ T14: Memory Injection        T17: Runtime WASM Skeleton
 
 ### Task T1: Config System
 
-**Crate:** `nanocrab-core` (new module `config.rs`)
+**Crate:** `clawhive-core` (new module `config.rs`)
 **Delegation:** `category='feature', skills=['rust']`
 **Estimated:** ~200 lines
 
 **Files:**
-- Create: `crates/nanocrab-core/src/config.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (add `pub mod config;`)
-- Modify: `crates/nanocrab-core/Cargo.toml` (add `serde_yaml` dep)
-- Test: `crates/nanocrab-core/src/config.rs` (inline `#[cfg(test)]`)
+- Create: `crates/clawhive-core/src/config.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (add `pub mod config;`)
+- Modify: `crates/clawhive-core/Cargo.toml` (add `serde_yaml` dep)
+- Test: `crates/clawhive-core/src/config.rs` (inline `#[cfg(test)]`)
 
 **Config Structs:**
 
 ```rust
-// crates/nanocrab-core/src/config.rs
+// crates/clawhive-core/src/config.rs
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -255,7 +255,7 @@ pub struct SubAgentPolicyConfig {
 
 // ── 聚合根 ──
 #[derive(Debug, Clone)]
-pub struct NanocrabConfig {
+pub struct ClawhiveConfig {
     pub main: MainConfig,
     pub routing: RoutingConfig,
     pub providers: Vec<ProviderConfig>,
@@ -272,7 +272,7 @@ pub fn resolve_env_var(raw: &str) -> String {
     }
 }
 
-pub fn load_config(root: &Path) -> Result<NanocrabConfig> {
+pub fn load_config(root: &Path) -> Result<ClawhiveConfig> {
     let main: MainConfig = load_yaml(&root.join("config/main.yaml"))?;
     let routing: RoutingConfig = load_yaml(&root.join("config/routing.yaml"))?;
 
@@ -281,7 +281,7 @@ pub fn load_config(root: &Path) -> Result<NanocrabConfig> {
 
     validate_config(&main, &routing, &providers, &agents)?;
 
-    Ok(NanocrabConfig { main, routing, providers, agents })
+    Ok(ClawhiveConfig { main, routing, providers, agents })
 }
 
 fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -343,7 +343,7 @@ fn validate_config(
 5. `resolve_env_var` 非变量格式原样返回
 
 **Deliverables:**
-- [x] `NanocrabConfig` 聚合所有 YAML
+- [x] `ClawhiveConfig` 聚合所有 YAML
 - [x] `load_config(root)` 一次加载全部
 - [x] `validate_config` fail-fast 校验
 - [x] `resolve_env_var` 环境变量替换
@@ -353,12 +353,12 @@ fn validate_config(
 
 ### Task T2: Schema Expansion
 
-**Crate:** `nanocrab-schema`
+**Crate:** `clawhive-schema`
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~120 lines
 
 **Files:**
-- Modify: `crates/nanocrab-schema/src/lib.rs`
+- Modify: `crates/clawhive-schema/src/lib.rs`
 
 **Changes:**
 
@@ -447,15 +447,15 @@ pub struct InboundMessage {
 
 ### Task T3: Real Anthropic Provider
 
-**Crate:** `nanocrab-provider`
+**Crate:** `clawhive-provider`
 **Delegation:** `category='feature', skills=['rust', 'http-api']`
 **Estimated:** ~250 lines
 
 **Files:**
-- Modify: `crates/nanocrab-provider/src/lib.rs` (拆分为多文件)
-- Create: `crates/nanocrab-provider/src/anthropic.rs`
-- Create: `crates/nanocrab-provider/src/types.rs`
-- Modify: `crates/nanocrab-provider/Cargo.toml`
+- Modify: `crates/clawhive-provider/src/lib.rs` (拆分为多文件)
+- Create: `crates/clawhive-provider/src/anthropic.rs`
+- Create: `crates/clawhive-provider/src/types.rs`
+- Modify: `crates/clawhive-provider/Cargo.toml`
 - Modify: `Cargo.toml` (workspace deps 添加 reqwest, serde_json)
 
 **Cargo.toml changes:**
@@ -465,7 +465,7 @@ pub struct InboundMessage {
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
 
-# crates/nanocrab-provider/Cargo.toml additions
+# crates/clawhive-provider/Cargo.toml additions
 reqwest.workspace = true
 serde_json.workspace = true
 ```
@@ -473,7 +473,7 @@ serde_json.workspace = true
 **Core Changes:**
 
 ```rust
-// crates/nanocrab-provider/src/types.rs
+// crates/clawhive-provider/src/types.rs
 // LlmRequest 扩展为支持多轮对话
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmMessage {
@@ -513,7 +513,7 @@ pub struct LlmResponse {
 ```
 
 ```rust
-// crates/nanocrab-provider/src/anthropic.rs
+// crates/clawhive-provider/src/anthropic.rs
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, bail};
@@ -660,7 +660,7 @@ impl ProviderRegistry {
 }
 ```
 
-**注意：** `LlmRequest` 接口变了（`user: String` → `messages: Vec<LlmMessage>`），需要更新 `nanocrab-core` 中的 `LlmRouter::reply` 调用方式。这在 T8 (Orchestrator Rewrite) 中一并处理。为避免 Wave 0 内编译失败，T3 需保留一个临时的 `LlmRequest::simple()` 兼容方法 + 更新现有测试。
+**注意：** `LlmRequest` 接口变了（`user: String` → `messages: Vec<LlmMessage>`），需要更新 `clawhive-core` 中的 `LlmRouter::reply` 调用方式。这在 T8 (Orchestrator Rewrite) 中一并处理。为避免 Wave 0 内编译失败，T3 需保留一个临时的 `LlmRequest::simple()` 兼容方法 + 更新现有测试。
 
 **Tests:**
 1. `AnthropicProvider::new` 构造正确
@@ -683,16 +683,16 @@ impl ProviderRegistry {
 
 ### Task T4: Memory SQLite Foundation
 
-**Crate:** `nanocrab-memory`
+**Crate:** `clawhive-memory`
 **Delegation:** `category='feature', skills=['rust', 'sqlite']`
 **Estimated:** ~350 lines
 
 **Files:**
-- Rewrite: `crates/nanocrab-memory/src/lib.rs`
-- Create: `crates/nanocrab-memory/src/store.rs`
-- Create: `crates/nanocrab-memory/src/models.rs`
-- Create: `crates/nanocrab-memory/src/migrations.rs`
-- Modify: `crates/nanocrab-memory/Cargo.toml`
+- Rewrite: `crates/clawhive-memory/src/lib.rs`
+- Create: `crates/clawhive-memory/src/store.rs`
+- Create: `crates/clawhive-memory/src/models.rs`
+- Create: `crates/clawhive-memory/src/migrations.rs`
+- Modify: `crates/clawhive-memory/Cargo.toml`
 - Modify: `Cargo.toml` (workspace deps 添加 rusqlite)
 
 **Cargo.toml changes:**
@@ -701,7 +701,7 @@ impl ProviderRegistry {
 # Workspace Cargo.toml
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# crates/nanocrab-memory/Cargo.toml
+# crates/clawhive-memory/Cargo.toml
 [dependencies]
 rusqlite.workspace = true
 tokio.workspace = true
@@ -711,7 +711,7 @@ tokio.workspace = true
 **Models:**
 
 ```rust
-// crates/nanocrab-memory/src/models.rs
+// crates/clawhive-memory/src/models.rs
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -778,7 +778,7 @@ pub enum LinkRelation {
 **Migrations:**
 
 ```rust
-// crates/nanocrab-memory/src/migrations.rs
+// crates/clawhive-memory/src/migrations.rs
 use rusqlite::Connection;
 use anyhow::Result;
 
@@ -872,7 +872,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 **Store (async wrapper):**
 
 ```rust
-// crates/nanocrab-memory/src/store.rs
+// crates/clawhive-memory/src/store.rs
 use std::sync::Arc;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
@@ -1086,22 +1086,22 @@ impl MemoryStore {
 ### Task T5: EventBus Rewrite (Topic-Based Routing)
 
 **Depends on:** T2 (BusMessage enum)
-**Crate:** `nanocrab-bus`
+**Crate:** `clawhive-bus`
 **Delegation:** `category='feature', skills=['rust', 'tokio']`
 **Estimated:** ~150 lines
 
 **Files:**
-- Rewrite: `crates/nanocrab-bus/src/lib.rs`
-- Modify: `crates/nanocrab-bus/Cargo.toml` (add `nanocrab-schema` if not present — already present)
+- Rewrite: `crates/clawhive-bus/src/lib.rs`
+- Modify: `crates/clawhive-bus/Cargo.toml` (add `clawhive-schema` if not present — already present)
 
 **Design:** Bus 内部持有多个 topic channel。每个 subscriber 注册时声明感兴趣的 topic（BusMessage variant 的 discriminant）。publish 时，Bus 根据 message variant 路由到对应 subscriber。
 
 ```rust
-// crates/nanocrab-bus/src/lib.rs
+// crates/clawhive-bus/src/lib.rs
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::Result;
-use nanocrab_schema::BusMessage;
+use clawhive_schema::BusMessage;
 use tokio::sync::{mpsc, RwLock};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -1211,21 +1211,21 @@ impl BusPublisher {
 ### Task T6: Session Manager
 
 **Depends on:** T2 (SessionKey), T4 (MemoryStore with sessions table)
-**Crate:** `nanocrab-core` (new module `session.rs`)
+**Crate:** `clawhive-core` (new module `session.rs`)
 **Delegation:** `category='feature', skills=['rust']`
 **Estimated:** ~120 lines
 
 **Files:**
-- Create: `crates/nanocrab-core/src/session.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs` (add `pub mod session;`)
-- Modify: `crates/nanocrab-core/Cargo.toml` (add `nanocrab-memory` dep)
+- Create: `crates/clawhive-core/src/session.rs`
+- Modify: `crates/clawhive-core/src/lib.rs` (add `pub mod session;`)
+- Modify: `crates/clawhive-core/Cargo.toml` (add `clawhive-memory` dep)
 
 ```rust
-// crates/nanocrab-core/src/session.rs
+// crates/clawhive-core/src/session.rs
 use anyhow::Result;
 use chrono::{DateTime, Utc, Duration};
-use nanocrab_memory::MemoryStore;
-use nanocrab_schema::SessionKey;
+use clawhive_memory::MemoryStore;
+use clawhive_schema::SessionKey;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1307,16 +1307,16 @@ impl SessionManager {
 ### Task T7: Persona Loader
 
 **Depends on:** T1 (Config system for agent identity)
-**Crate:** `nanocrab-core` (new module `persona.rs`)
+**Crate:** `clawhive-core` (new module `persona.rs`)
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~80 lines
 
 **Files:**
-- Create: `crates/nanocrab-core/src/persona.rs`
-- Modify: `crates/nanocrab-core/src/lib.rs`
+- Create: `crates/clawhive-core/src/persona.rs`
+- Modify: `crates/clawhive-core/src/lib.rs`
 
 ```rust
-// crates/nanocrab-core/src/persona.rs
+// crates/clawhive-core/src/persona.rs
 use std::path::Path;
 use anyhow::{Result, Context};
 
@@ -1395,20 +1395,20 @@ fn read_optional_md(path: &Path) -> Result<Option<String>> {
 ### Task T8: Orchestrator Rewrite
 
 **Depends on:** T1, T3, T5, T6, T7
-**Crate:** `nanocrab-core`
+**Crate:** `clawhive-core`
 **Delegation:** `category='feature', skills=['rust', 'tokio']`
 **Estimated:** ~300 lines
 
 **Files:**
-- Rewrite: `crates/nanocrab-core/src/lib.rs` (拆分为 `lib.rs` + `orchestrator.rs` + `router.rs`)
-- Create: `crates/nanocrab-core/src/orchestrator.rs`
-- Create: `crates/nanocrab-core/src/router.rs`
-- Modify: `crates/nanocrab-core/Cargo.toml` (add nanocrab-bus, nanocrab-memory)
+- Rewrite: `crates/clawhive-core/src/lib.rs` (拆分为 `lib.rs` + `orchestrator.rs` + `router.rs`)
+- Create: `crates/clawhive-core/src/orchestrator.rs`
+- Create: `crates/clawhive-core/src/router.rs`
+- Modify: `crates/clawhive-core/Cargo.toml` (add clawhive-bus, clawhive-memory)
 
 **`lib.rs` 变为 barrel export：**
 
 ```rust
-// crates/nanocrab-core/src/lib.rs
+// crates/clawhive-core/src/lib.rs
 pub mod config;
 pub mod orchestrator;
 pub mod persona;
@@ -1425,11 +1425,11 @@ pub use persona::*;
 **LlmRouter 更新（适配新 LlmRequest）：**
 
 ```rust
-// crates/nanocrab-core/src/router.rs
+// crates/clawhive-core/src/router.rs
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
-use nanocrab_provider::{LlmProvider, LlmRequest, LlmResponse, LlmMessage, ProviderRegistry};
+use clawhive_provider::{LlmProvider, LlmRequest, LlmResponse, LlmMessage, ProviderRegistry};
 
 pub struct LlmRouter {
     registry: ProviderRegistry,
@@ -1502,15 +1502,15 @@ fn parse_provider_model(input: &str) -> Result<(String, String)> {
 **Orchestrator 重写（核心调度）：**
 
 ```rust
-// crates/nanocrab-core/src/orchestrator.rs
+// crates/clawhive-core/src/orchestrator.rs
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
-use nanocrab_bus::{BusPublisher, Topic};
-use nanocrab_memory::MemoryStore;
-use nanocrab_provider::LlmMessage;
-use nanocrab_schema::*;
-use super::config::{FullAgentConfig, NanocrabConfig};
+use clawhive_bus::{BusPublisher, Topic};
+use clawhive_memory::MemoryStore;
+use clawhive_provider::LlmMessage;
+use clawhive_schema::*;
+use super::config::{FullAgentConfig, ClawhiveConfig};
 use super::persona::Persona;
 use super::router::LlmRouter;
 use super::session::{Session, SessionManager};
@@ -1673,21 +1673,21 @@ impl Orchestrator {
 ### Task T9: Gateway Rewrite
 
 **Depends on:** T1, T5, T8
-**Crate:** `nanocrab-gateway`
+**Crate:** `clawhive-gateway`
 **Delegation:** `category='feature', skills=['rust', 'tokio']`
 **Estimated:** ~150 lines
 
 **Files:**
-- Rewrite: `crates/nanocrab-gateway/src/lib.rs`
-- Modify: `crates/nanocrab-gateway/Cargo.toml` (add nanocrab-bus)
+- Rewrite: `crates/clawhive-gateway/src/lib.rs`
+- Modify: `crates/clawhive-gateway/Cargo.toml` (add clawhive-bus)
 
 ```rust
-// crates/nanocrab-gateway/src/lib.rs
+// crates/clawhive-gateway/src/lib.rs
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
-use nanocrab_bus::{BusPublisher, EventBus, Topic};
-use nanocrab_core::{Orchestrator, RoutingBinding, RoutingConfig};
-use nanocrab_schema::*;
+use clawhive_bus::{BusPublisher, EventBus, Topic};
+use clawhive_core::{Orchestrator, RoutingBinding, RoutingConfig};
+use clawhive_schema::*;
 
 pub struct Gateway {
     orchestrator: Arc<Orchestrator>,
@@ -1774,13 +1774,13 @@ impl Gateway {
 ### Task T10: Real Telegram Bot
 
 **Depends on:** T9
-**Crate:** `nanocrab-channels-telegram`
+**Crate:** `clawhive-channels-telegram`
 **Delegation:** `category='feature', skills=['rust', 'teloxide']`
 **Estimated:** ~200 lines
 
 **Files:**
-- Modify: `crates/nanocrab-channels-telegram/src/lib.rs` (保留 TelegramAdapter, 新增 TelegramBot)
-- Modify: `crates/nanocrab-channels-telegram/Cargo.toml`
+- Modify: `crates/clawhive-channels-telegram/src/lib.rs` (保留 TelegramAdapter, 新增 TelegramBot)
+- Modify: `crates/clawhive-channels-telegram/Cargo.toml`
 - Modify: `Cargo.toml` (workspace deps: teloxide, log)
 
 **Cargo.toml:**
@@ -1790,18 +1790,18 @@ impl Gateway {
 teloxide = { version = "0.13", features = ["macros"] }
 log = "0.4"
 
-# crates/nanocrab-channels-telegram/Cargo.toml
+# crates/clawhive-channels-telegram/Cargo.toml
 teloxide.workspace = true
 log.workspace = true
 tokio.workspace = true
-nanocrab-gateway = { path = "../nanocrab-gateway" }
+clawhive-gateway = { path = "../clawhive-gateway" }
 ```
 
 ```rust
 // 在 lib.rs 中新增
 use std::sync::Arc;
 use teloxide::prelude::*;
-use nanocrab_gateway::Gateway;
+use clawhive_gateway::Gateway;
 
 pub struct TelegramBot {
     token: String,
@@ -1893,13 +1893,13 @@ fn detect_mention(msg: &Message) -> (bool, Option<String>) {
 ### Task T11: CLI Commands
 
 **Depends on:** T1, T9, T10
-**Crate:** `nanocrab-cli`
+**Crate:** `clawhive-cli`
 **Delegation:** `category='feature', skills=['rust', 'clap']`
 **Estimated:** ~200 lines
 
 **Files:**
-- Rewrite: `crates/nanocrab-cli/src/main.rs`
-- Modify: `crates/nanocrab-cli/Cargo.toml`
+- Rewrite: `crates/clawhive-cli/src/main.rs`
+- Modify: `crates/clawhive-cli/Cargo.toml`
 - Modify: `Cargo.toml` (workspace deps: clap)
 
 **Cargo.toml:**
@@ -1908,14 +1908,14 @@ fn detect_mention(msg: &Message) -> (bool, Option<String>) {
 # Workspace
 clap = { version = "4", features = ["derive"] }
 
-# crates/nanocrab-cli/Cargo.toml
+# crates/clawhive-cli/Cargo.toml
 clap.workspace = true
-nanocrab-bus = { path = "../nanocrab-bus" }
-nanocrab-memory = { path = "../nanocrab-memory" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-memory = { path = "../clawhive-memory" }
 ```
 
 ```rust
-// crates/nanocrab-cli/src/main.rs
+// crates/clawhive-cli/src/main.rs
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -1923,7 +1923,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "nanocrab", version, about = "nanocrab AI agent framework")]
+#[command(name = "clawhive", version, about = "clawhive AI agent framework")]
 struct Cli {
     #[arg(long, default_value = ".")]
     config_root: PathBuf,
@@ -1938,7 +1938,7 @@ enum Commands {
     Start,
     /// 本地 REPL 测试（不需要 Telegram）
     Chat {
-        #[arg(long, default_value = "nanocrab-main")]
+        #[arg(long, default_value = "clawhive-main")]
         agent: String,
     },
     /// 校验配置文件
@@ -1952,7 +1952,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Validate => {
-            let config = nanocrab_core::load_config(&cli.config_root)?;
+            let config = clawhive_core::load_config(&cli.config_root)?;
             println!("Config valid. {} agents, {} providers, {} routing bindings.",
                 config.agents.len(), config.providers.len(), config.routing.bindings.len());
         }
@@ -1973,7 +1973,7 @@ async fn main() -> Result<()> {
 }
 
 async fn start_bot(root: &PathBuf) -> Result<()> {
-    let config = nanocrab_core::load_config(root)?;
+    let config = clawhive_core::load_config(root)?;
     let (bus, memory, orchestrator, gateway) = bootstrap(root, &config)?;
 
     // 找到 telegram connector
@@ -1981,8 +1981,8 @@ async fn start_bot(root: &PathBuf) -> Result<()> {
         .as_ref().ok_or_else(|| anyhow::anyhow!("telegram not configured"))?;
 
     for connector in &tg_config.connectors {
-        let token = nanocrab_core::resolve_env_var(&connector.token);
-        let bot = nanocrab_channels_telegram::TelegramBot::new(
+        let token = clawhive_core::resolve_env_var(&connector.token);
+        let bot = clawhive_channels_telegram::TelegramBot::new(
             token, connector.connector_id.clone(), gateway.clone(),
         );
         // For MVP: run first connector (single bot)
@@ -1994,12 +1994,12 @@ async fn start_bot(root: &PathBuf) -> Result<()> {
 }
 
 async fn run_repl(root: &PathBuf, agent_id: &str) -> Result<()> {
-    let config = nanocrab_core::load_config(root)?;
+    let config = clawhive_core::load_config(root)?;
     let (bus, memory, orchestrator, gateway) = bootstrap(root, &config)?;
 
-    println!("nanocrab REPL (agent: {agent_id}). Type 'quit' to exit.");
+    println!("clawhive REPL (agent: {agent_id}). Type 'quit' to exit.");
 
-    let adapter = nanocrab_channels_telegram::TelegramAdapter::new("repl");
+    let adapter = clawhive_channels_telegram::TelegramAdapter::new("repl");
     let stdin = std::io::stdin();
     loop {
         print!("> ");
@@ -2009,7 +2009,7 @@ async fn run_repl(root: &PathBuf, agent_id: &str) -> Result<()> {
         if input == "quit" || input == "exit" { break; }
         if input.is_empty() { continue; }
 
-        let inbound = nanocrab_schema::InboundMessage {
+        let inbound = clawhive_schema::InboundMessage {
             trace_id: uuid::Uuid::new_v4(),
             channel_type: "repl".into(),
             connector_id: "repl".into(),
@@ -2034,12 +2034,12 @@ async fn run_repl(root: &PathBuf, agent_id: &str) -> Result<()> {
 // bootstrap 函数构建完整的依赖图
 fn bootstrap(
     root: &PathBuf,
-    config: &nanocrab_core::NanocrabConfig,
+    config: &clawhive_core::ClawhiveConfig,
 ) -> Result<(
-    nanocrab_bus::EventBus,
-    Arc<nanocrab_memory::MemoryStore>,
-    Arc<nanocrab_core::Orchestrator>,
-    Arc<nanocrab_gateway::Gateway>,
+    clawhive_bus::EventBus,
+    Arc<clawhive_memory::MemoryStore>,
+    Arc<clawhive_core::Orchestrator>,
+    Arc<clawhive_gateway::Gateway>,
 )> {
     // ... 构建 memory, providers, personas, bus, session_mgr, router, orchestrator, gateway
     todo!("assemble dependency graph — 具体接线代码在实现时填充")
@@ -2051,9 +2051,9 @@ fn bootstrap(
 2. `validate` 子命令在无效配置上报错
 
 **Deliverables:**
-- [x] `nanocrab start` — 启动 Telegram polling
-- [x] `nanocrab chat --agent <id>` — 本地 REPL
-- [x] `nanocrab validate` — 配置校验
+- [x] `clawhive start` — 启动 Telegram polling
+- [x] `clawhive chat --agent <id>` — 本地 REPL
+- [x] `clawhive validate` — 配置校验
 - [x] `bootstrap()` — 完整依赖图组装
 - [x] 2 个测试
 
@@ -2064,7 +2064,7 @@ fn bootstrap(
 ### Task T12: Episode Recording
 
 **Depends on:** T4, T8
-**Crate:** `nanocrab-core` (modify orchestrator)
+**Crate:** `clawhive-core` (modify orchestrator)
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~60 lines
 
@@ -2114,7 +2114,7 @@ self.memory.insert_episode(&asst_ep).await?;
 ### Task T13: Memory Search & Retrieval
 
 **Depends on:** T4
-**Crate:** `nanocrab-memory` (扩展 MemoryStore)
+**Crate:** `clawhive-memory` (扩展 MemoryStore)
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~80 lines
 
@@ -2189,7 +2189,7 @@ impl MemoryContext {
 ### Task T14: Memory Injection into LLM Context
 
 **Depends on:** T8, T13
-**Crate:** `nanocrab-core`
+**Crate:** `clawhive-core`
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~30 lines
 
@@ -2239,17 +2239,17 @@ async fn build_memory_context(&self, session_key: &SessionKey, query: &str) -> R
 ### Task T15: Daily Consolidation
 
 **Depends on:** T3, T4, T14
-**Crate:** `nanocrab-core` (new module `consolidation.rs`)
+**Crate:** `clawhive-core` (new module `consolidation.rs`)
 **Delegation:** `category='feature', skills=['rust', 'tokio']`
 **Estimated:** ~200 lines
 
 ```rust
-// crates/nanocrab-core/src/consolidation.rs
+// crates/clawhive-core/src/consolidation.rs
 use std::sync::Arc;
 use anyhow::Result;
 use chrono::Utc;
-use nanocrab_memory::{MemoryStore, models::*};
-use nanocrab_provider::LlmMessage;
+use clawhive_memory::{MemoryStore, models::*};
+use clawhive_provider::LlmMessage;
 use super::router::LlmRouter;
 
 pub struct Consolidator {
@@ -2360,7 +2360,7 @@ fn parse_concept_candidates(llm_output: &str, episodes: &[Episode]) -> Result<Ve
 ### Task T16: Conflict Detection & Forgetting
 
 **Depends on:** T15
-**Crate:** `nanocrab-memory` + `nanocrab-core`
+**Crate:** `clawhive-memory` + `clawhive-core`
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~100 lines
 
@@ -2415,12 +2415,12 @@ tracing::info!("consolidation: {staled} concepts staled, {purged} episodes purge
 ### Task T17: Runtime WASM Skeleton
 
 **Depends on:** 无
-**Crate:** `nanocrab-runtime`
+**Crate:** `clawhive-runtime`
 **Delegation:** `category='quick', skills=['rust']`
 **Estimated:** ~60 lines
 
 ```rust
-// crates/nanocrab-runtime/src/lib.rs
+// crates/clawhive-runtime/src/lib.rs
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -2473,17 +2473,17 @@ tracing.workspace = true
 ### Task T18: Sub-Agent Basic
 
 **Depends on:** T8
-**Crate:** `nanocrab-core` (new module `subagent.rs`)
+**Crate:** `clawhive-core` (new module `subagent.rs`)
 **Delegation:** `category='feature', skills=['rust', 'tokio']`
 **Estimated:** ~120 lines
 
 ```rust
-// crates/nanocrab-core/src/subagent.rs
+// crates/clawhive-core/src/subagent.rs
 use std::sync::Arc;
 use anyhow::Result;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
-use nanocrab_provider::LlmMessage;
+use clawhive_provider::LlmMessage;
 use super::router::LlmRouter;
 use super::config::FullAgentConfig;
 use super::persona::Persona;
@@ -2577,7 +2577,7 @@ impl SubAgentRunner {
 ### Task T19: TUI Minimal
 
 **Depends on:** T5 (EventBus for observation)
-**Crate:** `nanocrab-tui`
+**Crate:** `clawhive-tui`
 **Delegation:** `category='feature', skills=['rust', 'ratatui']`
 **Estimated:** ~200 lines
 
@@ -2588,17 +2588,17 @@ impl SubAgentRunner {
 ratatui = "0.29"
 crossterm = "0.28"
 
-# crates/nanocrab-tui/Cargo.toml
+# crates/clawhive-tui/Cargo.toml
 ratatui.workspace = true
 crossterm.workspace = true
-nanocrab-bus = { path = "../nanocrab-bus" }
-nanocrab-schema = { path = "../nanocrab-schema" }
+clawhive-bus = { path = "../clawhive-bus" }
+clawhive-schema = { path = "../clawhive-schema" }
 ```
 
 **最小实现：** 两栏布局 — 左栏 Event Bus 日志，右栏 Active Sessions。
 
 ```rust
-// crates/nanocrab-tui/src/main.rs
+// crates/clawhive-tui/src/main.rs
 // 使用 ratatui 基础模板:
 // - 左半 Panel: 最近 50 条 BusMessage（subscribe All topics）
 // - 右半 Panel: placeholder "Sessions" 面板
