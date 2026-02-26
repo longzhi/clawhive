@@ -2,6 +2,68 @@
 
 A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and Telegram-first deployment.
 
+## 🔐 Security First
+
+nanocrab implements a **two-layer security architecture** that provides defense-in-depth for AI agent tool execution:
+
+### Hard Baseline (Always Enforced)
+
+These security constraints are **non-negotiable** and apply to ALL tool executions, regardless of trust level:
+
+| Protection | What It Blocks |
+|------------|----------------|
+| **SSRF Prevention** | Private networks (10.x, 172.16-31.x, 192.168.x), loopback, cloud metadata endpoints (169.254.169.254) |
+| **Sensitive Path Protection** | Writes to `~/.ssh/`, `~/.gnupg/`, `~/.aws/`, `/etc/`, system directories |
+| **Private Key Shield** | Reads of `~/.ssh/id_*`, `~/.gnupg/private-keys`, cloud credentials |
+| **Dangerous Command Block** | `rm -rf /`, fork bombs, disk wipes, curl-pipe-to-shell patterns |
+| **Resource Limits** | 30s timeout, 1MB output cap, 5 concurrent executions |
+
+### Origin-Based Trust Model
+
+Tools are classified by origin, determining their permission requirements:
+
+| Origin | Trust Level | Permission Checks |
+|--------|-------------|-------------------|
+| **Builtin** | Trusted | Hard baseline only (no permission declarations needed) |
+| **External** | Sandboxed | Must declare all permissions in SKILL.md frontmatter |
+
+### Skill Permission Declaration
+
+External skills must explicitly declare their required permissions in SKILL.md:
+
+```yaml
+---
+name: weather-skill
+description: Get weather forecasts
+permissions:
+  network:
+    allow:
+      - "api.openweathermap.org:443"
+      - "api.weatherapi.com:443"
+  fs:
+    read:
+      - "${WORKSPACE}/**"
+    write:
+      - "${WORKSPACE}/cache/**"
+  exec:
+    - curl
+    - jq
+  env:
+    - WEATHER_API_KEY
+---
+```
+
+**Any access outside declared permissions is denied at runtime.**
+
+### Security Philosophy
+
+1. **Deny by default** — External skills have no permissions unless explicitly declared
+2. **Hard baseline is non-bypassable** — Even misconfigured permissions can't override it
+3. **Honest documentation** — We only claim what's implemented, not roadmap intent
+4. **Defense in depth** — Multiple layers prevent single-point failures
+
+> **Note:** Full OS-level sandbox (WASM/container isolation) is planned but not yet shipped. Current execution uses the native executor with policy enforcement.
+
 ## Overview
 
 nanocrab is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
@@ -12,18 +74,21 @@ Each agent has its own persona (system prompts), model policy (primary + fallbac
 
 ## Technical Differentiators (vs OpenClaw)
 
-- Rust workspace with embedded SQLite (`rusqlite` + bundled SQLite): no Node.js runtime dependency in production deployment.
-- Smaller integration surface by design (Telegram-first) to keep operational complexity and background process load low.
-- Markdown-first memory architecture: `MEMORY.md` and daily Markdown files are canonical; SQLite index is rebuildable and non-authoritative.
-- Built-in runtime bounds: per-user token-bucket rate limiting, sub-agent recursion depth limits, and sub-agent timeout control.
-- Honest security boundary: policy configuration exists today; OS-level sandbox runtime is not yet shipped (current WASM executor is a placeholder).
+| Aspect | nanocrab | OpenClaw |
+|--------|----------|----------|
+| **Runtime** | Pure Rust binary, embedded SQLite | Node.js runtime |
+| **Security Model** | Two-layer policy (hard baseline + origin trust) | Tool allowlist |
+| **Permission System** | Declarative SKILL.md permissions | Runtime policy |
+| **Memory** | Markdown-native (MEMORY.md canonical) | Database-first |
+| **Integration Surface** | Focused (Telegram + CLI) | Broad connectors |
+| **Dependency** | Single binary, no runtime deps | Node.js + npm |
 
-## Security Boundary (Current State)
+### Key Architectural Choices
 
-- Implemented controls: tool allowlist model in agent config, gateway rate limiting, and bounded sub-agent execution.
-- Implemented behavior constraints: Weak ReAct repeat guard to avoid unbounded reasoning loops.
-- Not yet implemented: production-grade OS sandbox execution path (WASM executor currently returns not implemented).
-- Documentation principle: claims are limited to implemented controls, not roadmap intent.
+- **Rust workspace with embedded SQLite** (`rusqlite` + bundled): zero runtime dependencies in production
+- **Markdown-first memory**: `MEMORY.md` and daily files are canonical; SQLite index is rebuildable
+- **Permission-as-code**: Skills declare permissions in YAML frontmatter, enforced at runtime
+- **Bounded execution**: Token-bucket rate limits, sub-agent recursion limits, timeouts
 
 ## Features
 
