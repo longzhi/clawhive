@@ -444,7 +444,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Session(cmd) => {
-            let (_bus, memory, _gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
+            let (_bus, memory, _gateway, _config, _schedule_manager, _wait_manager) = bootstrap(&cli.config_root)?;
             let session_mgr = SessionManager::new(memory, 1800);
             match cmd {
                 SessionCommands::Reset { session_key } => {
@@ -457,7 +457,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
+            let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) = bootstrap(&cli.config_root)?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
             handle_auth_command(cmd).await?;
         }
         Commands::Schedule(cmd) => {
-            let (_bus, _memory, _gateway, _config, schedule_manager) = bootstrap(&cli.config_root)?;
+            let (_bus, _memory, _gateway, _config, schedule_manager, _wait_manager) = bootstrap(&cli.config_root)?;
             match cmd {
                 ScheduleCommands::List => {
                     let entries = schedule_manager.list().await;
@@ -707,6 +707,7 @@ fn bootstrap(
     Arc<Gateway>,
     ClawhiveConfig,
     Arc<ScheduleManager>,
+    Arc<WaitTaskManager>,
 )> {
     let config = load_config(&root.join("config"))?;
 
@@ -753,6 +754,14 @@ fn bootstrap(
         &root.join("data/schedules"),
         Arc::clone(&bus),
     )?);
+
+    // Initialize SQLite store for wait tasks
+    let scheduler_db_path = root.join("data/scheduler.db");
+    let sqlite_store = Arc::new(SqliteStore::open(&scheduler_db_path)?);
+    let wait_task_manager = Arc::new(WaitTaskManager::new(
+        Arc::clone(&sqlite_store),
+        Arc::clone(&bus),
+    ));
     let session_mgr = SessionManager::new(memory.clone(), 1800);
     let skill_registry = SkillRegistry::load_from_dir(&root.join("skills")).unwrap_or_else(|e| {
         tracing::warn!("Failed to load skills: {e}");
@@ -802,7 +811,7 @@ fn bootstrap(
         rate_limiter,
     ));
 
-    Ok((bus, memory, gateway, config, schedule_manager))
+    Ok((bus, memory, gateway, config, schedule_manager, wait_task_manager))
 }
 
 fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
@@ -1092,7 +1101,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     write_pid_file(root)?;
     tracing::info!("PID file written (pid: {})", std::process::id());
 
-    let (bus, memory, gateway, config, schedule_manager) = bootstrap(root)?;
+    let (bus, memory, gateway, config, schedule_manager, wait_task_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store_for_consolidation =
@@ -1143,6 +1152,12 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
         schedule_manager_for_loop.run().await;
     });
     tracing::info!("Schedule manager started");
+
+    let wait_manager_for_loop = Arc::clone(&wait_task_manager);
+    let _wait_handle = tokio::spawn(async move {
+        wait_manager_for_loop.run().await;
+    });
+    tracing::info!("Wait task manager started");
 
     let _schedule_listener_handle =
         spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
@@ -1371,7 +1386,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config, _schedule_manager) = bootstrap(root)?;
+    let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager) = bootstrap(root)?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
@@ -1401,7 +1416,7 @@ async fn run_consolidate(root: &Path) -> Result<()> {
 }
 
 async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
-    let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(root)?;
+    let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) = bootstrap(root)?;
 
     println!("clawhive REPL. Type 'quit' to exit.");
     println!("---");
