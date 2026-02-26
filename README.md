@@ -67,8 +67,6 @@ permissions:
 3. **Honest documentation** — We only claim what's implemented, not roadmap intent
 4. **Defense in depth** — Multiple layers prevent single-point failures
 
-> **Note:** Full OS-level sandbox (WASM/container isolation) is planned but not yet shipped. Current execution uses the native executor with policy enforcement.
-
 ## Overview
 
 clawhive is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
@@ -146,7 +144,7 @@ crates/
 ├── clawhive-provider/          # LLM provider trait + Anthropic Claude adapter (streaming, retry)
 ├── clawhive-channels-telegram/ # Telegram adapter via teloxide
 ├── clawhive-schema/            # Shared DTOs (InboundMessage, OutboundMessage, BusMessage, SessionKey)
-├── clawhive-runtime/           # Task executor abstraction (native + WASM skeleton)
+├── clawhive-runtime/           # Task executor abstraction
 └── clawhive-tui/               # Real-time terminal dashboard (ratatui)
 
 config/
@@ -308,4 +306,4 @@ MIT
 
 ## Status
 
-This project is under active development. The memory architecture has moved to Markdown-native storage + hybrid retrieval. Runtime sandboxing is planned; current execution path uses the native executor.
+This project is under active development. The memory architecture uses Markdown-native storage + hybrid retrieval.
