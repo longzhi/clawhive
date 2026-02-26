@@ -302,7 +302,8 @@ impl ContextManager {
 
         // Check if memory flush is needed (approaching limit but not over)
         if self.config.memory_flush.enabled {
-            let flush_threshold = available.saturating_sub(self.config.memory_flush.soft_threshold_tokens);
+            let flush_threshold =
+                available.saturating_sub(self.config.memory_flush.soft_threshold_tokens);
             if tokens >= flush_threshold && tokens < available {
                 return ContextCheckResult::NeedsMemoryFlush {
                     system_prompt: self.config.memory_flush.system_prompt.clone(),

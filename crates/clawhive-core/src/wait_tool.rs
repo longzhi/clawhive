@@ -138,8 +138,8 @@ impl ToolExecutor for WaitTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let parsed: WaitInput = serde_json::from_value(input)
-            .map_err(|e| anyhow!("invalid wait_task input: {e}"))?;
+        let parsed: WaitInput =
+            serde_json::from_value(input).map_err(|e| anyhow!("invalid wait_task input: {e}"))?;
 
         match parsed.action.as_str() {
             "add" => {

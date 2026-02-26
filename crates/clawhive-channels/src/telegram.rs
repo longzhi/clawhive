@@ -21,7 +21,13 @@ impl TelegramAdapter {
         }
     }
 
-    pub fn to_inbound(&self, chat_id: i64, user_id: i64, text: &str, message_id: Option<i32>) -> InboundMessage {
+    pub fn to_inbound(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        text: &str,
+        message_id: Option<i32>,
+    ) -> InboundMessage {
         InboundMessage {
             trace_id: Uuid::new_v4(),
             channel_type: "telegram".to_string(),
@@ -35,7 +41,7 @@ impl TelegramAdapter {
             mention_target: None,
             message_id: message_id.map(|id| id.to_string()),
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         }
     }
 
@@ -296,7 +302,11 @@ async fn spawn_action_listener(
             tracing::warn!("Could not parse chat ID: {}", action.conversation_scope);
             continue;
         };
-        let Some(message_id) = action.message_id.as_ref().and_then(|id| id.parse::<i32>().ok()) else {
+        let Some(message_id) = action
+            .message_id
+            .as_ref()
+            .and_then(|id| id.parse::<i32>().ok())
+        else {
             tracing::warn!("Missing or invalid message_id for action");
             continue;
         };
@@ -306,7 +316,9 @@ async fn spawn_action_listener(
 
         match action.action {
             ActionKind::React { ref emoji } => {
-                let reaction = ReactionType::Emoji { emoji: emoji.clone() };
+                let reaction = ReactionType::Emoji {
+                    emoji: emoji.clone(),
+                };
                 if let Err(e) = bot
                     .set_message_reaction(chat, msg_id)
                     .reaction(vec![reaction])

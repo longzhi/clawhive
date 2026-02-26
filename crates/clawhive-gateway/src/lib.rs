@@ -189,6 +189,24 @@ impl Gateway {
         let channels = self.last_active_channels.lock().await;
         channels.get(agent_id).cloned()
     }
+
+    /// Publish a DeliverAnnounce message to the bus.
+    pub async fn publish_announce(
+        &self,
+        channel_type: &str,
+        connector_id: &str,
+        conversation_scope: &str,
+        text: &str,
+    ) -> Result<()> {
+        self.bus
+            .publish(BusMessage::DeliverAnnounce {
+                channel_type: channel_type.to_string(),
+                connector_id: connector_id.to_string(),
+                conversation_scope: conversation_scope.to_string(),
+                text: text.to_string(),
+            })
+            .await
+    }
 }
 
 pub fn spawn_scheduled_task_listener(
@@ -566,9 +584,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
         let out = gw.handle_inbound(inbound).await.unwrap();
         assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
@@ -588,9 +606,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
     }
@@ -620,7 +638,7 @@ mod tests {
             mention_target: Some("@mybot".into()),
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-builder");
     }
@@ -681,9 +699,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-dm");
     }
@@ -711,9 +729,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
     }
@@ -741,9 +759,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-group");
     }
@@ -766,9 +784,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
 
         let first = gw.handle_inbound(make_inbound()).await;
@@ -793,9 +811,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
 
         let expected_trace = inbound.trace_id;
@@ -863,9 +881,9 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-        message_id: None,
-        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
     }

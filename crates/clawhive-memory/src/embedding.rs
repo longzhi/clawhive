@@ -219,9 +219,7 @@ impl EmbeddingProvider for GeminiEmbeddingProvider {
             .map(|text| GeminiEmbedRequest {
                 model: format!("models/{}", self.model),
                 content: GeminiContent {
-                    parts: vec![GeminiPart {
-                        text: text.clone(),
-                    }],
+                    parts: vec![GeminiPart { text: text.clone() }],
                 },
             })
             .collect();
@@ -248,7 +246,10 @@ impl EmbeddingProvider for GeminiEmbeddingProvider {
         }
 
         let embeddings: Vec<Vec<f32>> = parsed.embeddings.into_iter().map(|e| e.values).collect();
-        let actual_dims = embeddings.first().map(|e| e.len()).unwrap_or(self.dimensions);
+        let actual_dims = embeddings
+            .first()
+            .map(|e| e.len())
+            .unwrap_or(self.dimensions);
 
         Ok(EmbeddingResult {
             embeddings,
@@ -305,15 +306,24 @@ impl OllamaEmbeddingProvider {
     /// Check if Ollama is available and the model exists
     pub async fn is_available(&self) -> bool {
         let endpoint = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
-        match self.client.get(&endpoint).timeout(std::time::Duration::from_secs(2)).send().await {
+        match self
+            .client
+            .get(&endpoint)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 // Check if our model is available
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
                     if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
                         return models.iter().any(|m| {
-                            m.get("name").and_then(|n| n.as_str()).map(|n| {
-                                n == self.model || n.starts_with(&format!("{}:", self.model))
-                            }).unwrap_or(false)
+                            m.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|n| {
+                                    n == self.model || n.starts_with(&format!("{}:", self.model))
+                                })
+                                .unwrap_or(false)
                         });
                     }
                 }
@@ -378,7 +388,11 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
         }
 
         // Update dimensions based on actual response if needed
-        let actual_dims = parsed.embeddings.first().map(|e| e.len()).unwrap_or(self.dimensions);
+        let actual_dims = parsed
+            .embeddings
+            .first()
+            .map(|e| e.len())
+            .unwrap_or(self.dimensions);
 
         Ok(EmbeddingResult {
             embeddings: parsed.embeddings,
@@ -499,10 +513,7 @@ fn compute_text_hash(text: &str) -> String {
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
     // Convert first 16 bytes to hex string
-    result[..16]
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    result[..16].iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Cached embedding provider that stores results in SQLite.

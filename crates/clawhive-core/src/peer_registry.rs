@@ -118,17 +118,17 @@ impl PeerRegistry {
             let emoji = peer.emoji.as_deref().unwrap_or("🤖");
             let name = &peer.name;
             let role = peer.role.as_deref().unwrap_or("Agent");
-            
+
             let mut desc = format!("- **{emoji} {name}** ({role})");
-            
+
             if let Some(spec) = &peer.specialization {
                 desc.push_str(&format!(": {spec}"));
             }
-            
+
             if let Some(vibe) = &peer.vibe {
                 desc.push_str(&format!(" — {vibe}"));
             }
-            
+
             lines.push(desc);
         }
 
@@ -182,7 +182,7 @@ fn parse_identity_md(content: &str) -> ParsedIdentity {
 
     for line in content.lines() {
         let line = line.trim();
-        
+
         // Match patterns like "- **Name:** value" or "**Name:** value"
         if let Some(value) = extract_field(line, "Name") {
             parsed.name = Some(value);
@@ -208,7 +208,7 @@ fn parse_identity_md(content: &str) -> ParsedIdentity {
 fn extract_field(line: &str, field_name: &str) -> Option<String> {
     // Remove leading "- " if present
     let line = line.strip_prefix('-').map(|s| s.trim()).unwrap_or(line);
-    
+
     // Try "**Field:** value" pattern
     let bold_pattern = format!("**{}:**", field_name);
     if let Some(rest) = line.strip_prefix(&bold_pattern) {
@@ -217,10 +217,13 @@ fn extract_field(line: &str, field_name: &str) -> Option<String> {
             return Some(value.to_string());
         }
     }
-    
+
     // Try "Field:" pattern (case-insensitive)
     let simple_pattern = format!("{}:", field_name);
-    if line.to_lowercase().starts_with(&simple_pattern.to_lowercase()) {
+    if line
+        .to_lowercase()
+        .starts_with(&simple_pattern.to_lowercase())
+    {
         let value = line[simple_pattern.len()..].trim();
         if !value.is_empty() && !value.starts_with('_') {
             return Some(value.to_string());
@@ -249,7 +252,10 @@ mod tests {
         let parsed = parse_identity_md(content);
         assert_eq!(parsed.name, Some("小螃蟹1号".to_string()));
         assert_eq!(parsed.role, Some("Code Engineer".to_string()));
-        assert_eq!(parsed.specialization, Some("Rust, 系统编程, 代码审查".to_string()));
+        assert_eq!(
+            parsed.specialization,
+            Some("Rust, 系统编程, 代码审查".to_string())
+        );
         assert_eq!(parsed.vibe, Some("严谨务实".to_string()));
         assert_eq!(parsed.emoji, Some("🦀".to_string()));
     }

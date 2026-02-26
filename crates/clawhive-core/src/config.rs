@@ -191,11 +191,6 @@ pub struct HeartbeatPolicyConfig {
     pub interval_minutes: u64,
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Where to deliver non-ack heartbeat responses.
-    /// Format: "channel_type:connector_id:conversation_scope"
-    /// Example: "discord:main:guild:123:channel:456"
-    #[serde(default)]
-    pub deliver_to: Option<String>,
 }
 
 impl Default for HeartbeatPolicyConfig {
@@ -204,7 +199,6 @@ impl Default for HeartbeatPolicyConfig {
             enabled: false,
             interval_minutes: 30,
             prompt: None,
-            deliver_to: None,
         }
     }
 }

@@ -480,7 +480,12 @@ mod tests {
         let api_req = provider.build_request(&req);
 
         assert!(api_req.tools.is_some());
-        assert_eq!(api_req.tools.as_ref().unwrap()[0].function_declarations.len(), 1);
+        assert_eq!(
+            api_req.tools.as_ref().unwrap()[0]
+                .function_declarations
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -527,6 +532,8 @@ mod tests {
         let resp = to_llm_response(parsed).unwrap();
 
         assert_eq!(resp.content.len(), 1);
-        assert!(matches!(&resp.content[0], ContentBlock::ToolUse { name, .. } if name == "get_weather"));
+        assert!(
+            matches!(&resp.content[0], ContentBlock::ToolUse { name, .. } if name == "get_weather")
+        );
     }
 }

@@ -536,7 +536,15 @@ impl MemoryStore {
                 "INSERT OR REPLACE INTO embedding_cache 
                  (provider, model, provider_key, hash, embedding, dims, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![provider, model, provider_key, hash, embedding_json, dims as i64, now],
+                params![
+                    provider,
+                    model,
+                    provider_key,
+                    hash,
+                    embedding_json,
+                    dims as i64,
+                    now
+                ],
             )?;
             Ok::<(), anyhow::Error>(())
         })

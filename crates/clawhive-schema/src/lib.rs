@@ -116,17 +116,11 @@ pub struct ChannelAction {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ActionKind {
     /// Add a reaction to a message
-    React {
-        emoji: String,
-    },
+    React { emoji: String },
     /// Remove a reaction from a message
-    Unreact {
-        emoji: Option<String>,
-    },
+    Unreact { emoji: Option<String> },
     /// Edit a message
-    Edit {
-        new_text: String,
-    },
+    Edit { new_text: String },
     /// Delete a message
     Delete,
 }
@@ -315,7 +309,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         };
 
         let msg1 = BusMessage::HandleIncomingMessage {
@@ -396,7 +390,7 @@ mod tests {
             mention_target: Some("@bot".into()),
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         };
         let event = Event::Inbound(inbound);
         let json = serde_json::to_string(&event).unwrap();
@@ -550,7 +544,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         };
         let key = SessionKey::from_inbound(&inbound);
         assert_eq!(key.0, "telegram:tg:special/id:group:chat:-100123:user:0");

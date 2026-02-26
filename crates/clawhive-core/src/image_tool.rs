@@ -31,7 +31,9 @@ impl ToolExecutor for ImageTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "image".to_string(),
-            description: "Analyze an image using a vision model. Accepts image URL or base64 data URI.".to_string(),
+            description:
+                "Analyze an image using a vision model. Accepts image URL or base64 data URI."
+                    .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -75,7 +77,9 @@ impl ToolExecutor for ImageTool {
         }
 
         if image_urls.is_empty() {
-            return Err(anyhow!("No image provided. Use 'image' or 'images' parameter."));
+            return Err(anyhow!(
+                "No image provided. Use 'image' or 'images' parameter."
+            ));
         }
 
         if image_urls.len() > 10 {
@@ -108,7 +112,9 @@ impl ToolExecutor for ImageTool {
                     "image_url": { "url": url }
                 }));
             } else {
-                return Err(anyhow!("Invalid image URL: {url}. Must be http(s):// or data: URI."));
+                return Err(anyhow!(
+                    "Invalid image URL: {url}. Must be http(s):// or data: URI."
+                ));
             }
         }
 
@@ -198,7 +204,9 @@ mod tests {
     async fn rejects_too_many_images() {
         let tool = ImageTool::new();
         let ctx = ToolContext::builtin();
-        let urls: Vec<String> = (0..11).map(|i| format!("https://example.com/{i}.jpg")).collect();
+        let urls: Vec<String> = (0..11)
+            .map(|i| format!("https://example.com/{i}.jpg"))
+            .collect();
         let result = tool.execute(json!({ "images": urls }), &ctx).await;
         assert!(result.is_err());
     }
@@ -218,7 +226,10 @@ mod tests {
         let tool = ImageTool::new();
         let ctx = ToolContext::builtin();
         let result = tool
-            .execute(json!({ "image": "data:image/png;base64,iVBORw0KGgo=" }), &ctx)
+            .execute(
+                json!({ "image": "data:image/png;base64,iVBORw0KGgo=" }),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);

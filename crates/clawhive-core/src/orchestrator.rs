@@ -16,6 +16,7 @@ use futures_core::Stream;
 
 use super::config::FullAgentConfig;
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
+use super::image_tool::ImageTool;
 use super::memory_tools::{MemoryGetTool, MemorySearchTool};
 use super::persona::Persona;
 use super::router::LlmRouter;
@@ -24,7 +25,6 @@ use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
 use super::tool::{ConversationMessage, ToolContext, ToolExecutor, ToolRegistry};
-use super::image_tool::ImageTool;
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
@@ -604,8 +604,8 @@ impl Orchestrator {
             conversation_scope: inbound.conversation_scope.clone(),
             text: reply_text,
             at: chrono::Utc::now(),
-                        reply_to: None,
-                        attachments: vec![],
+            reply_to: None,
+            attachments: vec![],
         };
 
         // Record session messages (JSONL)
@@ -1083,8 +1083,8 @@ impl Orchestrator {
             conversation_scope: inbound.conversation_scope,
             text: reply_text,
             at: chrono::Utc::now(),
-                        reply_to: None,
-                        attachments: vec![],
+            reply_to: None,
+            attachments: vec![],
         };
 
         let _ = self

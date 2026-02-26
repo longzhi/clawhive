@@ -22,7 +22,9 @@ use clawhive_channels::telegram::TelegramBot;
 use clawhive_channels::ChannelBot;
 use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
 use clawhive_core::*;
-use clawhive_gateway::{spawn_scheduled_task_listener, spawn_wait_task_listener, Gateway, RateLimitConfig, RateLimiter};
+use clawhive_gateway::{
+    spawn_scheduled_task_listener, spawn_wait_task_listener, Gateway, RateLimitConfig, RateLimiter,
+};
 use clawhive_memory::embedding::{
     EmbeddingProvider, GeminiEmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider,
     StubEmbeddingProvider,
@@ -445,7 +447,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Session(cmd) => {
-            let (_bus, memory, _gateway, _config, _schedule_manager, _wait_manager) = bootstrap(&cli.config_root).await?;
+            let (_bus, memory, _gateway, _config, _schedule_manager, _wait_manager) =
+                bootstrap(&cli.config_root).await?;
             let session_mgr = SessionManager::new(memory, 1800);
             match cmd {
                 SessionCommands::Reset { session_key } => {
@@ -458,7 +461,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) = bootstrap(&cli.config_root).await?;
+            let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) =
+                bootstrap(&cli.config_root).await?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -477,7 +481,7 @@ async fn main() -> Result<()> {
                         mention_target: None,
                         message_id: None,
                         attachments: vec![],
-                    group_context: None,
+                        group_context: None,
                     };
                     match gateway.handle_inbound(inbound).await {
                         Ok(out) => println!("{}", out.text),
@@ -490,7 +494,8 @@ async fn main() -> Result<()> {
             handle_auth_command(cmd).await?;
         }
         Commands::Schedule(cmd) => {
-            let (_bus, _memory, _gateway, _config, schedule_manager, _wait_manager) = bootstrap(&cli.config_root).await?;
+            let (_bus, _memory, _gateway, _config, schedule_manager, _wait_manager) =
+                bootstrap(&cli.config_root).await?;
             match cmd {
                 ScheduleCommands::List => {
                     let entries = schedule_manager.list().await;
@@ -603,7 +608,8 @@ async fn main() -> Result<()> {
                     on_failure,
                     on_timeout,
                 } => {
-                    let mut task = WaitTask::new(&id, &session, &cmd, &condition, interval, timeout);
+                    let mut task =
+                        WaitTask::new(&id, &session, &cmd, &condition, interval, timeout);
                     task.on_success_message = on_success;
                     task.on_failure_message = on_failure;
                     task.on_timeout_message = on_timeout;
@@ -617,49 +623,47 @@ async fn main() -> Result<()> {
                         println!("Wait task '{task_id}' not found or already completed.");
                     }
                 }
-                WaitCommands::Show { task_id } => {
-                    match wait_manager.get(&task_id).await? {
-                        Some(task) => {
-                            println!("ID: {}", task.id);
-                            println!("Session: {}", task.session_key);
-                            println!("Status: {:?}", task.status);
-                            println!("Command: {}", task.check_cmd);
-                            println!("Success condition: {}", task.success_condition);
-                            if let Some(fc) = &task.failure_condition {
-                                println!("Failure condition: {fc}");
-                            }
-                            println!("Poll interval: {}ms", task.poll_interval_ms);
+                WaitCommands::Show { task_id } => match wait_manager.get(&task_id).await? {
+                    Some(task) => {
+                        println!("ID: {}", task.id);
+                        println!("Session: {}", task.session_key);
+                        println!("Status: {:?}", task.status);
+                        println!("Command: {}", task.check_cmd);
+                        println!("Success condition: {}", task.success_condition);
+                        if let Some(fc) = &task.failure_condition {
+                            println!("Failure condition: {fc}");
+                        }
+                        println!("Poll interval: {}ms", task.poll_interval_ms);
+                        println!(
+                            "Timeout at: {}",
+                            chrono::Utc
+                                .timestamp_millis_opt(task.timeout_at_ms)
+                                .single()
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_else(|| "-".to_string())
+                        );
+                        if let Some(last) = task.last_check_at_ms {
                             println!(
-                                "Timeout at: {}",
+                                "Last check: {}",
                                 chrono::Utc
-                                    .timestamp_millis_opt(task.timeout_at_ms)
+                                    .timestamp_millis_opt(last)
                                     .single()
                                     .map(|dt| dt.to_rfc3339())
                                     .unwrap_or_else(|| "-".to_string())
                             );
-                            if let Some(last) = task.last_check_at_ms {
-                                println!(
-                                    "Last check: {}",
-                                    chrono::Utc
-                                        .timestamp_millis_opt(last)
-                                        .single()
-                                        .map(|dt| dt.to_rfc3339())
-                                        .unwrap_or_else(|| "-".to_string())
-                                );
-                            }
-                            if let Some(output) = &task.last_output {
-                                let preview: String = output.chars().take(200).collect();
-                                println!("Last output: {preview}");
-                            }
-                            if let Some(err) = &task.error {
-                                println!("Error: {err}");
-                            }
                         }
-                        None => {
-                            println!("Wait task '{task_id}' not found.");
+                        if let Some(output) = &task.last_output {
+                            let preview: String = output.chars().take(200).collect();
+                            println!("Last output: {preview}");
+                        }
+                        if let Some(err) = &task.error {
+                            println!("Error: {err}");
                         }
                     }
-                }
+                    None => {
+                        println!("Wait task '{task_id}' not found.");
+                    }
+                },
             }
         }
         Commands::Setup { force } => {
@@ -833,7 +837,14 @@ async fn bootstrap(
         rate_limiter,
     ));
 
-    Ok((bus, memory, gateway, config, schedule_manager, wait_task_manager))
+    Ok((
+        bus,
+        memory,
+        gateway,
+        config,
+        schedule_manager,
+        wait_task_manager,
+    ))
 }
 
 fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
@@ -1232,7 +1243,8 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     write_pid_file(root)?;
     tracing::info!("PID file written (pid: {})", std::process::id());
 
-    let (bus, memory, gateway, config, schedule_manager, wait_task_manager) = bootstrap(root).await?;
+    let (bus, memory, gateway, config, schedule_manager, wait_task_manager) =
+        bootstrap(root).await?;
 
     let workspace_dir = root.to_path_buf();
     let file_store_for_consolidation =
@@ -1294,8 +1306,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
         spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Scheduled task gateway listener started");
 
-    let _wait_task_listener_handle =
-        spawn_wait_task_listener(gateway.clone(), Arc::clone(&bus));
+    let _wait_task_listener_handle = spawn_wait_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Wait task gateway listener started");
 
     // Spawn heartbeat tasks for agents with heartbeat enabled
@@ -1312,9 +1323,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
         let agent_id = agent_config.agent_id.clone();
         let agent_id_for_log = agent_id.clone();
         let gateway_clone = gateway.clone();
-        let bus_clone = Arc::clone(&bus);
         let interval_minutes = heartbeat_config.interval_minutes;
-        let deliver_to = heartbeat_config.deliver_to.clone();
         let prompt = heartbeat_config
             .prompt
             .clone()
@@ -1355,9 +1364,9 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                     thread_id: None,
                     is_mention: false,
                     mention_target: None,
-                        message_id: None,
-                        attachments: vec![],
-                group_context: None,
+                    message_id: None,
+                    attachments: vec![],
+                    group_context: None,
                 };
 
                 tracing::debug!("Sending heartbeat to agent {}", agent_id);
@@ -1373,23 +1382,25 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                                 outbound.text
                             );
 
-                            // Deliver to configured channel via EventBus
-                            if let Some(ref target) = deliver_to {
-                                if let Some((ch_type, conn_id, scope)) = parse_deliver_target(target) {
-                                    if let Err(e) = bus_clone.publish(clawhive_schema::BusMessage::DeliverAnnounce {
-                                        channel_type: ch_type,
-                                        connector_id: conn_id,
-                                        conversation_scope: scope,
-                                        text: outbound.text,
-                                    }).await {
-                                        tracing::error!("Failed to deliver heartbeat response: {e}");
-                                    }
-                                } else {
-                                    tracing::warn!(
-                                        "Invalid heartbeat deliver_to format: {} (expected 'channel_type:connector_id:scope')",
-                                        target
-                                    );
+                            // Deliver to agent's last active channel
+                            if let Some(target) = gateway_clone.last_active_channel(&agent_id).await
+                            {
+                                if let Err(e) = gateway_clone
+                                    .publish_announce(
+                                        &target.channel_type,
+                                        &target.connector_id,
+                                        &target.conversation_scope,
+                                        &outbound.text,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!("Failed to deliver heartbeat response: {e}");
                                 }
+                            } else {
+                                tracing::warn!(
+                                    "No active channel for {} - heartbeat response not delivered",
+                                    agent_id
+                                );
                             }
                         }
                     }
@@ -1543,7 +1554,8 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager) = bootstrap(root).await?;
+    let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager) =
+        bootstrap(root).await?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
@@ -1573,7 +1585,8 @@ async fn run_consolidate(root: &Path) -> Result<()> {
 }
 
 async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
-    let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) = bootstrap(root).await?;
+    let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) =
+        bootstrap(root).await?;
 
     println!("clawhive REPL. Type 'quit' to exit.");
     println!("---");
@@ -1603,9 +1616,9 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-                        message_id: None,
-                        attachments: vec![],
-        group_context: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
         };
 
         match gateway.handle_inbound(inbound).await {
@@ -2116,32 +2129,6 @@ fn install_skill_with_confirmation(
     Ok(())
 }
 
-/// Parse a heartbeat deliver_to target string.
-/// Format: "channel_type:connector_id:conversation_scope"
-/// Example: "discord:main:guild:123:channel:456"
-/// Returns (channel_type, connector_id, conversation_scope) or None if invalid.
-fn parse_deliver_target(target: &str) -> Option<(String, String, String)> {
-    // Split on first two colons: "discord:main:guild:123:channel:456"
-    // → channel_type="discord", connector_id="main", scope="guild:123:channel:456"
-    let first_colon = target.find(':')?;
-    let channel_type = &target[..first_colon];
-    let rest = &target[first_colon + 1..];
-
-    let second_colon = rest.find(':')?;
-    let connector_id = &rest[..second_colon];
-    let scope = &rest[second_colon + 1..];
-
-    if channel_type.is_empty() || connector_id.is_empty() || scope.is_empty() {
-        return None;
-    }
-
-    Some((
-        channel_type.to_string(),
-        connector_id.to_string(),
-        scope.to_string(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2292,7 +2279,6 @@ mod tests {
     #[test]
     fn check_and_clean_pid_active_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        // Write our own PID - it's running
         std::fs::write(
             tmp.path().join("clawhive.pid"),
             std::process::id().to_string(),
@@ -2301,39 +2287,5 @@ mod tests {
         let result = check_and_clean_pid(tmp.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already running"));
-    }
-
-    #[test]
-    fn parse_deliver_target_valid() {
-        let result = parse_deliver_target("discord:main:guild:123:channel:456");
-        assert_eq!(
-            result,
-            Some((
-                "discord".to_string(),
-                "main".to_string(),
-                "guild:123:channel:456".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_deliver_target_telegram() {
-        let result = parse_deliver_target("telegram:bot1:chat:789");
-        assert_eq!(
-            result,
-            Some((
-                "telegram".to_string(),
-                "bot1".to_string(),
-                "chat:789".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_deliver_target_invalid() {
-        assert_eq!(parse_deliver_target(""), None);
-        assert_eq!(parse_deliver_target("discord"), None);
-        assert_eq!(parse_deliver_target("discord:main"), None);
-        assert_eq!(parse_deliver_target("::"), None);
     }
 }

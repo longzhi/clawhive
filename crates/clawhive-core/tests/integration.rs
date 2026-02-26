@@ -100,9 +100,9 @@ fn test_inbound(text: &str) -> InboundMessage {
         thread_id: None,
         is_mention: false,
         mention_target: None,
-    message_id: None,
-    attachments: vec![],
-    group_context: None,
+        message_id: None,
+        attachments: vec![],
+        group_context: None,
     }
 }
 

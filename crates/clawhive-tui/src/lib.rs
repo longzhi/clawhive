@@ -685,7 +685,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         };
 
         app.handle_bus_message(BusMessage::HandleIncomingMessage {

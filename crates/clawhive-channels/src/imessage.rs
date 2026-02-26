@@ -44,7 +44,7 @@ impl IMessageAdapter {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         }
     }
 }
@@ -71,10 +71,7 @@ pub fn send_imessage(to: &str, message: &str) -> Result<()> {
         escape_applescript(message)
     );
 
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()?;
+    let output = Command::new("osascript").arg("-e").arg(&script).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

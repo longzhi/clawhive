@@ -51,7 +51,7 @@ impl SlackAdapter {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         }
     }
 }
@@ -120,7 +120,8 @@ impl SlackBot {
         let adapter = Arc::new(SlackAdapter::new(&self.config.connector_id));
 
         // Track last message timestamp per channel
-        let mut last_ts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut last_ts: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         let mut poll_timer = interval(Duration::from_secs(self.config.poll_interval_secs));
 
@@ -197,12 +198,7 @@ impl SlackBot {
             }
 
             // Extract text
-            let text = msg
-                .content
-                .text
-                .as_ref()
-                .map(|t| t.as_str())
-                .unwrap_or("");
+            let text = msg.content.text.as_ref().map(|t| t.as_str()).unwrap_or("");
 
             if text.is_empty() {
                 continue;
@@ -284,13 +280,8 @@ mod tests {
     #[test]
     fn adapter_to_inbound_with_thread() {
         let adapter = SlackAdapter::new("slack-main");
-        let inbound = adapter.to_inbound(
-            "C123456",
-            "U789",
-            "reply",
-            Some("1234567890.123456"),
-            true,
-        );
+        let inbound =
+            adapter.to_inbound("C123456", "U789", "reply", Some("1234567890.123456"), true);
 
         assert!(inbound.is_mention);
         assert_eq!(inbound.thread_id, Some("1234567890.123456".to_string()));
