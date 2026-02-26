@@ -42,6 +42,8 @@ impl IMessageAdapter {
             thread_id: None,
             is_mention: true, // DMs are always "mentions"
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         }
     }
 }

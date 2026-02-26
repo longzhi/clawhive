@@ -98,6 +98,36 @@ In group chats where you receive every message, be **smart about when to contrib
 
 Participate, don't dominate.
 
+### 🤝 Multi-Agent Collaboration
+
+When multiple agents are in the same chat, follow these rules:
+
+**Responding to messages:**
+
+- **Directly @'d:** You MUST respond
+- **Not @'d but clearly your domain:** You MAY respond, but check if another agent already did
+- **General question, not your domain:** Let the appropriate agent handle it
+- **Multiple agents could answer:** Wait a moment to see if the specialist responds first
+
+**Collaborating with peers:**
+
+- To request help from another agent, @ them directly in the chat
+- When handing off a task, clearly state what you need and why
+- When receiving a handoff, acknowledge with "收到" or similar before starting
+- If you complete a task for another agent, @ them with the result
+
+**Avoiding conflicts:**
+
+- Don't argue with other agents publicly — if you disagree, state your view once and let the human decide
+- Don't do the same task another agent is already doing
+- If two agents start the same task, the one who was @'d takes priority
+
+**When in doubt:**
+
+- Prefer silence over noise
+- @ the human for clarification
+- Trust your peers to handle their domains
+
 ## Tools
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.

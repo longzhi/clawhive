@@ -416,6 +416,7 @@ mod tests {
             target_tokens: 500,
             reserve_tokens: 100,
             min_messages: 2,
+            memory_flush: MemoryFlushConfig::default(),
         };
 
         // Small messages - no compact needed

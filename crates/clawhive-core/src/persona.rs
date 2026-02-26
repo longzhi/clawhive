@@ -20,12 +20,17 @@ pub struct Persona {
     pub tools_md: String,
     /// HEARTBEAT.md - Periodic task checklist
     pub heartbeat_md: String,
+    /// Peers context - information about other agents (auto-generated)
+    pub peers_context: String,
+    /// Group members context - who's in the current chat (injected per-message)
+    pub group_members_context: String,
 }
 
 impl Persona {
     /// Assembles all context files into a single system prompt.
     /// Order: AGENTS.md (core) -> SOUL.md (personality) -> TOOLS.md (environment)
     /// USER.md and IDENTITY.md are injected as context sections.
+    /// Peers and group members context are added for multi-agent collaboration.
     pub fn assembled_system_prompt(&self) -> String {
         let mut parts = Vec::new();
 
@@ -54,7 +59,29 @@ impl Persona {
             parts.push(format!("\n## Tools\n{}", self.tools_md));
         }
 
+        // Peer agents (for multi-agent collaboration)
+        if !self.peers_context.is_empty() {
+            parts.push(format!("\n{}", self.peers_context));
+        }
+
+        // Group members (injected per-message for group chats)
+        if !self.group_members_context.is_empty() {
+            parts.push(format!("\n{}", self.group_members_context));
+        }
+
         parts.join("\n")
+    }
+
+    /// Set peers context (usually from PeerRegistry).
+    pub fn with_peers_context(mut self, context: String) -> Self {
+        self.peers_context = context;
+        self
+    }
+
+    /// Set group members context (for current chat).
+    pub fn with_group_members_context(mut self, context: String) -> Self {
+        self.group_members_context = context;
+        self
     }
 
     /// Returns the heartbeat task content (may be empty).
@@ -105,6 +132,8 @@ pub fn load_persona_from_workspace(
         identity_md,
         tools_md,
         heartbeat_md,
+        peers_context: String::new(),
+        group_members_context: String::new(),
     })
 }
 
@@ -144,6 +173,8 @@ pub fn load_persona(
         identity_md: String::new(),
         tools_md: String::new(),
         heartbeat_md: String::new(),
+        peers_context: String::new(),
+        group_members_context: String::new(),
     })
 }
 
@@ -209,6 +240,8 @@ mod tests {
             identity_md: "Name: TestBot".into(),
             tools_md: "SSH: localhost".into(),
             heartbeat_md: String::new(),
+            peers_context: String::new(),
+            group_members_context: String::new(),
         };
 
         let assembled = persona.assembled_system_prompt();
@@ -232,6 +265,8 @@ mod tests {
             identity_md: String::new(),
             tools_md: String::new(),
             heartbeat_md: "# HEARTBEAT.md\n\n# Just comments".into(),
+            peers_context: String::new(),
+            group_members_context: String::new(),
         };
         assert!(!persona.has_heartbeat_tasks());
 
@@ -240,5 +275,26 @@ mod tests {
             ..persona.clone()
         };
         assert!(persona2.has_heartbeat_tasks());
+    }
+
+    #[test]
+    fn assembled_system_prompt_includes_peers() {
+        let persona = Persona {
+            agent_id: "test".into(),
+            name: "Test".into(),
+            emoji: None,
+            agents_md: "You are helpful.".into(),
+            soul_md: String::new(),
+            user_md: String::new(),
+            identity_md: String::new(),
+            tools_md: String::new(),
+            heartbeat_md: String::new(),
+            peers_context: "## 你的同事\n- **🦀 小螃蟹1号** (Code Engineer)".into(),
+            group_members_context: String::new(),
+        };
+
+        let assembled = persona.assembled_system_prompt();
+        assert!(assembled.contains("你的同事"));
+        assert!(assembled.contains("小螃蟹1号"));
     }
 }

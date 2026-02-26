@@ -17,6 +17,40 @@ pub struct InboundMessage {
     pub is_mention: bool,
     #[serde(default)]
     pub mention_target: Option<String>,
+    /// Platform-specific message ID for reactions/replies
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// Attached media (images, files)
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// Media attachment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Attachment type
+    pub kind: AttachmentKind,
+    /// URL or file path
+    pub url: String,
+    /// MIME type if known
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// File name if available
+    #[serde(default)]
+    pub file_name: Option<String>,
+    /// File size in bytes
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    Video,
+    Audio,
+    Document,
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +61,46 @@ pub struct OutboundMessage {
     pub conversation_scope: String,
     pub text: String,
     pub at: DateTime<Utc>,
+    /// Reply to a specific message
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// Attached media
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// Channel action (reaction, edit, delete)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelAction {
+    pub trace_id: Uuid,
+    pub channel_type: String,
+    pub connector_id: String,
+    pub conversation_scope: String,
+    pub action: ActionKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ActionKind {
+    /// Add a reaction to a message
+    React {
+        message_id: String,
+        emoji: String,
+    },
+    /// Remove a reaction from a message
+    Unreact {
+        message_id: String,
+        emoji: String,
+    },
+    /// Edit a message
+    Edit {
+        message_id: String,
+        new_text: String,
+    },
+    /// Delete a message
+    Delete {
+        message_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +150,9 @@ pub enum BusMessage {
     },
     ReplyReady {
         outbound: OutboundMessage,
+    },
+    ActionReady {
+        action: ChannelAction,
     },
     TaskFailed {
         trace_id: Uuid,
@@ -173,6 +250,8 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         };
 
         let key = SessionKey::from_inbound(&inbound);
@@ -189,6 +268,8 @@ mod tests {
             conversation_scope: "chat:123".to_string(),
             text: "reply".to_string(),
             at: Utc::now(),
+            reply_to: None,
+            attachments: vec![],
         };
 
         // Test HandleIncomingMessage variant
@@ -203,6 +284,8 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         };
 
         let msg1 = BusMessage::HandleIncomingMessage {
@@ -281,6 +364,8 @@ mod tests {
             thread_id: Some("thread-42".into()),
             is_mention: true,
             mention_target: Some("@bot".into()),
+            message_id: None,
+            attachments: vec![],
         };
         let event = Event::Inbound(inbound);
         let json = serde_json::to_string(&event).unwrap();
@@ -305,6 +390,8 @@ mod tests {
             conversation_scope: "chat:1".into(),
             text: "reply".into(),
             at: Utc::now(),
+            reply_to: None,
+            attachments: vec![],
         };
         let event = Event::Outbound(outbound);
         let json = serde_json::to_string(&event).unwrap();
@@ -430,6 +517,8 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         };
         let key = SessionKey::from_inbound(&inbound);
         assert_eq!(key.0, "telegram:tg:special/id:group:chat:-100123:user:0");

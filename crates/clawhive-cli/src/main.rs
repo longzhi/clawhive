@@ -474,6 +474,8 @@ async fn main() -> Result<()> {
                         thread_id: None,
                         is_mention: false,
                         mention_target: None,
+                        message_id: None,
+                        attachments: vec![],
                     };
                     match gateway.handle_inbound(inbound).await {
                         Ok(out) => println!("{}", out.text),
@@ -1222,6 +1224,8 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                     thread_id: None,
                     is_mention: false,
                     mention_target: None,
+                        message_id: None,
+                        attachments: vec![],
                 };
 
                 tracing::debug!("Sending heartbeat to agent {}", agent_id);
@@ -1450,6 +1454,8 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+                        message_id: None,
+                        attachments: vec![],
         };
 
         match gateway.handle_inbound(inbound).await {

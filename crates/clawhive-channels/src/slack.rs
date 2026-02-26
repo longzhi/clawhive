@@ -49,6 +49,8 @@ impl SlackAdapter {
             thread_id: thread_ts.map(|s| s.to_string()),
             is_mention,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         }
     }
 }

@@ -44,6 +44,8 @@ impl DiscordAdapter {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         }
     }
 
@@ -324,6 +326,8 @@ mod tests {
             conversation_scope: "guild:999:channel:123".into(),
             text: "hello world".into(),
             at: Utc::now(),
+            reply_to: None,
+            attachments: vec![],
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:guild:999:channel:123] hello world");

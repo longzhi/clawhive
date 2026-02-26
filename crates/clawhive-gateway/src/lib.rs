@@ -239,6 +239,8 @@ pub fn spawn_scheduled_task_listener(
                 thread_id: None,
                 is_mention: false,
                 mention_target: None,
+                message_id: None,
+                attachments: vec![],
             };
 
             match gateway.handle_inbound(inbound).await {

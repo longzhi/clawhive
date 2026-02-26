@@ -399,6 +399,8 @@ impl Orchestrator {
                             agent.model_policy.primary, agent_id
                         ),
                         at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
                     });
                 }
                 super::slash_commands::SlashCommand::Status => {
@@ -413,6 +415,8 @@ impl Orchestrator {
                             &session_key.0,
                         ),
                         at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
                     });
                 }
                 super::slash_commands::SlashCommand::New { model_hint } => {
@@ -587,6 +591,8 @@ impl Orchestrator {
             conversation_scope: inbound.conversation_scope.clone(),
             text: reply_text,
             at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
         };
 
         // Record session messages (JSONL)
@@ -1064,6 +1070,8 @@ impl Orchestrator {
             conversation_scope: inbound.conversation_scope,
             text: reply_text,
             at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
         };
 
         let _ = self

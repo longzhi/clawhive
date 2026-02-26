@@ -12,6 +12,7 @@ pub enum Topic {
     RunScheduledConsolidation,
     MessageAccepted,
     ReplyReady,
+    ActionReady,
     TaskFailed,
     MemoryWriteRequested,
     NeedHumanApproval,
@@ -32,6 +33,7 @@ impl Topic {
             BusMessage::RunScheduledConsolidation => Topic::RunScheduledConsolidation,
             BusMessage::MessageAccepted { .. } => Topic::MessageAccepted,
             BusMessage::ReplyReady { .. } => Topic::ReplyReady,
+            BusMessage::ActionReady { .. } => Topic::ActionReady,
             BusMessage::TaskFailed { .. } => Topic::TaskFailed,
             BusMessage::MemoryWriteRequested { .. } => Topic::MemoryWriteRequested,
             BusMessage::NeedHumanApproval { .. } => Topic::NeedHumanApproval,
@@ -121,6 +123,8 @@ mod tests {
                 conversation_scope: "chat:123".to_string(),
                 text: "reply".to_string(),
                 at: Utc::now(),
+                reply_to: None,
+                attachments: vec![],
             },
         }
     }
@@ -235,6 +239,8 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         };
 
         let cases: Vec<(BusMessage, Topic)> = vec![
@@ -263,6 +269,8 @@ mod tests {
                         conversation_scope: "s".into(),
                         text: "r".into(),
                         at: Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
                     },
                 },
                 Topic::ReplyReady,
