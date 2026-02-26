@@ -183,34 +183,13 @@ skills/                         # Skill definitions (SKILL.md with frontmatter)
 
 ## Installation
 
-### Quick Install (macOS)
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | bash
 ```
 
-### Manual Install
+Auto-detects architecture (Apple Silicon / Intel), downloads latest release, installs to `/usr/local/bin`.
 
-### macOS (Apple Silicon)
-
-```bash
-# Auto-detect latest version
-VERSION=$(curl -s https://api.github.com/repos/longzhi/clawhive/releases/latest | grep tag_name | cut -d '"' -f 4)
-curl -LO "https://github.com/longzhi/clawhive/releases/download/${VERSION}/clawhive-${VERSION}-aarch64-apple-darwin.tar.gz"
-tar -xzf clawhive-${VERSION}-aarch64-apple-darwin.tar.gz
-chmod +x clawhive
-sudo mv clawhive /usr/local/bin/
-```
-
-### macOS (Intel)
-
-```bash
-VERSION=$(curl -s https://api.github.com/repos/longzhi/clawhive/releases/latest | grep tag_name | cut -d '"' -f 4)
-curl -LO "https://github.com/longzhi/clawhive/releases/download/${VERSION}/clawhive-${VERSION}-x86_64-apple-darwin.tar.gz"
-tar -xzf clawhive-${VERSION}-x86_64-apple-darwin.tar.gz
-chmod +x clawhive
-sudo mv clawhive /usr/local/bin/
-```
+Or download manually from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
 
 ### Run
 
