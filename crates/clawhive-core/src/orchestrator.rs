@@ -24,6 +24,7 @@ use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
 use super::tool::{ConversationMessage, ToolContext, ToolExecutor, ToolRegistry};
+use super::image_tool::ImageTool;
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
@@ -140,6 +141,7 @@ impl Orchestrator {
             30,
         )));
         tool_registry.register(Box::new(WebFetchTool::new()));
+        tool_registry.register(Box::new(ImageTool::new()));
         tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
         if let Some(api_key) = brave_api_key {
             if !api_key.is_empty() {

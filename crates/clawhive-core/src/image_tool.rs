@@ -58,7 +58,7 @@ impl ToolExecutor for ImageTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         // Collect image URLs
         let mut image_urls: Vec<String> = vec![];
 

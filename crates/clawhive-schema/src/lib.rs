@@ -76,6 +76,7 @@ pub struct ChannelAction {
     pub channel_type: String,
     pub connector_id: String,
     pub conversation_scope: String,
+    pub message_id: Option<String>,
     pub action: ActionKind,
 }
 
@@ -84,23 +85,18 @@ pub struct ChannelAction {
 pub enum ActionKind {
     /// Add a reaction to a message
     React {
-        message_id: String,
         emoji: String,
     },
     /// Remove a reaction from a message
     Unreact {
-        message_id: String,
-        emoji: String,
+        emoji: Option<String>,
     },
     /// Edit a message
     Edit {
-        message_id: String,
         new_text: String,
     },
     /// Delete a message
-    Delete {
-        message_id: String,
-    },
+    Delete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

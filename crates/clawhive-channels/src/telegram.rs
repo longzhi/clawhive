@@ -4,9 +4,9 @@ use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
 use clawhive_schema::BusMessage;
-use clawhive_schema::{InboundMessage, OutboundMessage};
+use clawhive_schema::{ActionKind, InboundMessage, OutboundMessage};
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, Message, MessageEntityKind};
+use teloxide::types::{ChatAction, Message, MessageEntityKind, MessageId, ReactionType};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -81,7 +81,13 @@ impl TelegramBot {
         // Spawn delivery listener for scheduled task announcements
         let bot_holder_clone = bot_holder.clone();
         let connector_id_clone = connector_id.clone();
+        let bus_clone = bus.clone();
         tokio::spawn(spawn_delivery_listener(
+            bus_clone,
+            bot_holder_clone.clone(),
+            connector_id_clone.clone(),
+        ));
+        tokio::spawn(spawn_action_listener(
             bus,
             bot_holder_clone,
             connector_id_clone,
@@ -252,6 +258,84 @@ async fn spawn_delivery_listener(
                 "Delivered scheduled task result to Telegram chat {}",
                 chat_id
             );
+        }
+    }
+}
+
+/// Spawn a listener for ActionReady messages (reactions, edits, deletes)
+async fn spawn_action_listener(
+    bus: Arc<EventBus>,
+    bot_holder: Arc<RwLock<Option<Bot>>>,
+    connector_id: String,
+) {
+    let mut rx = bus.subscribe(Topic::ActionReady).await;
+    while let Some(msg) = rx.recv().await {
+        let BusMessage::ActionReady { action } = msg else {
+            continue;
+        };
+
+        // Only handle actions for this connector
+        if action.channel_type != "telegram" || action.connector_id != connector_id {
+            continue;
+        }
+
+        // Get bot client
+        let bot = {
+            let holder = bot_holder.read().await;
+            holder.clone()
+        };
+
+        let Some(bot) = bot else {
+            tracing::warn!("Telegram bot not ready for action");
+            continue;
+        };
+
+        // Parse chat and message IDs
+        let Some(chat_id) = parse_chat_id(&action.conversation_scope) else {
+            tracing::warn!("Could not parse chat ID: {}", action.conversation_scope);
+            continue;
+        };
+        let Some(message_id) = action.message_id.as_ref().and_then(|id| id.parse::<i32>().ok()) else {
+            tracing::warn!("Missing or invalid message_id for action");
+            continue;
+        };
+
+        let chat = ChatId(chat_id);
+        let msg_id = MessageId(message_id);
+
+        match action.action {
+            ActionKind::React { ref emoji } => {
+                let reaction = ReactionType::Emoji { emoji: emoji.clone() };
+                if let Err(e) = bot
+                    .set_message_reaction(chat, msg_id)
+                    .reaction(vec![reaction])
+                    .await
+                {
+                    tracing::error!("Failed to set reaction: {e}");
+                } else {
+                    tracing::debug!("Set reaction {emoji} on message {message_id}");
+                }
+            }
+            ActionKind::Unreact { .. } => {
+                // Empty reaction list removes all reactions
+                if let Err(e) = bot
+                    .set_message_reaction(chat, msg_id)
+                    .reaction(Vec::<ReactionType>::new())
+                    .await
+                {
+                    tracing::error!("Failed to remove reaction: {e}");
+                }
+            }
+            ActionKind::Edit { ref new_text } => {
+                if let Err(e) = bot.edit_message_text(chat, msg_id, new_text).await {
+                    tracing::error!("Failed to edit message: {e}");
+                }
+            }
+            ActionKind::Delete => {
+                if let Err(e) = bot.delete_message(chat, msg_id).await {
+                    tracing::error!("Failed to delete message: {e}");
+                }
+            }
         }
     }
 }
