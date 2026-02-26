@@ -11,5 +11,8 @@ pub mod telegram;
 #[cfg(feature = "discord")]
 pub mod discord;
 
+#[cfg(feature = "slack")]
+pub mod slack;
+
 #[cfg(feature = "imessage")]
 pub mod imessage;
