@@ -241,6 +241,7 @@ pub fn spawn_scheduled_task_listener(
                 mention_target: None,
                 message_id: None,
                 attachments: vec![],
+                group_context: None,
             };
 
             match gateway.handle_inbound(inbound).await {
@@ -537,6 +538,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
         let out = gw.handle_inbound(inbound).await.unwrap();
         assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
@@ -558,6 +560,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
     }
@@ -587,6 +590,7 @@ mod tests {
             mention_target: Some("@mybot".into()),
             message_id: None,
             attachments: vec![],
+        group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-builder");
     }
@@ -649,6 +653,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-dm");
     }
@@ -678,6 +683,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
     }
@@ -707,6 +713,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-group");
     }
@@ -731,6 +738,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
 
         let first = gw.handle_inbound(make_inbound()).await;
@@ -757,6 +765,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
 
         let expected_trace = inbound.trace_id;
@@ -826,6 +835,7 @@ mod tests {
             mention_target: None,
         message_id: None,
         attachments: vec![],
+        group_context: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
     }

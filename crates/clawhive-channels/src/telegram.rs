@@ -35,6 +35,7 @@ impl TelegramAdapter {
             mention_target: None,
             message_id: message_id.map(|id| id.to_string()),
             attachments: vec![],
+        group_context: None,
         }
     }
 
@@ -420,6 +421,7 @@ mod tests {
             at: chrono::Utc::now(),
             reply_to: None,
             attachments: vec![],
+        group_context: None,
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[telegram:chat:123] hello world");

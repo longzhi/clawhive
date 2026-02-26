@@ -120,6 +120,140 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ollama Embedding Provider
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct OllamaEmbeddingProvider {
+    client: reqwest::Client,
+    model: String,
+    dimensions: usize,
+    base_url: String,
+}
+
+impl OllamaEmbeddingProvider {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            model: "nomic-embed-text".to_string(),
+            dimensions: 768,
+            base_url: "http://localhost:11434".to_string(),
+        }
+    }
+
+    pub fn with_model(model: String, dimensions: usize) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            model,
+            dimensions,
+            base_url: "http://localhost:11434".to_string(),
+        }
+    }
+
+    pub fn with_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
+        self
+    }
+
+    /// Check if Ollama is available and the model exists
+    pub async fn is_available(&self) -> bool {
+        let endpoint = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
+        match self.client.get(&endpoint).timeout(std::time::Duration::from_secs(2)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                // Check if our model is available
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
+                        return models.iter().any(|m| {
+                            m.get("name").and_then(|n| n.as_str()).map(|n| {
+                                n == self.model || n.starts_with(&format!("{}:", self.model))
+                            }).unwrap_or(false)
+                        });
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Default for OllamaEmbeddingProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Serialize)]
+struct OllamaEmbeddingRequest {
+    model: String,
+    input: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaEmbeddingResponse {
+    embeddings: Vec<Vec<f32>>,
+}
+
+#[async_trait]
+impl EmbeddingProvider for OllamaEmbeddingProvider {
+    async fn embed(&self, texts: &[String]) -> Result<EmbeddingResult> {
+        if texts.is_empty() {
+            return Ok(EmbeddingResult {
+                embeddings: Vec::new(),
+                model: self.model.clone(),
+                dimensions: self.dimensions,
+            });
+        }
+
+        let endpoint = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
+        let request = OllamaEmbeddingRequest {
+            model: self.model.clone(),
+            input: texts.to_vec(),
+        };
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let parsed: OllamaEmbeddingResponse = response.json().await?;
+
+        if parsed.embeddings.len() != texts.len() {
+            return Err(anyhow!(
+                "embedding count mismatch: expected {}, got {}",
+                texts.len(),
+                parsed.embeddings.len()
+            ));
+        }
+
+        // Update dimensions based on actual response if needed
+        let actual_dims = parsed.embeddings.first().map(|e| e.len()).unwrap_or(self.dimensions);
+
+        Ok(EmbeddingResult {
+            embeddings: parsed.embeddings,
+            model: self.model.clone(),
+            dimensions: actual_dims,
+        })
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stub Embedding Provider (fallback when no real provider available)
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct StubEmbeddingProvider {
     dims: usize,

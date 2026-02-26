@@ -53,8 +53,8 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            provider: "stub".to_string(),
+            enabled: true,
+            provider: "auto".to_string(),
             api_key: String::new(),
             model: default_embedding_model(),
             dimensions: default_embedding_dimensions(),

@@ -24,7 +24,7 @@ use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_
 use clawhive_core::*;
 use clawhive_gateway::{spawn_scheduled_task_listener, spawn_wait_task_listener, Gateway, RateLimitConfig, RateLimiter};
 use clawhive_memory::embedding::{
-    EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
+    EmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
 };
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
@@ -476,6 +476,7 @@ async fn main() -> Result<()> {
                         mention_target: None,
                         message_id: None,
                         attachments: vec![],
+                    group_context: None,
                     };
                     match gateway.handle_inbound(inbound).await {
                         Ok(out) => println!("{}", out.text),
@@ -792,7 +793,7 @@ fn bootstrap(
     let session_writer = clawhive_memory::SessionWriter::new(&workspace_dir);
     let session_reader = clawhive_memory::SessionReader::new(&workspace_dir);
     let search_index = SearchIndex::new(memory.db());
-    let embedding_provider = build_embedding_provider(&config);
+    let embedding_provider = build_embedding_provider(&config).await;
 
     let brave_api_key = config
         .main
@@ -954,39 +955,74 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
     LlmRouter::new(registry, aliases, global_fallbacks)
 }
 
-fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingProvider> {
+async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingProvider> {
     let embedding_config = &config.main.embedding;
 
-    // Check if embedding is disabled or provider is not openai
-    if !embedding_config.enabled || embedding_config.provider != "openai" {
-        tracing::info!(
-            "Embedding provider disabled or not openai (provider: {}), using stub",
-            embedding_config.provider
-        );
+    // If explicitly disabled, use stub
+    if !embedding_config.enabled {
+        tracing::info!("Embedding disabled, using stub provider");
         return Arc::new(StubEmbeddingProvider::new(8));
     }
 
+    // Priority: ollama > openai > stub
+    match embedding_config.provider.as_str() {
+        "ollama" => {
+            let provider = OllamaEmbeddingProvider::with_model(
+                embedding_config.model.clone(),
+                embedding_config.dimensions,
+            )
+            .with_base_url(embedding_config.base_url.clone());
+
+            if provider.is_available().await {
+                tracing::info!(
+                    "Ollama embedding provider initialized (model: {}, dimensions: {})",
+                    embedding_config.model,
+                    embedding_config.dimensions
+                );
+                return Arc::new(provider);
+            }
+            tracing::warn!("Ollama not available, falling back to OpenAI");
+        }
+        "auto" | "" => {
+            // Try Ollama first (free, local)
+            let ollama = OllamaEmbeddingProvider::new();
+            if ollama.is_available().await {
+                tracing::info!(
+                    "Auto-detected Ollama, using embedding model: {}",
+                    ollama.model_id()
+                );
+                return Arc::new(ollama);
+            }
+            tracing::debug!("Ollama not available for auto-detection");
+        }
+        "openai" => {} // Fall through to OpenAI logic below
+        other => {
+            tracing::warn!("Unknown embedding provider '{}', using stub", other);
+            return Arc::new(StubEmbeddingProvider::new(8));
+        }
+    }
+
+    // Try OpenAI if we have an API key
     let api_key = embedding_config.api_key.clone();
-    if api_key.is_empty() {
-        tracing::warn!("OpenAI embedding API key not set, using stub provider");
-        return Arc::new(StubEmbeddingProvider::new(8));
+    if !api_key.is_empty() {
+        let provider = OpenAiEmbeddingProvider::with_model(
+            api_key,
+            embedding_config.model.clone(),
+            embedding_config.dimensions,
+        )
+        .with_base_url(embedding_config.base_url.clone());
+
+        tracing::info!(
+            "OpenAI embedding provider initialized (model: {}, dimensions: {})",
+            embedding_config.model,
+            embedding_config.dimensions
+        );
+        return Arc::new(provider);
     }
 
-    // Create OpenAI embedding provider with configured model and dimensions
-    let provider = OpenAiEmbeddingProvider::with_model(
-        api_key,
-        embedding_config.model.clone(),
-        embedding_config.dimensions,
-    )
-    .with_base_url(embedding_config.base_url.clone());
-
-    tracing::info!(
-        "OpenAI embedding provider initialized (model: {}, dimensions: {})",
-        embedding_config.model,
-        embedding_config.dimensions
-    );
-
-    Arc::new(provider)
+    // No provider available
+    tracing::warn!("No embedding provider available (no Ollama, no OpenAI key), using stub");
+    Arc::new(StubEmbeddingProvider::new(8))
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,7 +1163,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     let file_store_for_consolidation =
         clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
-    let consolidation_embedding_provider = build_embedding_provider(&config);
+    let consolidation_embedding_provider = build_embedding_provider(&config).await;
 
     {
         let startup_index = consolidation_search_index.clone();
@@ -1244,6 +1280,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                     mention_target: None,
                         message_id: None,
                         attachments: vec![],
+                group_context: None,
                 };
 
                 tracing::debug!("Sending heartbeat to agent {}", agent_id);
@@ -1417,7 +1454,7 @@ async fn run_consolidate(root: &Path) -> Result<()> {
     let workspace_dir = root.to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
-    let consolidation_embedding_provider = build_embedding_provider(&config);
+    let consolidation_embedding_provider = build_embedding_provider(&config).await;
     let consolidator = Arc::new(
         HippocampusConsolidator::new(
             file_store.clone(),
@@ -1474,6 +1511,7 @@ async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
             mention_target: None,
                         message_id: None,
                         attachments: vec![],
+        group_context: None,
         };
 
         match gateway.handle_inbound(inbound).await {

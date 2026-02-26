@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
-use clawhive_schema::{BusMessage, InboundMessage, OutboundMessage};
+use clawhive_schema::{BusMessage, GroupContext, GroupMember, InboundMessage, OutboundMessage};
 use serenity::all::{
     ChannelId, Client, Context, EventHandler, GatewayIntents, Http, Message, Ready,
 };
@@ -46,6 +46,7 @@ impl DiscordAdapter {
             mention_target: None,
             message_id: None,
             attachments: vec![],
+        group_context: None,
         }
     }
 
@@ -80,9 +81,11 @@ impl DiscordBot {
     }
 
     pub async fn run_impl(self) -> anyhow::Result<()> {
+        // Note: GUILD_MEMBERS is a privileged intent, must be enabled in Discord Developer Portal
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
-            | GatewayIntents::MESSAGE_CONTENT;
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILD_MEMBERS;
 
         let http_holder: Arc<RwLock<Option<Arc<Http>>>> = Arc::new(RwLock::new(None));
         let connector_id_for_delivery = self.connector_id.clone();
@@ -173,6 +176,35 @@ impl EventHandler for DiscordHandler {
         } else {
             None
         };
+
+        // Populate group context for guild channels
+        if let Some(gid) = msg.guild_id {
+            let mut group_ctx = GroupContext {
+                name: None,
+                is_group: true,
+                members: vec![],
+            };
+
+            // Fetch guild info (cached) - includes channel name and members
+            if let Some(guild) = ctx.cache.guild(gid) {
+                // Get channel name
+                if let Some(channel) = guild.channels.get(&channel_id) {
+                    group_ctx.name = Some(channel.name.clone());
+                }
+
+                // Get guild members
+                for member in guild.members.values() {
+                    group_ctx.members.push(GroupMember {
+                        id: member.user.id.to_string(),
+                        name: member.display_name().to_string(),
+                        is_bot: member.user.bot,
+                        agent_id: None, // Will be matched by orchestrator
+                    });
+                }
+            }
+
+            inbound.group_context = Some(group_ctx);
+        }
 
         let _ = channel_id.broadcast_typing(&ctx.http).await;
 
@@ -328,6 +360,7 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
+        group_context: None,
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:guild:999:channel:123] hello world");
@@ -361,6 +394,7 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
+        group_context: None,
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:dm:789] reply text");

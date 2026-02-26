@@ -23,6 +23,38 @@ pub struct InboundMessage {
     /// Attached media (images, files)
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Group/channel context (members, metadata)
+    #[serde(default)]
+    pub group_context: Option<GroupContext>,
+}
+
+/// Context about the group/channel where the message was sent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GroupContext {
+    /// Group/channel name
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Whether this is a group chat (vs DM)
+    #[serde(default)]
+    pub is_group: bool,
+    /// Members in this group (agents and humans)
+    #[serde(default)]
+    pub members: Vec<GroupMember>,
+}
+
+/// A member in a group chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMember {
+    /// Platform-specific user ID
+    pub id: String,
+    /// Display name
+    pub name: String,
+    /// Whether this is a bot/agent
+    #[serde(default)]
+    pub is_bot: bool,
+    /// Agent ID if this is a known agent (from config)
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 /// Media attachment
@@ -248,6 +280,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
+        group_context: None,
         };
 
         let key = SessionKey::from_inbound(&inbound);
@@ -266,6 +299,7 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
+        group_context: None,
         };
 
         // Test HandleIncomingMessage variant
@@ -282,6 +316,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
+        group_context: None,
         };
 
         let msg1 = BusMessage::HandleIncomingMessage {
@@ -362,6 +397,7 @@ mod tests {
             mention_target: Some("@bot".into()),
             message_id: None,
             attachments: vec![],
+        group_context: None,
         };
         let event = Event::Inbound(inbound);
         let json = serde_json::to_string(&event).unwrap();
@@ -388,6 +424,7 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
+        group_context: None,
         };
         let event = Event::Outbound(outbound);
         let json = serde_json::to_string(&event).unwrap();
@@ -515,6 +552,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
+        group_context: None,
         };
         let key = SessionKey::from_inbound(&inbound);
         assert_eq!(key.0, "telegram:tg:special/id:group:chat:-100123:user:0");

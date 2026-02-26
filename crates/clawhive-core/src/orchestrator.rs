@@ -467,7 +467,18 @@ impl Orchestrator {
         let system_prompt = self
             .personas
             .get(agent_id)
-            .map(|p| p.assembled_system_prompt())
+            .map(|p| {
+                // Inject group members context if available
+                if let Some(ref group_ctx) = inbound.group_context {
+                    let group_md = format_group_context_md(group_ctx, &self.personas);
+                    if !group_md.is_empty() {
+                        let mut persona_clone = p.clone();
+                        persona_clone.group_members_context = group_md;
+                        return persona_clone.assembled_system_prompt();
+                    }
+                }
+                p.assembled_system_prompt()
+            })
             .unwrap_or_default();
         let active_skills = self.active_skill_registry();
         let skill_summary = active_skills.summary_prompt();
@@ -1231,4 +1242,74 @@ fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<Convers
 
     collected.reverse();
     collected
+}
+
+/// Format group context as markdown for injection into system prompt.
+fn format_group_context_md(
+    group_ctx: &GroupContext,
+    personas: &HashMap<String, Persona>,
+) -> String {
+    if !group_ctx.is_group || group_ctx.members.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["## 当前群聊成员 / Current Group Members".to_string()];
+    lines.push(String::new());
+
+    // Separate agents and humans
+    let mut agents_in_group = Vec::new();
+    let mut humans_in_group = Vec::new();
+
+    for member in &group_ctx.members {
+        if member.is_bot {
+            // Try to find matching persona by name
+            let agent_id = personas
+                .iter()
+                .find(|(_, p)| p.name == member.name)
+                .map(|(id, _)| id.clone());
+            agents_in_group.push((member, agent_id));
+        } else {
+            humans_in_group.push(member);
+        }
+    }
+
+    if !agents_in_group.is_empty() {
+        lines.push("**Agents in this chat:**".to_string());
+        for (member, agent_id) in &agents_in_group {
+            let id_info = agent_id
+                .as_ref()
+                .map(|id| format!(" (agent: {})", id))
+                .unwrap_or_default();
+            lines.push(format!("- 🤖 {}{}", member.name, id_info));
+        }
+        lines.push(String::new());
+    }
+
+    if !humans_in_group.is_empty() {
+        lines.push("**Humans in this chat:**".to_string());
+        for member in &humans_in_group {
+            lines.push(format!("- 👤 {}", member.name));
+        }
+        lines.push(String::new());
+    }
+
+    // List agents NOT in this chat (from known personas)
+    let agents_in_chat: std::collections::HashSet<_> = agents_in_group
+        .iter()
+        .filter_map(|(_, id)| id.as_ref())
+        .collect();
+    let agents_not_in_chat: Vec<_> = personas
+        .iter()
+        .filter(|(id, _)| !agents_in_chat.contains(id))
+        .collect();
+
+    if !agents_not_in_chat.is_empty() {
+        lines.push("**Other agents (not in this chat, @ to collaborate):**".to_string());
+        for (agent_id, persona) in agents_not_in_chat {
+            let emoji = persona.emoji.as_deref().unwrap_or("🤖");
+            lines.push(format!("- {} {} ({})", emoji, persona.name, agent_id));
+        }
+    }
+
+    lines.join("\n")
 }

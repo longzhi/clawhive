@@ -658,6 +658,7 @@ mod tests {
             at: chrono::Utc::now(),
             reply_to: None,
             attachments: vec![],
+        group_context: None,
         };
 
         app.handle_bus_message(BusMessage::ReplyReady { outbound });
@@ -685,6 +686,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
+        group_context: None,
         };
 
         app.handle_bus_message(BusMessage::HandleIncomingMessage {
