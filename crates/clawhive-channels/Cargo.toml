@@ -8,6 +8,7 @@ license.workspace = true
 default = ["telegram", "discord"]
 telegram = ["dep:teloxide", "dep:log"]
 discord = ["dep:serenity"]
+imessage = []
 
 [dependencies]
 anyhow.workspace = true

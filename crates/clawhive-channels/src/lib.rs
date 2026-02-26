@@ -10,3 +10,6 @@ pub mod telegram;
 
 #[cfg(feature = "discord")]
 pub mod discord;
+
+#[cfg(feature = "imessage")]
+pub mod imessage;
