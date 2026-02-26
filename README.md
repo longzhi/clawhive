@@ -203,15 +203,6 @@ chmod +x clawhive
 sudo mv clawhive /usr/local/bin/
 ```
 
-### Ubuntu (x86_64)
-
-```bash
-curl -LO https://github.com/longzhi/clawhive/releases/download/vX.Y.Z/clawhive-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf clawhive-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
-chmod +x clawhive
-sudo mv clawhive /usr/local/bin/
-```
-
 ### Run
 
 ```bash
