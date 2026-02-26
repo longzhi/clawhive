@@ -723,6 +723,19 @@ fn bootstrap(
 
     let router = build_router_from_config(&config);
 
+    // Initialize peer registry by scanning workspaces
+    let workspaces_root = root.join("workspaces");
+    let peer_registry = match PeerRegistry::scan_workspaces(&workspaces_root) {
+        Ok(registry) => {
+            tracing::info!("Discovered {} peer agents", registry.len());
+            registry
+        }
+        Err(e) => {
+            tracing::warn!("Failed to scan workspaces for peers: {e}");
+            PeerRegistry::new()
+        }
+    };
+
     // Load personas from workspace directories (OpenClaw-style)
     let mut personas = HashMap::new();
     for agent_config in &config.agents {
@@ -740,7 +753,12 @@ fn bootstrap(
         );
 
         match load_persona_from_workspace(workspace.root(), &agent_config.agent_id, name, emoji) {
-            Ok(persona) => {
+            Ok(mut persona) => {
+                // Inject peers context for multi-agent collaboration
+                let peers_md = peer_registry.format_peers_md(&agent_config.agent_id);
+                if !peers_md.is_empty() {
+                    persona.peers_context = peers_md;
+                }
                 personas.insert(agent_config.agent_id.clone(), persona);
             }
             Err(e) => {
