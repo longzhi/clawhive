@@ -17,8 +17,8 @@ web/.env*.local
 .sisyphus/
 
 # Build artifacts
-/nanocrab
-/nanocrab-server
+/clawhive
+/clawhive-server
 
 # Logs
 /logs/
