@@ -9,11 +9,9 @@ A Rust-native multi-agent framework focused on bounded runtime behavior, Markdow
 
 ## Overview
 
-clawhive is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + Discord + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
+clawhive is a Rust-native multi-agent framework built with **security as a first-class concern**. Unlike platforms that bolt on safety as an afterthought, clawhive enforces a two-layer security model from day one: a non-bypassable hard baseline blocks dangerous operations system-wide, while external skills must explicitly declare permissions.
 
-The memory system follows a "Markdown as source of truth" philosophy. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 is used only as a search index layer, enabling hybrid vector + full-text retrieval.
-
-Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), memory policy, and optional tool policy config. Agents can spawn sub-agents with explicit depth and timeout bounds. A ReAct loop provides iterative reasoning with repeat guards.
+The framework focuses on Telegram + Discord + CLI workflows, with a smaller operational footprint than broad "everything connector" platforms. Agents can spawn sub-agents with explicit depth and timeout bounds, and a ReAct loop provides iterative reasoning with repeat guards.
 
 ## 🔐 Security First
 
