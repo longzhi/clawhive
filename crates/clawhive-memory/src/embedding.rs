@@ -126,6 +126,147 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Gemini Embedding Provider
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct GeminiEmbeddingProvider {
+    client: reqwest::Client,
+    model: String,
+    dimensions: usize,
+    api_key: String,
+    base_url: String,
+}
+
+impl GeminiEmbeddingProvider {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            model: "gemini-embedding-001".to_string(),
+            dimensions: 768,
+            api_key,
+            base_url: "https://generativelanguage.googleapis.com".to_string(),
+        }
+    }
+
+    pub fn with_model(api_key: String, model: String, dimensions: usize) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            model,
+            dimensions,
+            api_key,
+            base_url: "https://generativelanguage.googleapis.com".to_string(),
+        }
+    }
+
+    pub fn with_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
+        self
+    }
+}
+
+#[derive(Serialize)]
+struct GeminiEmbedRequest {
+    model: String,
+    content: GeminiContent,
+}
+
+#[derive(Serialize)]
+struct GeminiBatchEmbedRequest {
+    requests: Vec<GeminiEmbedRequest>,
+}
+
+#[derive(Serialize)]
+struct GeminiContent {
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Serialize)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct GeminiBatchEmbedResponse {
+    embeddings: Vec<GeminiEmbedding>,
+}
+
+#[derive(Deserialize)]
+struct GeminiEmbedding {
+    values: Vec<f32>,
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiEmbeddingProvider {
+    async fn embed(&self, texts: &[String]) -> Result<EmbeddingResult> {
+        if texts.is_empty() {
+            return Ok(EmbeddingResult {
+                embeddings: Vec::new(),
+                model: self.model.clone(),
+                dimensions: self.dimensions,
+            });
+        }
+
+        let endpoint = format!(
+            "{}/v1beta/models/{}:batchEmbedContents?key={}",
+            self.base_url.trim_end_matches('/'),
+            self.model,
+            self.api_key
+        );
+
+        let requests: Vec<GeminiEmbedRequest> = texts
+            .iter()
+            .map(|text| GeminiEmbedRequest {
+                model: format!("models/{}", self.model),
+                content: GeminiContent {
+                    parts: vec![GeminiPart {
+                        text: text.clone(),
+                    }],
+                },
+            })
+            .collect();
+
+        let batch_request = GeminiBatchEmbedRequest { requests };
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&batch_request)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let parsed: GeminiBatchEmbedResponse = response.json().await?;
+
+        if parsed.embeddings.len() != texts.len() {
+            return Err(anyhow!(
+                "Gemini embedding count mismatch: expected {}, got {}",
+                texts.len(),
+                parsed.embeddings.len()
+            ));
+        }
+
+        let embeddings: Vec<Vec<f32>> = parsed.embeddings.into_iter().map(|e| e.values).collect();
+        let actual_dims = embeddings.first().map(|e| e.len()).unwrap_or(self.dimensions);
+
+        Ok(EmbeddingResult {
+            embeddings,
+            model: self.model.clone(),
+            dimensions: actual_dims,
+        })
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ollama Embedding Provider
 // ---------------------------------------------------------------------------
 

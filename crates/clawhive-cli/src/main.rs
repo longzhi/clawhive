@@ -24,7 +24,8 @@ use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_
 use clawhive_core::*;
 use clawhive_gateway::{spawn_scheduled_task_listener, spawn_wait_task_listener, Gateway, RateLimitConfig, RateLimiter};
 use clawhive_memory::embedding::{
-    EmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
+    EmbeddingProvider, GeminiEmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider,
+    StubEmbeddingProvider,
 };
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
@@ -1277,7 +1278,9 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
         let agent_id = agent_config.agent_id.clone();
         let agent_id_for_log = agent_id.clone();
         let gateway_clone = gateway.clone();
+        let bus_clone = Arc::clone(&bus);
         let interval_minutes = heartbeat_config.interval_minutes;
+        let deliver_to = heartbeat_config.deliver_to.clone();
         let prompt = heartbeat_config
             .prompt
             .clone()
@@ -1330,13 +1333,30 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                         if is_heartbeat_ack(&outbound.text, 50) {
                             tracing::debug!("Heartbeat ack from {}", agent_id);
                         } else {
-                            // Agent has something to say - log it for now
-                            // TODO: Deliver to configured channel
                             tracing::info!(
                                 "Heartbeat response from {}: {}",
                                 agent_id,
                                 outbound.text
                             );
+
+                            // Deliver to configured channel via EventBus
+                            if let Some(ref target) = deliver_to {
+                                if let Some((ch_type, conn_id, scope)) = parse_deliver_target(target) {
+                                    if let Err(e) = bus_clone.publish(clawhive_schema::BusMessage::DeliverAnnounce {
+                                        channel_type: ch_type,
+                                        connector_id: conn_id,
+                                        conversation_scope: scope,
+                                        text: outbound.text,
+                                    }).await {
+                                        tracing::error!("Failed to deliver heartbeat response: {e}");
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        "Invalid heartbeat deliver_to format: {} (expected 'channel_type:connector_id:scope')",
+                                        target
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -2062,6 +2082,32 @@ fn install_skill_with_confirmation(
     Ok(())
 }
 
+/// Parse a heartbeat deliver_to target string.
+/// Format: "channel_type:connector_id:conversation_scope"
+/// Example: "discord:main:guild:123:channel:456"
+/// Returns (channel_type, connector_id, conversation_scope) or None if invalid.
+fn parse_deliver_target(target: &str) -> Option<(String, String, String)> {
+    // Split on first two colons: "discord:main:guild:123:channel:456"
+    // → channel_type="discord", connector_id="main", scope="guild:123:channel:456"
+    let first_colon = target.find(':')?;
+    let channel_type = &target[..first_colon];
+    let rest = &target[first_colon + 1..];
+
+    let second_colon = rest.find(':')?;
+    let connector_id = &rest[..second_colon];
+    let scope = &rest[second_colon + 1..];
+
+    if channel_type.is_empty() || connector_id.is_empty() || scope.is_empty() {
+        return None;
+    }
+
+    Some((
+        channel_type.to_string(),
+        connector_id.to_string(),
+        scope.to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2221,5 +2267,39 @@ mod tests {
         let result = check_and_clean_pid(tmp.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already running"));
+    }
+
+    #[test]
+    fn parse_deliver_target_valid() {
+        let result = parse_deliver_target("discord:main:guild:123:channel:456");
+        assert_eq!(
+            result,
+            Some((
+                "discord".to_string(),
+                "main".to_string(),
+                "guild:123:channel:456".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_deliver_target_telegram() {
+        let result = parse_deliver_target("telegram:bot1:chat:789");
+        assert_eq!(
+            result,
+            Some((
+                "telegram".to_string(),
+                "bot1".to_string(),
+                "chat:789".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_deliver_target_invalid() {
+        assert_eq!(parse_deliver_target(""), None);
+        assert_eq!(parse_deliver_target("discord"), None);
+        assert_eq!(parse_deliver_target("discord:main"), None);
+        assert_eq!(parse_deliver_target("::"), None);
     }
 }
