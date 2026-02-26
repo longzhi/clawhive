@@ -3,6 +3,7 @@ pub mod config;
 pub mod consolidation;
 pub mod context;
 pub mod file_tools;
+pub mod image_tool;
 pub mod heartbeat;
 pub mod hooks;
 pub mod memory_tools;
