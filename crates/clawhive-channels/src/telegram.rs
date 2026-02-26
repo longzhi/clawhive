@@ -421,7 +421,6 @@ mod tests {
             at: chrono::Utc::now(),
             reply_to: None,
             attachments: vec![],
-        group_context: None,
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[telegram:chat:123] hello world");

@@ -360,7 +360,6 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
-        group_context: None,
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:guild:999:channel:123] hello world");
@@ -394,7 +393,6 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
-        group_context: None,
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:dm:789] reply text");

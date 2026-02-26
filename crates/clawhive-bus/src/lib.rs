@@ -125,7 +125,6 @@ mod tests {
                 at: Utc::now(),
                 reply_to: None,
                 attachments: vec![],
-            group_context: None,
             },
         }
     }
@@ -273,7 +272,6 @@ mod tests {
                         at: Utc::now(),
                         reply_to: None,
                         attachments: vec![],
-                    group_context: None,
                     },
                 },
                 Topic::ReplyReady,

@@ -280,7 +280,7 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-        group_context: None,
+            group_context: None,
         };
 
         let key = SessionKey::from_inbound(&inbound);
@@ -299,7 +299,6 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
-        group_context: None,
         };
 
         // Test HandleIncomingMessage variant
@@ -424,7 +423,6 @@ mod tests {
             at: Utc::now(),
             reply_to: None,
             attachments: vec![],
-        group_context: None,
         };
         let event = Event::Outbound(outbound);
         let json = serde_json::to_string(&event).unwrap();
