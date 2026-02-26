@@ -3,6 +3,9 @@ use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+use crate::MemoryStore;
 
 #[derive(Debug, Clone)]
 pub struct EmbeddingResult {
@@ -204,6 +207,116 @@ fn extract_ordered_embeddings(response: OpenAiEmbeddingResponse) -> Result<Vec<V
         .into_iter()
         .map(|item| item.embedding)
         .collect::<Vec<Vec<f32>>>())
+}
+
+/// Compute hash for cache key.
+fn compute_text_hash(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..16]) // Use first 16 bytes (32 hex chars)
+}
+
+/// Cached embedding provider that stores results in SQLite.
+pub struct CachedEmbeddingProvider<P: EmbeddingProvider> {
+    inner: P,
+    store: Arc<MemoryStore>,
+    provider_key: String,
+}
+
+impl<P: EmbeddingProvider> CachedEmbeddingProvider<P> {
+    pub fn new(inner: P, store: Arc<MemoryStore>, provider_key: impl Into<String>) -> Self {
+        Self {
+            inner,
+            store,
+            provider_key: provider_key.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl<P: EmbeddingProvider + 'static> EmbeddingProvider for CachedEmbeddingProvider<P> {
+    async fn embed(&self, texts: &[String]) -> Result<EmbeddingResult> {
+        if texts.is_empty() {
+            return Ok(EmbeddingResult {
+                embeddings: Vec::new(),
+                model: self.inner.model_id().to_string(),
+                dimensions: self.inner.dimensions(),
+            });
+        }
+
+        let provider = "openai"; // TODO: make this configurable
+        let model = self.inner.model_id();
+        let dims = self.inner.dimensions();
+
+        // Check cache for each text
+        let mut results: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+        let mut uncached_indices: Vec<usize> = Vec::new();
+        let mut uncached_texts: Vec<String> = Vec::new();
+
+        for (i, text) in texts.iter().enumerate() {
+            let hash = compute_text_hash(text);
+            match self
+                .store
+                .get_embedding_cache(provider, model, &self.provider_key, &hash)
+                .await
+            {
+                Ok(Some(embedding)) => {
+                    results.push(Some(embedding));
+                }
+                Ok(None) | Err(_) => {
+                    results.push(None);
+                    uncached_indices.push(i);
+                    uncached_texts.push(text.clone());
+                }
+            }
+        }
+
+        // Fetch uncached embeddings
+        if !uncached_texts.is_empty() {
+            let fresh = self.inner.embed(&uncached_texts).await?;
+
+            // Store in cache and fill results
+            for (idx, (text, embedding)) in uncached_indices
+                .iter()
+                .zip(uncached_texts.iter().zip(fresh.embeddings.iter()))
+            {
+                let hash = compute_text_hash(text);
+                let _ = self
+                    .store
+                    .set_embedding_cache(
+                        provider,
+                        model,
+                        &self.provider_key,
+                        &hash,
+                        embedding,
+                        dims,
+                    )
+                    .await;
+                results[*idx] = Some(embedding.clone());
+            }
+        }
+
+        // Unwrap all results
+        let embeddings: Vec<Vec<f32>> = results
+            .into_iter()
+            .map(|r| r.expect("all embeddings should be filled"))
+            .collect();
+
+        Ok(EmbeddingResult {
+            embeddings,
+            model: model.to_string(),
+            dimensions: dims,
+        })
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
 }
 
 #[cfg(test)]

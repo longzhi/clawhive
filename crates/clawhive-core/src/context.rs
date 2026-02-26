@@ -54,6 +54,32 @@ pub struct ContextConfig {
     pub reserve_tokens: usize,
     /// Minimum messages to keep (never compact below this)
     pub min_messages: usize,
+    /// Memory flush configuration
+    pub memory_flush: MemoryFlushConfig,
+}
+
+/// Configuration for pre-compaction memory flush.
+#[derive(Debug, Clone)]
+pub struct MemoryFlushConfig {
+    /// Whether memory flush is enabled
+    pub enabled: bool,
+    /// Tokens remaining before triggering flush (default: 8000)
+    pub soft_threshold_tokens: usize,
+    /// System prompt for memory flush
+    pub system_prompt: String,
+    /// User prompt for memory flush
+    pub prompt: String,
+}
+
+impl Default for MemoryFlushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            soft_threshold_tokens: 8000,
+            system_prompt: "Session nearing compaction. Store any durable memories now.".into(),
+            prompt: "Write any important notes to memory files before context is compacted. Reply with NO_REPLY if nothing to store.".into(),
+        }
+    }
 }
 
 impl Default for ContextConfig {
@@ -63,6 +89,7 @@ impl Default for ContextConfig {
             target_tokens: 64_000,
             reserve_tokens: 4096,
             min_messages: 4,
+            memory_flush: MemoryFlushConfig::default(),
         }
     }
 }
@@ -75,6 +102,7 @@ impl ContextConfig {
             target_tokens: context_window / 2,
             reserve_tokens: 4096,
             min_messages: 4,
+            memory_flush: MemoryFlushConfig::default(),
         }
     }
 
@@ -139,6 +167,22 @@ pub struct CompactionResult {
     pub compacted_count: usize,
     /// Tokens saved by compaction
     pub tokens_saved: usize,
+}
+
+/// Result of checking context window state.
+#[derive(Debug)]
+pub enum ContextCheckResult {
+    /// Context is fine, no action needed
+    Ok,
+    /// Memory flush should be triggered before compaction
+    NeedsMemoryFlush {
+        /// System prompt for memory flush
+        system_prompt: String,
+        /// User prompt for memory flush
+        prompt: String,
+    },
+    /// Compaction was performed
+    Compacted(CompactionResult),
 }
 
 /// Compact older messages into a summary.
@@ -250,6 +294,26 @@ impl ContextManager {
         Self { config, router }
     }
 
+    /// Check context state and determine what action is needed.
+    /// Does NOT perform compaction - caller should handle based on result.
+    pub fn check_context(&self, messages: &[LlmMessage]) -> ContextCheckResult {
+        let tokens = estimate_messages_tokens(messages);
+        let available = self.config.available_tokens();
+
+        // Check if memory flush is needed (approaching limit but not over)
+        if self.config.memory_flush.enabled {
+            let flush_threshold = available.saturating_sub(self.config.memory_flush.soft_threshold_tokens);
+            if tokens >= flush_threshold && tokens < available {
+                return ContextCheckResult::NeedsMemoryFlush {
+                    system_prompt: self.config.memory_flush.system_prompt.clone(),
+                    prompt: self.config.memory_flush.prompt.clone(),
+                };
+            }
+        }
+
+        ContextCheckResult::Ok
+    }
+
     /// Check if messages need compaction and perform it if necessary.
     pub async fn ensure_within_limits(
         &self,
@@ -285,6 +349,38 @@ impl ContextManager {
     pub fn is_approaching_limit(&self, messages: &[LlmMessage]) -> bool {
         let tokens = estimate_messages_tokens(messages);
         tokens > self.config.available_tokens() * 80 / 100 // 80% threshold
+    }
+
+    /// Check if we should trigger memory flush before compaction.
+    /// Returns true if:
+    /// 1. Memory flush is enabled
+    /// 2. Tokens are approaching the flush threshold
+    /// 3. Compaction would be needed soon
+    pub fn should_trigger_memory_flush(&self, messages: &[LlmMessage]) -> bool {
+        if !self.config.memory_flush.enabled {
+            return false;
+        }
+
+        let tokens = estimate_messages_tokens(messages);
+        let flush_threshold = self
+            .config
+            .available_tokens()
+            .saturating_sub(self.config.memory_flush.soft_threshold_tokens);
+
+        tokens >= flush_threshold && tokens < self.config.available_tokens()
+    }
+
+    /// Get memory flush prompts.
+    pub fn memory_flush_prompts(&self) -> (&str, &str) {
+        (
+            &self.config.memory_flush.system_prompt,
+            &self.config.memory_flush.prompt,
+        )
+    }
+
+    /// Get the context config.
+    pub fn config(&self) -> &ContextConfig {
+        &self.config
     }
 }
 
@@ -356,5 +452,18 @@ mod tests {
         } else {
             panic!("Expected tool result");
         }
+    }
+
+    #[test]
+    fn test_memory_flush_config_default() {
+        let config = MemoryFlushConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.soft_threshold_tokens, 8000);
+    }
+
+    #[test]
+    fn test_context_config_includes_memory_flush() {
+        let config = ContextConfig::default();
+        assert!(config.memory_flush.enabled);
     }
 }
