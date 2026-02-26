@@ -19,7 +19,7 @@ export function Topbar() {
     if (path.startsWith('/providers')) return 'Providers';
     if (path.startsWith('/routing')) return 'Routing';
     if (path.startsWith('/settings')) return 'Settings';
-    return 'NanoCrab';
+    return 'Clawhive';
   };
 
   return (
@@ -39,7 +39,7 @@ export function Topbar() {
         </Sheet>
         
         <h1 className="text-lg font-semibold md:text-xl">
-          <span className="md:hidden">NanoCrab</span>
+          <span className="md:hidden">Clawhive</span>
           <span className="hidden md:inline-block">{getPageTitle(pathname)}</span>
         </h1>
       </div>

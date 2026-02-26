@@ -222,4 +222,4 @@ pub async fn acquire(&self, session_key: &str) -> SessionLockGuard {
 - Open a [Discussion](https://github.com/longzhi/clawhive/discussions)
 - Check existing [Issues](https://github.com/longzhi/clawhive/issues)
 
-Thank you for contributing! 🦀
+Thank you for contributing! 🐝

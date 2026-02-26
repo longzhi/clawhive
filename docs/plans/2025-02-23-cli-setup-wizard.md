@@ -74,7 +74,7 @@ use console::{style, Emoji, Term};
 
 pub static CHECKMARK: Emoji<'_, '_> = Emoji("✅ ", "√ ");
 pub static ARROW: Emoji<'_, '_> = Emoji("➜  ", "-> ");
-pub static CRAB: Emoji<'_, '_> = Emoji("🦀 ", "");
+pub static HIVE: Emoji<'_, '_> = Emoji("🐝 ", "");
 
 pub fn print_logo(term: &Term) {
     term.write_line(&format!("{}", style("
@@ -193,7 +193,7 @@ agent_id: clawhive-main
 enabled: true
 identity:
   name: "Clawhive"
-  emoji: "🦀"
+  emoji: "🐝"
 model_policy:
   primary: "anthropic/claude-3-5-sonnet-latest"
   fallbacks: []

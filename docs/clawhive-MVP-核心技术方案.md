@@ -332,18 +332,18 @@ clawhive MVP 保留此思想，但不依赖 workspace 文件系统。
 
 建议使用 Rust workspace（monorepo）：
 
-- `crab-gateway`：接入层
-- `crab-core`：orchestrator + session + policy
-- `crab-schema`：command/event DTO（稳定边界）
-- `crab-bus`：总线抽象与 in-memory 实现
-- `crab-memory`：Markdown 读写 + SQLite 检索索引（chunks/FTS5/sqlite-vec）
-- `crab-runtime`：执行器接口（WASM adapter 预留）
-- `crab-channels-telegram`：首个通道驱动
-- `crab-sdk`：后续插件/第三方接入
+- `clawhive-gateway`：接入层
+- `clawhive-core`：orchestrator + session + policy
+- `clawhive-schema`：command/event DTO（稳定边界）
+- `clawhive-bus`：总线抽象与 in-memory 实现
+- `clawhive-memory`：Markdown 读写 + SQLite 检索索引（chunks/FTS5/sqlite-vec）
+- `clawhive-runtime`：执行器接口（WASM adapter 预留）
+- `clawhive-channels-telegram`：首个通道驱动
+- `clawhive-sdk`：后续插件/第三方接入
 
 ### 6.1 依赖规则（必须遵守）
 
-1. 跨模块通信只走 `crab-schema`
+1. 跨模块通信只走 `clawhive-schema`
 2. `gateway` 不能直接依赖 `memory` 存储实现
 3. `core` 依赖 trait，不依赖具体基础设施实现
 4. 通道模块不包含业务决策代码

@@ -29,7 +29,7 @@ clawhive setup [--force]
 ### Dashboard Display
 
 ```
-🦀 clawhive configuration
+🐝 clawhive configuration
 
   Providers
     ✓ anthropic    API key (env: ANTHROPIC_API_KEY)

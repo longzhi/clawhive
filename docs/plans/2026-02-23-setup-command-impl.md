@@ -76,7 +76,7 @@ In `setup_ui.rs`, no changes needed to content — only the module path changed.
 
 In `setup.rs`, update the import:
 ```rust
-use crate::setup_ui::{print_done, print_logo, print_step, ARROW, CRAB};
+use crate::setup_ui::{print_done, print_logo, print_step, ARROW, HIVE};
 ```
 
 **Step 6: Update test in main.rs**
@@ -96,7 +96,7 @@ Also replace `init_ui_symbols_exist`:
 fn setup_ui_symbols_exist() {
     let _ = crate::setup_ui::CHECKMARK;
     let _ = crate::setup_ui::ARROW;
-    let _ = crate::setup_ui::CRAB;
+    let _ = crate::setup_ui::HIVE;
 }
 ```
 
@@ -572,7 +572,7 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
         }
     }
 
-    term.write_line(&format!("{} Setup complete.", CRAB))?;
+    term.write_line(&format!("{} Setup complete.", HIVE))?;
     Ok(())
 }
 ```
@@ -697,7 +697,7 @@ fn handle_add_agent(
         .interact_text()?;
     let emoji: String = Input::with_theme(theme)
         .with_prompt("Emoji")
-        .default("🦀".to_string())
+        .default("🐝".to_string())
         .interact_text()?;
 
     // Dynamic model list from configured providers

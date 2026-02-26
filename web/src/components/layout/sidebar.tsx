@@ -35,8 +35,8 @@ export function Sidebar({ className, mobile }: SidebarProps) {
         "h-14 flex items-center border-b border-sidebar-border",
         mobile ? "px-6 justify-start" : "justify-center lg:justify-start lg:px-6"
       )}>
-        <span className={cn("text-xl font-bold text-sidebar-foreground", !mobile && "hidden lg:block")}>🦀 NanoCrab</span>
-        <span className={cn("text-xl font-bold text-sidebar-foreground", !mobile && "lg:hidden", mobile && "hidden")}>🦀</span>
+        <span className={cn("text-xl font-bold text-sidebar-foreground", !mobile && "hidden lg:block")}>🐝 Clawhive</span>
+        <span className={cn("text-xl font-bold text-sidebar-foreground", !mobile && "lg:hidden", mobile && "hidden")}>🐝</span>
       </div>
       
       <nav className="flex-1 py-4 flex flex-col gap-1 px-2">

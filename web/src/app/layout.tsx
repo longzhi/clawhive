@@ -18,8 +18,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NanoCrab Admin",
-  description: "Admin interface for NanoCrab multi-agent framework",
+  title: "Clawhive Admin",
+  description: "Admin interface for Clawhive multi-agent framework",
 };
 
 export default function RootLayout({

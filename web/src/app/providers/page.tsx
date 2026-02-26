@@ -46,7 +46,7 @@ export default function ProvidersPage() {
     authStatus?.profiles.find((p) => p.provider === providerId && p.active);
 
   const loginHint = (providerId: string) =>
-    providerId === "openai" ? "nanocrab auth login openai" : "nanocrab auth login anthropic";
+    providerId === "openai" ? "clawhive auth login openai" : "clawhive auth login anthropic";
 
   const handleShowLoginHint = (providerId: string) => {
     toast.message(`Use CLI: ${loginHint(providerId)}`);
