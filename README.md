@@ -11,7 +11,7 @@ A Rust-native multi-agent framework focused on bounded runtime behavior, Markdow
 
 clawhive is a Rust-native multi-agent framework built with **security as a first-class concern**. Unlike platforms that bolt on safety as an afterthought, clawhive enforces a two-layer security model from day one: a non-bypassable hard baseline blocks dangerous operations system-wide, while external skills must explicitly declare permissions.
 
-The framework focuses on Telegram + Discord + CLI workflows, with a smaller operational footprint than broad "everything connector" platforms. Agents can spawn sub-agents with explicit depth and timeout bounds, and a ReAct loop provides iterative reasoning with repeat guards.
+Built in Rust for **minimal resource footprint** and **rock-solid stability** — no garbage collection pauses, predictable memory usage, and a single static binary with zero runtime dependencies. The framework focuses on Telegram + Discord + CLI workflows, with a smaller operational footprint than broad "everything connector" platforms. Agents can spawn sub-agents with explicit depth and timeout bounds, and a ReAct loop provides iterative reasoning with repeat guards.
 
 ## 🔐 Security First
 
