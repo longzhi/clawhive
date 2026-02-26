@@ -16,3 +16,6 @@ pub mod slack;
 
 #[cfg(feature = "imessage")]
 pub mod imessage;
+
+#[cfg(feature = "whatsapp")]
+pub mod whatsapp;
