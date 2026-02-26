@@ -332,6 +332,15 @@ impl App {
                 ));
                 self.push_log(format!("[{ts}] Deliver → {conversation_scope}: {preview}"));
             }
+            BusMessage::WaitTaskCompleted {
+                ref task_id,
+                ref status,
+                ref message,
+                ..
+            } => {
+                self.push_event(format!("[{ts}] WaitTask {task_id}: {status}"));
+                self.push_log(format!("[{ts}] WaitTask completed: {message}"));
+            }
         }
     }
 }

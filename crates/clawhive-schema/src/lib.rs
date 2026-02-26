@@ -135,6 +135,13 @@ pub enum BusMessage {
         conversation_scope: String,
         text: String,
     },
+    WaitTaskCompleted {
+        task_id: String,
+        session_key: String,
+        status: String,
+        message: String,
+        output: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]

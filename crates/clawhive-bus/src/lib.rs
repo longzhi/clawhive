@@ -21,6 +21,7 @@ pub enum Topic {
     ScheduledTaskTriggered,
     ScheduledTaskCompleted,
     DeliverAnnounce,
+    WaitTaskCompleted,
 }
 
 impl Topic {
@@ -40,6 +41,7 @@ impl Topic {
             BusMessage::ScheduledTaskTriggered { .. } => Topic::ScheduledTaskTriggered,
             BusMessage::ScheduledTaskCompleted { .. } => Topic::ScheduledTaskCompleted,
             BusMessage::DeliverAnnounce { .. } => Topic::DeliverAnnounce,
+            BusMessage::WaitTaskCompleted { .. } => Topic::WaitTaskCompleted,
         }
     }
 }

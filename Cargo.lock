@@ -664,6 +664,7 @@ dependencies = [
  "clawhive-bus",
  "clawhive-schema",
  "cron",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
