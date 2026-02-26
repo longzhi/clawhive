@@ -964,7 +964,7 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
         return Arc::new(StubEmbeddingProvider::new(8));
     }
 
-    // Priority: ollama > openai > stub
+    // Priority: ollama > openai (explicit key) > openai (reuse provider key) > stub
     match embedding_config.provider.as_str() {
         "ollama" => {
             let provider = OllamaEmbeddingProvider::with_model(
@@ -981,7 +981,7 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
                 );
                 return Arc::new(provider);
             }
-            tracing::warn!("Ollama not available, falling back to OpenAI");
+            tracing::warn!("Ollama not available, falling back");
         }
         "auto" | "" => {
             // Try Ollama first (free, local)
@@ -997,12 +997,11 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
         }
         "openai" => {} // Fall through to OpenAI logic below
         other => {
-            tracing::warn!("Unknown embedding provider '{}', using stub", other);
-            return Arc::new(StubEmbeddingProvider::new(8));
+            tracing::warn!("Unknown embedding provider '{}', falling back", other);
         }
     }
 
-    // Try OpenAI if we have an API key
+    // Try explicit embedding API key first
     let api_key = embedding_config.api_key.clone();
     if !api_key.is_empty() {
         let provider = OpenAiEmbeddingProvider::with_model(
@@ -1020,8 +1019,49 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
         return Arc::new(provider);
     }
 
-    // No provider available
-    tracing::warn!("No embedding provider available (no Ollama, no OpenAI key), using stub");
+    // Try to reuse API key from configured LLM providers
+    // Look for OpenAI-compatible providers that support embeddings
+    for p in &config.providers {
+        if !p.enabled {
+            continue;
+        }
+        if let Some(ref key) = p.api_key {
+            if key.is_empty() {
+                continue;
+            }
+            // Check if this is an OpenAI-compatible provider
+            let is_openai_compat = p.api_base.contains("openai.com")
+                || p.api_base.contains("api.deepseek.com")
+                || p.provider_id == "openai";
+
+            if is_openai_compat {
+                let model = if p.api_base.contains("openai.com") {
+                    "text-embedding-3-small".to_string()
+                } else {
+                    // Non-OpenAI providers may not support embeddings
+                    continue;
+                };
+
+                let provider = OpenAiEmbeddingProvider::with_model(
+                    key.clone(),
+                    model.clone(),
+                    1536,
+                )
+                .with_base_url(p.api_base.clone());
+
+                tracing::info!(
+                    "Reusing {} API key for embeddings (model: {})",
+                    p.provider_id,
+                    model
+                );
+                return Arc::new(provider);
+            }
+        }
+    }
+
+    // No embedding provider available — stub will be used
+    // BM25 keyword search will handle memory_search as fallback
+    tracing::warn!("No embedding provider available, memory_search will use keyword matching only");
     Arc::new(StubEmbeddingProvider::new(8))
 }
 

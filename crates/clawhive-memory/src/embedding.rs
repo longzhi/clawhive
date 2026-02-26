@@ -19,6 +19,11 @@ pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, texts: &[String]) -> Result<EmbeddingResult>;
     fn model_id(&self) -> &str;
     fn dimensions(&self) -> usize;
+    /// Whether this provider produces semantically meaningful embeddings.
+    /// Returns false for stub/dummy providers (BM25-only mode).
+    fn is_semantic(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -299,6 +304,10 @@ impl EmbeddingProvider for StubEmbeddingProvider {
 
     fn dimensions(&self) -> usize {
         self.dims
+    }
+
+    fn is_semantic(&self) -> bool {
+        false
     }
 }
 

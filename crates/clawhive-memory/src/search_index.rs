@@ -385,7 +385,11 @@ impl SearchIndex {
 
         let target_results = if max_results == 0 { 6 } else { max_results };
         let candidate_limit = (target_results.saturating_mul(4)).max(1);
+        let use_vectors = provider.is_semantic();
 
+        let mut vector_candidates: Vec<(String, String, String, i64, i64, String, f64)> = Vec::new();
+
+        if use_vectors {
         let embedded = provider.embed(&[query.to_owned()]).await?;
         let query_embedding = embedded
             .embeddings
@@ -397,7 +401,7 @@ impl SearchIndex {
         let query_embedding_json = embedding_to_json(&query_embedding_for_vec);
 
         let db = Arc::clone(&self.db);
-        let mut vector_candidates = task::spawn_blocking(move || {
+        vector_candidates = task::spawn_blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -487,6 +491,7 @@ impl SearchIndex {
                 }
             }
         }
+        } // end if use_vectors
 
         let db = Arc::clone(&self.db);
         let query_owned = query.to_owned();
@@ -602,7 +607,11 @@ impl SearchIndex {
                 start_line: item.start_line,
                 end_line: item.end_line,
                 text: item.text,
-                score: (item.vector_score * 0.7) + (item.bm25_score * 0.3),
+                score: if use_vectors {
+                    (item.vector_score * 0.7) + (item.bm25_score * 0.3)
+                } else {
+                    item.bm25_score  // BM25-only mode
+                },
             })
             .filter(|item| item.score >= min_score)
             .collect::<Vec<SearchResult>>();
