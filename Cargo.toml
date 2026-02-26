@@ -22,6 +22,7 @@ edition = "2021"
 version = "0.1.0"
 license = "MIT"
 authors = ["dragon"]
+rust-version = "1.92.0"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
