@@ -73,7 +73,7 @@ clawhive is a Rust-native multi-agent framework designed for a smaller operation
 
 The memory system follows a "Markdown as source of truth" philosophy. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 is used only as a search index layer, enabling hybrid vector + full-text retrieval.
 
-Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), memory policy, and optional tool policy config. Agents can spawn sub-agents with explicit depth and timeout bounds. A Weak ReAct loop provides iterative reasoning with repeat guards.
+Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), memory policy, and optional tool policy config. Agents can spawn sub-agents with explicit depth and timeout bounds. A ReAct loop provides iterative reasoning with repeat guards.
 
 ## Technical Differentiators (vs OpenClaw)
 
@@ -100,7 +100,7 @@ Each agent has its own persona (system prompts), model policy (primary + fallbac
 - Hybrid search: sqlite-vec vector similarity (70%) + FTS5 BM25 (30%) over memory chunks
 - Hippocampus consolidation: periodic LLM-driven synthesis of daily observations into long-term memory
 - Telegram channel adapter (multi-bot, multi-connector)
-- Weak ReAct reasoning loop with repeat guard
+- ReAct reasoning loop with repeat guard
 - Sub-agent spawning with depth limits and timeout
 - Skill system (SKILL.md with frontmatter + prompt injection)
 - Token-bucket rate limiting per user
