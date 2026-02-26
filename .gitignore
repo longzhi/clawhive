@@ -22,3 +22,7 @@ web/.env*.local
 
 # Logs
 /logs/
+
+# Node
+node_modules/
+package-lock.json
