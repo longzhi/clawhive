@@ -7,6 +7,14 @@
 
 A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and Telegram-first deployment.
 
+## Overview
+
+clawhive is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + Discord + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
+
+The memory system follows a "Markdown as source of truth" philosophy. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 is used only as a search index layer, enabling hybrid vector + full-text retrieval.
+
+Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), memory policy, and optional tool policy config. Agents can spawn sub-agents with explicit depth and timeout bounds. A ReAct loop provides iterative reasoning with repeat guards.
+
 ## 🔐 Security First
 
 clawhive implements a **two-layer security architecture** that provides defense-in-depth for AI agent tool execution:
@@ -66,14 +74,6 @@ permissions:
 2. **Hard baseline is non-bypassable** — Even misconfigured permissions can't override it
 3. **Honest documentation** — We only claim what's implemented, not roadmap intent
 4. **Defense in depth** — Multiple layers prevent single-point failures
-
-## Overview
-
-clawhive is a Rust-native multi-agent framework designed for a smaller operational footprint than broad "everything connector" platforms. It currently focuses on Telegram + CLI workflows, routes messages to configurable agents, and preserves persistent memory across conversations.
-
-The memory system follows a "Markdown as source of truth" philosophy. Long-term knowledge lives in `MEMORY.md`, daily observations in `memory/YYYY-MM-DD.md` files, and raw conversation history in Session JSONL files. SQLite with sqlite-vec and FTS5 is used only as a search index layer, enabling hybrid vector + full-text retrieval.
-
-Each agent has its own persona (system prompts), model policy (primary + fallback LLMs), memory policy, and optional tool policy config. Agents can spawn sub-agents with explicit depth and timeout bounds. A ReAct loop provides iterative reasoning with repeat guards.
 
 ## Technical Differentiators (vs OpenClaw)
 
