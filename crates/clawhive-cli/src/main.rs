@@ -1063,21 +1063,17 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
                 continue;
             }
 
-            // OpenAI (direct API only, not compatible proxies)
-            if p.api_base.contains("openai.com") || p.provider_id == "openai" {
-                if p.api_base.contains("openai.com") {
-                    let provider = OpenAiEmbeddingProvider::with_model(
-                        key.clone(),
-                        "text-embedding-3-small".to_string(),
-                        1536,
-                    )
-                    .with_base_url(p.api_base.clone());
+            // OpenAI (direct API only)
+            if p.api_base.contains("openai.com") {
+                let provider = OpenAiEmbeddingProvider::with_model(
+                    key.clone(),
+                    "text-embedding-3-small".to_string(),
+                    1536,
+                )
+                .with_base_url(p.api_base.clone());
 
-                    tracing::info!(
-                        "Reusing OpenAI API key for embeddings (text-embedding-3-small)"
-                    );
-                    return Arc::new(provider);
-                }
+                tracing::info!("Reusing OpenAI API key for embeddings (text-embedding-3-small)");
+                return Arc::new(provider);
             }
 
             // Gemini / Google
