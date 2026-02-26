@@ -80,7 +80,10 @@ impl ToolExecutor for WebSearchTool {
         let query = input["query"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'query' field"))?;
-        let count = input["count"].as_u64().unwrap_or(DEFAULT_COUNT).clamp(1, 10);
+        let count = input["count"]
+            .as_u64()
+            .unwrap_or(DEFAULT_COUNT)
+            .clamp(1, 10);
         let country = input["country"].as_str();
         let freshness = input["freshness"].as_str();
 
@@ -133,10 +136,7 @@ impl ToolExecutor for WebSearchTool {
             }
         };
 
-        let results = search_resp
-            .web
-            .map(|w| w.results)
-            .unwrap_or_default();
+        let results = search_resp.web.map(|w| w.results).unwrap_or_default();
 
         if results.is_empty() {
             return Ok(ToolOutput {

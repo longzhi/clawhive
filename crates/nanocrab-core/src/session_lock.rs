@@ -52,10 +52,7 @@ impl SessionLockManager {
         };
 
         // Acquire per-session permit
-        let session_permit = session_sem
-            .acquire_owned()
-            .await
-            .expect("semaphore closed");
+        let session_permit = session_sem.acquire_owned().await.expect("semaphore closed");
 
         SessionLockGuard {
             _session_permit: session_permit,

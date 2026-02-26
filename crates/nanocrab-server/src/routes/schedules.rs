@@ -225,7 +225,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
-        let yaml = std::fs::read_to_string(state.root.join("config/schedules.d/daily.yaml")).unwrap();
+        let yaml =
+            std::fs::read_to_string(state.root.join("config/schedules.d/daily.yaml")).unwrap();
         assert!(yaml.contains("enabled: false"));
     }
 

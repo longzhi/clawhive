@@ -59,7 +59,9 @@ pub fn build_post_reset_prompt(agent_id: &str) -> String {
     let now = Utc::now();
     let date_str = now.format("%Y-%m-%d %H:%M:%S UTC").to_string();
     let today = now.format("%Y-%m-%d").to_string();
-    let yesterday = (now - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
 
     format!(
         r#"[{date_str}] ⚠️ Post-Reset Audit: Session has been reset. The following startup files should be read:

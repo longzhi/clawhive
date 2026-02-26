@@ -70,14 +70,14 @@ impl ToolExecutor for WebFetchTool {
             .as_u64()
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_MAX_CHARS);
-        let extract_mode = input["extract_mode"]
-            .as_str()
-            .unwrap_or("markdown");
+        let extract_mode = input["extract_mode"].as_str().unwrap_or("markdown");
 
         // Validate URL scheme
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Ok(ToolOutput {
-                content: format!("Invalid URL scheme. Only http:// and https:// are supported: {url}"),
+                content: format!(
+                    "Invalid URL scheme. Only http:// and https:// are supported: {url}"
+                ),
                 is_error: true,
             });
         }
@@ -104,8 +104,13 @@ impl ToolExecutor for WebFetchTool {
         }
 
         // Fetch
-        let resp = match self.client.get(url)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        let resp = match self
+            .client
+            .get(url)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("Accept-Language", "en-US,en;q=0.9")
             .send()
             .await
@@ -397,7 +402,10 @@ mod tests {
 
         // Use a non-routable IP to avoid actual network call
         let result = tool
-            .execute(serde_json::json!({"url": "https://10.255.255.1/test"}), &ctx)
+            .execute(
+                serde_json::json!({"url": "https://10.255.255.1/test"}),
+                &ctx,
+            )
             .await
             .unwrap();
         // Should be denied by hard baseline (private network), not by policy

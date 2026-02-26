@@ -86,10 +86,9 @@ async fn get_provider(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let path = state.root.join(format!("config/providers.d/{id}.yaml"));
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let val: serde_yaml::Value =
-        serde_yaml::from_str(&content).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let val: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let json =
         serde_json::to_value(val).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json))
@@ -115,8 +114,7 @@ async fn set_api_key(
     Json(body): Json<SetKeyRequest>,
 ) -> Result<Json<SetKeyResult>, axum::http::StatusCode> {
     let path = state.root.join(format!("config/providers.d/{id}.yaml"));
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
     let mut val: serde_yaml::Value = serde_yaml::from_str(&content)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -134,10 +132,7 @@ async fn set_api_key(
     }))
 }
 
-async fn test_provider(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<TestResult> {
+async fn test_provider(State(state): State<AppState>, Path(id): Path<String>) -> Json<TestResult> {
     let path = state.root.join(format!("config/providers.d/{id}.yaml"));
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,

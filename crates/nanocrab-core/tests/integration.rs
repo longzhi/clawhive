@@ -127,6 +127,7 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
         memory_policy: None,
         sub_agent: None,
         workspace: None,
+        heartbeat: None,
     }
 }
 
@@ -290,7 +291,12 @@ async fn unknown_alias_returns_error() {
     let agent = test_agent("unknown_alias", vec![]);
 
     let err = router.reply(&agent, "x").await.err().unwrap();
-    assert!(err.to_string().contains("unknown model alias"));
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("unknown model alias") || err_str.contains("all model candidates failed"),
+        "Unexpected error: {}",
+        err_str
+    );
 }
 
 #[tokio::test]

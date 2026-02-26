@@ -330,9 +330,7 @@ impl App {
                 self.push_event(format!(
                     "[{ts}] DeliverAnnounce {channel_type}:{connector_id}"
                 ));
-                self.push_log(format!(
-                    "[{ts}] Deliver → {conversation_scope}: {preview}"
-                ));
+                self.push_log(format!("[{ts}] Deliver → {conversation_scope}: {preview}"));
             }
         }
     }

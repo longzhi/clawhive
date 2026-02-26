@@ -108,8 +108,8 @@ async fn get_agent(
 ) -> Result<Json<AgentDetail>, axum::http::StatusCode> {
     let path = state.root.join(format!("config/agents.d/{id}.yaml"));
     let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let detail: AgentDetail =
-        serde_yaml::from_str(&content).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let detail: AgentDetail = serde_yaml::from_str(&content)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(detail))
 }
 
@@ -137,8 +137,8 @@ async fn toggle_agent(
 ) -> Result<Json<ToggleResponse>, axum::http::StatusCode> {
     let path = state.root.join(format!("config/agents.d/{id}.yaml"));
     let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let mut val: serde_yaml::Value =
-        serde_yaml::from_str(&content).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut val: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let current = val["enabled"].as_bool().unwrap_or(false);
     val["enabled"] = serde_yaml::Value::Bool(!current);

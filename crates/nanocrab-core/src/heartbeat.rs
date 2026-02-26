@@ -6,7 +6,7 @@ use tracing::debug;
 use crate::persona::Persona;
 
 /// Default heartbeat prompt sent to agents.
-pub const DEFAULT_HEARTBEAT_PROMPT: &str = 
+pub const DEFAULT_HEARTBEAT_PROMPT: &str =
     "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. \
      Do not infer or repeat old tasks from prior chats. \
      If nothing needs attention, reply HEARTBEAT_OK.";
@@ -55,7 +55,7 @@ pub fn is_heartbeat_ack(response: &str, max_chars: usize) -> bool {
     if trimmed.len() > max_chars {
         return false;
     }
-    
+
     // Check for HEARTBEAT_OK anywhere in the response
     trimmed.contains("HEARTBEAT_OK")
 }
@@ -88,13 +88,16 @@ impl HeartbeatManager {
         if !self.config.is_enabled() {
             return false;
         }
-        
+
         // Skip if HEARTBEAT.md is empty or only comments
         if should_skip_heartbeat(&persona.heartbeat_md) {
-            debug!("Skipping heartbeat for {} - no tasks in HEARTBEAT.md", persona.agent_id);
+            debug!(
+                "Skipping heartbeat for {} - no tasks in HEARTBEAT.md",
+                persona.agent_id
+            );
             return false;
         }
-        
+
         true
     }
 

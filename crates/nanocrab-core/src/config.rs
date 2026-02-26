@@ -179,6 +179,30 @@ pub struct SubAgentPolicyConfig {
     pub allow_spawn: bool,
 }
 
+fn default_heartbeat_interval_minutes() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatPolicyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_heartbeat_interval_minutes")]
+    pub interval_minutes: u64,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+impl Default for HeartbeatPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: 30,
+            prompt: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullAgentConfig {
     pub agent_id: String,
@@ -190,6 +214,8 @@ pub struct FullAgentConfig {
     pub tool_policy: Option<ToolPolicyConfig>,
     pub memory_policy: Option<MemoryPolicyConfig>,
     pub sub_agent: Option<SubAgentPolicyConfig>,
+    #[serde(default)]
+    pub heartbeat: Option<HeartbeatPolicyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,6 +520,7 @@ mod tests {
                 memory_policy: None,
                 sub_agent: None,
                 workspace: None,
+                heartbeat: None,
             }],
         };
         let err = validate_config(&config).unwrap_err();

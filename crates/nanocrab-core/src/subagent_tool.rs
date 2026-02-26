@@ -121,7 +121,8 @@ mod tests {
             tool_policy: None,
             memory_policy: None,
             sub_agent: None,
-                workspace: None,
+            workspace: None,
+            heartbeat: None,
         };
 
         let mut agents = HashMap::new();
@@ -152,10 +153,13 @@ mod tests {
         let tool = make_sub_agent_tool();
         let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
-            .execute(serde_json::json!({
-                "target_agent_id": "helper",
-                "task": "Say hello"
-            }), &ctx)
+            .execute(
+                serde_json::json!({
+                    "target_agent_id": "helper",
+                    "task": "Say hello"
+                }),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -167,10 +171,13 @@ mod tests {
         let tool = make_sub_agent_tool();
         let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
-            .execute(serde_json::json!({
-                "target_agent_id": "nonexistent",
-                "task": "Do something"
-            }), &ctx)
+            .execute(
+                serde_json::json!({
+                    "target_agent_id": "nonexistent",
+                    "task": "Do something"
+                }),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(result.is_error);
@@ -182,9 +189,12 @@ mod tests {
         let tool = make_sub_agent_tool();
         let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
         let result = tool
-            .execute(serde_json::json!({
-                "target_agent_id": "helper"
-            }), &ctx)
+            .execute(
+                serde_json::json!({
+                    "target_agent_id": "helper"
+                }),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
     }

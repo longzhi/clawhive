@@ -193,7 +193,7 @@ fn get_cooldown_duration(reason: FailoverReason) -> Duration {
         FailoverReason::Timeout => Duration::from_secs(30),
         FailoverReason::ServerError => Duration::from_secs(30),
         FailoverReason::ContextOverflow => Duration::from_secs(0), // no cooldown, just skip
-        FailoverReason::AuthError => Duration::from_secs(3600), // 1 hour for auth issues
+        FailoverReason::AuthError => Duration::from_secs(3600),    // 1 hour for auth issues
         FailoverReason::Unknown => Duration::from_secs(DEFAULT_COOLDOWN_SECS),
     }
 }

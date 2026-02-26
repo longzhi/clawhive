@@ -5,23 +5,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use chrono::TimeZone;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
 mod setup;
-mod setup_ui;
 mod setup_scan;
+mod setup_ui;
 
 use commands::auth::{handle_auth_command, AuthCommands};
-use setup::run_setup;
 use nanocrab_auth::{AuthProfile, TokenManager};
 use nanocrab_bus::EventBus;
 use nanocrab_channels::discord::DiscordBot;
 use nanocrab_channels::telegram::TelegramBot;
 use nanocrab_channels::ChannelBot;
+use nanocrab_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
 use nanocrab_core::*;
 use nanocrab_gateway::{spawn_scheduled_task_listener, Gateway, RateLimitConfig, RateLimiter};
 use nanocrab_memory::embedding::{
@@ -36,6 +36,7 @@ use nanocrab_provider::{
 use nanocrab_runtime::NativeExecutor;
 use nanocrab_scheduler::{ScheduleManager, ScheduleType};
 use nanocrab_schema::InboundMessage;
+use setup::run_setup;
 
 #[derive(Parser)]
 #[command(name = "nanocrab", version, about = "nanocrab AI agent framework")]
@@ -201,7 +202,9 @@ async fn main() -> Result<()> {
     if cli.config_root.starts_with("~") {
         if let Some(home) = std::env::var_os("HOME") {
             cli.config_root = PathBuf::from(home).join(
-                cli.config_root.strip_prefix("~").unwrap_or(&cli.config_root),
+                cli.config_root
+                    .strip_prefix("~")
+                    .unwrap_or(&cli.config_root),
             );
         }
     }
@@ -217,7 +220,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(non_blocking))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        )
         .init();
 
     match cli.command {
@@ -408,8 +415,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config, _schedule_manager) =
-                bootstrap(&cli.config_root)?;
+            let (_bus, _memory, gateway, _config, _schedule_manager) = bootstrap(&cli.config_root)?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -438,8 +444,7 @@ async fn main() -> Result<()> {
             handle_auth_command(cmd).await?;
         }
         Commands::Schedule(cmd) => {
-            let (_bus, _memory, _gateway, _config, schedule_manager) =
-                bootstrap(&cli.config_root)?;
+            let (_bus, _memory, _gateway, _config, schedule_manager) = bootstrap(&cli.config_root)?;
             match cmd {
                 ScheduleCommands::List => {
                     let entries = schedule_manager.list().await;
@@ -565,14 +570,14 @@ fn bootstrap(
             .map(|i| i.name.as_str())
             .unwrap_or(&agent_config.agent_id);
         let emoji = identity.and_then(|i| i.emoji.as_deref());
-        
+
         // Resolve workspace path
         let workspace = Workspace::resolve(
             root,
             &agent_config.agent_id,
             agent_config.workspace.as_deref(),
         );
-        
+
         match load_persona_from_workspace(workspace.root(), &agent_config.agent_id, name, emoji) {
             Ok(persona) => {
                 personas.insert(agent_config.agent_id.clone(), persona);
@@ -898,7 +903,9 @@ fn stop_process(root: &Path) -> Result<bool> {
     }
 
     println!("Stopping nanocrab (pid: {pid})...");
-    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
 
     // Wait up to 10s for graceful shutdown
     for _ in 0..20 {
@@ -912,7 +919,9 @@ fn stop_process(root: &Path) -> Result<bool> {
 
     // Force kill
     eprintln!("Process did not exit after 10s, sending SIGKILL...");
-    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
     std::thread::sleep(Duration::from_millis(500));
     remove_pid_file(root);
     println!("Killed.");
@@ -977,9 +986,96 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     });
     tracing::info!("Schedule manager started");
 
-    let _schedule_listener_handle = spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
+    let _schedule_listener_handle =
+        spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Scheduled task gateway listener started");
 
+    // Spawn heartbeat tasks for agents with heartbeat enabled
+    for agent_config in &config.agents {
+        if !agent_config.enabled {
+            continue;
+        }
+
+        let heartbeat_config = match &agent_config.heartbeat {
+            Some(hb) if hb.enabled => hb.clone(),
+            _ => continue,
+        };
+
+        let agent_id = agent_config.agent_id.clone();
+        let agent_id_for_log = agent_id.clone();
+        let gateway_clone = gateway.clone();
+        let interval_minutes = heartbeat_config.interval_minutes;
+        let prompt = heartbeat_config
+            .prompt
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HEARTBEAT_PROMPT.to_string());
+
+        // Get workspace to check HEARTBEAT.md content
+        let workspace = Workspace::resolve(root, &agent_id, agent_config.workspace.as_deref());
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_minutes * 60));
+            interval.tick().await; // Skip first immediate tick
+
+            loop {
+                interval.tick().await;
+
+                // Check if HEARTBEAT.md has meaningful content
+                let heartbeat_content = tokio::fs::read_to_string(workspace.heartbeat_md())
+                    .await
+                    .unwrap_or_default();
+
+                if should_skip_heartbeat(&heartbeat_content) {
+                    tracing::debug!(
+                        "Skipping heartbeat for {} - no tasks in HEARTBEAT.md",
+                        agent_id
+                    );
+                    continue;
+                }
+
+                // Create heartbeat inbound message
+                let inbound = nanocrab_schema::InboundMessage {
+                    trace_id: uuid::Uuid::new_v4(),
+                    channel_type: "heartbeat".to_string(),
+                    connector_id: "system".to_string(),
+                    conversation_scope: format!("heartbeat:{}", agent_id),
+                    user_scope: "system".to_string(),
+                    text: prompt.clone(),
+                    at: chrono::Utc::now(),
+                    thread_id: None,
+                    is_mention: false,
+                    mention_target: None,
+                };
+
+                tracing::debug!("Sending heartbeat to agent {}", agent_id);
+
+                match gateway_clone.handle_inbound(inbound).await {
+                    Ok(outbound) => {
+                        if is_heartbeat_ack(&outbound.text, 50) {
+                            tracing::debug!("Heartbeat ack from {}", agent_id);
+                        } else {
+                            // Agent has something to say - log it for now
+                            // TODO: Deliver to configured channel
+                            tracing::info!(
+                                "Heartbeat response from {}: {}",
+                                agent_id,
+                                outbound.text
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Heartbeat failed for {}: {}", agent_id, e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Heartbeat started for {} (every {}m)",
+            agent_id_for_log,
+            interval_minutes
+        );
+    }
 
     // Start embedded HTTP API server
     let http_state = nanocrab_server::state::AppState {
@@ -1040,12 +1136,8 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                 }
                 tracing::info!("Registering Discord bot: {}", connector.connector_id);
                 bots.push(Box::new(
-                    DiscordBot::new(
-                        token,
-                        connector.connector_id.clone(),
-                        gateway.clone(),
-                    )
-                    .with_bus(bus.clone()),
+                    DiscordBot::new(token, connector.connector_id.clone(), gateway.clone())
+                        .with_bus(bus.clone()),
                 ));
             }
         }
@@ -1062,7 +1154,11 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     let bot_future = async {
         if bots.len() == 1 {
             let bot = bots.into_iter().next().unwrap();
-            tracing::info!("Starting {} bot: {}", bot.channel_type(), bot.connector_id());
+            tracing::info!(
+                "Starting {} bot: {}",
+                bot.channel_type(),
+                bot.connector_id()
+            );
             bot.run().await
         } else {
             let mut handles = Vec::new();
@@ -1087,8 +1183,9 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
             tokio::select! {
                 _ = ctrl_c => tracing::info!("Received SIGINT, shutting down..."),
                 _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down..."),
@@ -1246,8 +1343,8 @@ async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
 async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
     const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
 
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
+    let parsed =
+        reqwest::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
         s => anyhow::bail!("unsupported URL scheme: {s}"),
@@ -1344,9 +1441,12 @@ fn find_skill_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 
 fn is_safe_relative_path(path: &Path) -> bool {
     !path.is_absolute()
-        && !path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        && !path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 fn extract_zip_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
@@ -1388,7 +1488,10 @@ fn extract_tar_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
     unpack_tar_archive(&mut archive, output_dir)
 }
 
-fn unpack_tar_archive<R: std::io::Read>(archive: &mut tar::Archive<R>, output_dir: &Path) -> Result<()> {
+fn unpack_tar_archive<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    output_dir: &Path,
+) -> Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
@@ -1463,15 +1566,60 @@ fn scan_path_recursive(dir: &Path, findings: &mut Vec<SkillRiskFinding>) -> Resu
 
 fn scan_line(path: &Path, line_no: usize, line: &str, findings: &mut Vec<SkillRiskFinding>) {
     let checks: [(&str, &str, &str, &str); 9] = [
-        ("critical", "rm -rf /", "dangerous delete", "Destructive filesystem wipe command"),
-        ("critical", "mkfs", "disk format", "Potential disk formatting command"),
-        ("high", "curl", "remote fetch", "Network fetch command found; verify intent"),
-        ("high", "wget", "remote fetch", "Network fetch command found; verify intent"),
-        ("high", "| sh", "pipe-to-shell", "Piping content to shell can execute untrusted code"),
-        ("high", "base64 -d", "obfuscation", "Potential obfuscated payload decode"),
-        ("high", "sudo ", "privilege escalation", "Privilege escalation command detected"),
-        ("medium", "~/.ssh", "secret path", "Accessing SSH config/key paths"),
-        ("medium", "~/.aws", "secret path", "Accessing cloud credential paths"),
+        (
+            "critical",
+            "rm -rf /",
+            "dangerous delete",
+            "Destructive filesystem wipe command",
+        ),
+        (
+            "critical",
+            "mkfs",
+            "disk format",
+            "Potential disk formatting command",
+        ),
+        (
+            "high",
+            "curl",
+            "remote fetch",
+            "Network fetch command found; verify intent",
+        ),
+        (
+            "high",
+            "wget",
+            "remote fetch",
+            "Network fetch command found; verify intent",
+        ),
+        (
+            "high",
+            "| sh",
+            "pipe-to-shell",
+            "Piping content to shell can execute untrusted code",
+        ),
+        (
+            "high",
+            "base64 -d",
+            "obfuscation",
+            "Potential obfuscated payload decode",
+        ),
+        (
+            "high",
+            "sudo ",
+            "privilege escalation",
+            "Privilege escalation command detected",
+        ),
+        (
+            "medium",
+            "~/.ssh",
+            "secret path",
+            "Accessing SSH config/key paths",
+        ),
+        (
+            "medium",
+            "~/.aws",
+            "secret path",
+            "Accessing cloud credential paths",
+        ),
     ];
 
     let normalized = line.to_lowercase();
@@ -1507,7 +1655,15 @@ fn print_permissions_summary(permissions: &SkillPermissions) {
         println!("  env: {}", permissions.env.join(", "));
     }
     if !permissions.services.is_empty() {
-        println!("  services: {}", permissions.services.keys().cloned().collect::<Vec<_>>().join(", "));
+        println!(
+            "  services: {}",
+            permissions
+                .services
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 }
 
@@ -1602,7 +1758,11 @@ fn install_skill_with_confirmation(
         std::fs::remove_dir_all(&target)?;
     }
     copy_dir_recursive(source, &target)?;
-    println!("Installed skill '{}' to {}", report.skill_name, target.display());
+    println!(
+        "Installed skill '{}' to {}",
+        report.skill_name,
+        target.display()
+    );
 
     let audit_dir = config_root.join("logs");
     std::fs::create_dir_all(&audit_dir)?;
@@ -1683,10 +1843,7 @@ mod tests {
     #[test]
     fn parses_auth_status_subcommand() {
         let cli = Cli::try_parse_from(["nanocrab", "auth", "status"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::Auth(AuthCommands::Status)
-        ));
+        assert!(matches!(cli.command, Commands::Auth(AuthCommands::Status)));
     }
 
     #[test]
@@ -1726,7 +1883,14 @@ mod tests {
     #[test]
     fn parses_restart_with_flags() {
         let cli = Cli::try_parse_from(["nanocrab", "restart", "--tui", "--port", "8080"]).unwrap();
-        assert!(matches!(cli.command, Commands::Restart { tui: true, port: 8080, .. }));
+        assert!(matches!(
+            cli.command,
+            Commands::Restart {
+                tui: true,
+                port: 8080,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1771,7 +1935,11 @@ mod tests {
     fn check_and_clean_pid_active_fails() {
         let tmp = tempfile::tempdir().unwrap();
         // Write our own PID - it's running
-        std::fs::write(tmp.path().join("nanocrab.pid"), std::process::id().to_string()).unwrap();
+        std::fs::write(
+            tmp.path().join("nanocrab.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
         let result = check_and_clean_pid(tmp.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already running"));

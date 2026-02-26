@@ -117,10 +117,7 @@ pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
 
     /// Called before model resolution.
-    async fn before_model_resolve(
-        &self,
-        _ctx: &HookContext,
-    ) -> anyhow::Result<ModelResolveResult> {
+    async fn before_model_resolve(&self, _ctx: &HookContext) -> anyhow::Result<ModelResolveResult> {
         Ok(ModelResolveResult::default())
     }
 
@@ -190,11 +187,7 @@ pub trait Hook: Send + Sync {
     }
 
     /// Called after a message is sent.
-    async fn message_sent(
-        &self,
-        _ctx: &HookContext,
-        _message: &MessageInfo,
-    ) -> anyhow::Result<()> {
+    async fn message_sent(&self, _ctx: &HookContext, _message: &MessageInfo) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -312,7 +305,9 @@ impl HookRegistry {
         let mut result = AfterToolCallResult::default();
 
         for hook in hooks.iter() {
-            let hook_result = hook.after_tool_call(ctx, tool, result_text, is_error).await?;
+            let hook_result = hook
+                .after_tool_call(ctx, tool, result_text, is_error)
+                .await?;
             if hook_result.result_override.is_some() {
                 result.result_override = hook_result.result_override;
             }
@@ -485,10 +480,7 @@ mod tests {
             .await;
 
         let ctx = HookContext::new("agent1", "session1", "model");
-        let result = registry
-            .run_before_prompt_build(&ctx, &[])
-            .await
-            .unwrap();
+        let result = registry.run_before_prompt_build(&ctx, &[]).await.unwrap();
 
         assert_eq!(
             result.prepend_context,

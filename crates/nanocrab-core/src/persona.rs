@@ -64,12 +64,10 @@ impl Persona {
 
     /// Check if heartbeat has meaningful content (not just comments/whitespace).
     pub fn has_heartbeat_tasks(&self) -> bool {
-        self.heartbeat_md
-            .lines()
-            .any(|line| {
-                let trimmed = line.trim();
-                !trimmed.is_empty() && !trimmed.starts_with('#')
-            })
+        self.heartbeat_md.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
     }
 }
 
@@ -82,25 +80,20 @@ pub fn load_persona_from_workspace(
     emoji: Option<&str>,
 ) -> Result<Persona> {
     let prompts_dir = workspace_root.join("prompts");
-    
+
     let agents_md = read_optional_md(&prompts_dir.join("AGENTS.md"))
         .with_context(|| format!("loading AGENTS.md for {agent_id}"))?
         .unwrap_or_default();
-    
-    let soul_md = read_optional_md(&prompts_dir.join("SOUL.md"))?
-        .unwrap_or_default();
-    
-    let user_md = read_optional_md(&prompts_dir.join("USER.md"))?
-        .unwrap_or_default();
-    
-    let identity_md = read_optional_md(&prompts_dir.join("IDENTITY.md"))?
-        .unwrap_or_default();
-    
-    let tools_md = read_optional_md(&prompts_dir.join("TOOLS.md"))?
-        .unwrap_or_default();
-    
-    let heartbeat_md = read_optional_md(&prompts_dir.join("HEARTBEAT.md"))?
-        .unwrap_or_default();
+
+    let soul_md = read_optional_md(&prompts_dir.join("SOUL.md"))?.unwrap_or_default();
+
+    let user_md = read_optional_md(&prompts_dir.join("USER.md"))?.unwrap_or_default();
+
+    let identity_md = read_optional_md(&prompts_dir.join("IDENTITY.md"))?.unwrap_or_default();
+
+    let tools_md = read_optional_md(&prompts_dir.join("TOOLS.md"))?.unwrap_or_default();
+
+    let heartbeat_md = read_optional_md(&prompts_dir.join("HEARTBEAT.md"))?.unwrap_or_default();
 
     Ok(Persona {
         agent_id: agent_id.to_string(),
@@ -174,7 +167,7 @@ mod tests {
         let root = tmp.path();
         let prompts_dir = root.join("prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
-        
+
         std::fs::write(prompts_dir.join("AGENTS.md"), "Be helpful.").unwrap();
         std::fs::write(prompts_dir.join("SOUL.md"), "Be warm.").unwrap();
         std::fs::write(prompts_dir.join("USER.md"), "Name: Test User").unwrap();

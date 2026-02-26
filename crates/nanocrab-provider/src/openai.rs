@@ -118,7 +118,10 @@ impl LlmProvider for OpenAiProvider {
         let resp = match self
             .client
             .post(url)
-            .header("authorization", format!("Bearer {}", self.auth_bearer_token()))
+            .header(
+                "authorization",
+                format!("Bearer {}", self.auth_bearer_token()),
+            )
             .header("content-type", "application/json")
             .json(&payload)
             .send()
@@ -157,7 +160,10 @@ impl LlmProvider for OpenAiProvider {
         let resp = match self
             .client
             .post(url)
-            .header("authorization", format!("Bearer {}", self.auth_bearer_token()))
+            .header(
+                "authorization",
+                format!("Bearer {}", self.auth_bearer_token()),
+            )
             .header("content-type", "application/json")
             .json(&payload)
             .send()

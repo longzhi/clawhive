@@ -268,7 +268,8 @@ impl ContextManager {
         }
 
         // Need to compact
-        let (compacted, result) = compact_messages(&self.router, model, messages, &self.config).await?;
+        let (compacted, result) =
+            compact_messages(&self.router, model, messages, &self.config).await?;
 
         tracing::info!(
             "Compacted {} messages, saved {} tokens",

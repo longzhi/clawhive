@@ -27,7 +27,10 @@ task: "Test task"
     let config: ScheduleConfig = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.schedule_id, "test-daily");
     assert!(config.enabled);
-    assert!(matches!(config.delivery.mode, nanocrab_scheduler::DeliveryMode::None));
+    assert!(matches!(
+        config.delivery.mode,
+        nanocrab_scheduler::DeliveryMode::None
+    ));
 }
 
 #[tokio::test]

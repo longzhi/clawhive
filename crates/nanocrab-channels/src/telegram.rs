@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use nanocrab_bus::{EventBus, Topic};
-use nanocrab_schema::BusMessage;
 use nanocrab_gateway::Gateway;
+use nanocrab_schema::BusMessage;
 use nanocrab_schema::{InboundMessage, OutboundMessage};
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, Message, MessageEntityKind};
@@ -52,7 +52,12 @@ pub struct TelegramBot {
 }
 
 impl TelegramBot {
-    pub fn new(token: String, connector_id: String, gateway: Arc<Gateway>, bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        token: String,
+        connector_id: String,
+        gateway: Arc<Gateway>,
+        bus: Arc<EventBus>,
+    ) -> Self {
         Self {
             token,
             connector_id,
@@ -109,7 +114,11 @@ impl TelegramBot {
                         async move {
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                                if bot.send_chat_action(chat_id, ChatAction::Typing).await.is_err() {
+                                if bot
+                                    .send_chat_action(chat_id, ChatAction::Typing)
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -117,7 +126,7 @@ impl TelegramBot {
                     });
 
                     let result = gateway.handle_inbound(inbound).await;
-                    
+
                     // Stop typing indicator
                     typing_handle.abort();
 
@@ -236,7 +245,10 @@ async fn spawn_delivery_listener(
         if let Err(e) = bot.send_message(chat, &text).await {
             tracing::error!("Failed to deliver announce message to Telegram: {e}");
         } else {
-            tracing::info!("Delivered scheduled task result to Telegram chat {}", chat_id);
+            tracing::info!(
+                "Delivered scheduled task result to Telegram chat {}",
+                chat_id
+            );
         }
     }
 }

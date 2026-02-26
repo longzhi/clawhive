@@ -150,7 +150,10 @@ impl LlmProvider for AnthropicProvider {
         req = match self.use_session_auth() {
             Some(session) => req
                 .header("authorization", format!("Bearer {session}"))
-                .header("anthropic-beta", nanocrab_auth::oauth::ANTHROPIC_OAUTH_BETAS),
+                .header(
+                    "anthropic-beta",
+                    nanocrab_auth::oauth::ANTHROPIC_OAUTH_BETAS,
+                ),
             None => req.header("x-api-key", &self.api_key),
         };
 
@@ -230,7 +233,10 @@ impl LlmProvider for AnthropicProvider {
         req = match self.use_session_auth() {
             Some(session) => req
                 .header("authorization", format!("Bearer {session}"))
-                .header("anthropic-beta", nanocrab_auth::oauth::ANTHROPIC_OAUTH_BETAS),
+                .header(
+                    "anthropic-beta",
+                    nanocrab_auth::oauth::ANTHROPIC_OAUTH_BETAS,
+                ),
             None => req.header("x-api-key", &self.api_key),
         };
 

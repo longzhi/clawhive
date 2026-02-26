@@ -244,13 +244,11 @@ mod tests {
             .and(path("/oauth/token"))
             .and(body_string_contains("grant_type=refresh_token"))
             .and(body_string_contains("refresh_token=old-rt"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "new-at",
-                    "refresh_token": "new-rt",
-                    "expires_in": 3600
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-at",
+                "refresh_token": "new-rt",
+                "expires_in": 3600
+            })))
             .mount(&server)
             .await;
 

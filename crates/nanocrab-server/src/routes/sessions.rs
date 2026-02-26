@@ -84,8 +84,7 @@ async fn get_session_messages(
     Path(key): Path<String>,
 ) -> Result<Json<Vec<SessionMessage>>, axum::http::StatusCode> {
     let path = state.root.join(format!("data/sessions/{key}.jsonl"));
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
 
     let messages: Vec<SessionMessage> = content
         .lines()

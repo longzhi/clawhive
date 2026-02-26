@@ -33,10 +33,9 @@ async fn get_channels(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let path = state.root.join("config/main.yaml");
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let val: serde_yaml::Value =
-        serde_yaml::from_str(&content).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let val: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let channels = &val["channels"];
     let json = serde_json::to_value(channels)
@@ -49,10 +48,9 @@ async fn update_channels(
     Json(channels): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let path = state.root.join("config/main.yaml");
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let mut val: serde_yaml::Value =
-        serde_yaml::from_str(&content).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let mut val: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let channels_yaml: serde_yaml::Value = serde_json::from_value(channels.clone())
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
@@ -69,10 +67,9 @@ async fn get_channels_status(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ConnectorStatus>>, axum::http::StatusCode> {
     let path = state.root.join("config/main.yaml");
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let val: serde_yaml::Value =
-        serde_yaml::from_str(&content).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let val: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut statuses = Vec::new();
     let channels = val["channels"]
@@ -284,7 +281,9 @@ mod tests {
             bus: Arc::new(nanocrab_bus::EventBus::new(16)),
         };
         (
-            Router::new().nest("/api/channels", super::router()).with_state(state),
+            Router::new()
+                .nest("/api/channels", super::router())
+                .with_state(state),
             root,
         )
     }

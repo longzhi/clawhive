@@ -102,11 +102,20 @@ async fn handle_callback(
     }
 }
 
-fn validate_callback(query: CallbackQuery, expected_state: &str) -> std::result::Result<OAuthCallback, (StatusCode, String)> {
+fn validate_callback(
+    query: CallbackQuery,
+    expected_state: &str,
+) -> std::result::Result<OAuthCallback, (StatusCode, String)> {
     // Check for OAuth error response first
     if let Some(error) = &query.error {
-        let desc = query.error_description.as_deref().unwrap_or("no description");
-        return Err((StatusCode::BAD_REQUEST, format!("OAuth error: {error} \u{2014} {desc}")));
+        let desc = query
+            .error_description
+            .as_deref()
+            .unwrap_or("no description");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("OAuth error: {error} \u{2014} {desc}"),
+        ));
     }
     let code = query
         .code

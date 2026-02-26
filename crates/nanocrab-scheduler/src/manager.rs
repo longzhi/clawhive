@@ -78,9 +78,10 @@ pub fn apply_job_result(entry: &mut ScheduleEntry, result: &CompletedResult) -> 
             let backoff_next = result.ended_at_ms + backoff;
             state.next_run_at_ms = Some(normal_next.map_or(backoff_next, |n| n.max(backoff_next)));
         } else {
-            state.next_run_at_ms = compute_next_run_at_ms(&entry.config.schedule, result.ended_at_ms)
-                .ok()
-                .flatten();
+            state.next_run_at_ms =
+                compute_next_run_at_ms(&entry.config.schedule, result.ended_at_ms)
+                    .ok()
+                    .flatten();
         }
     } else {
         state.next_run_at_ms = None;
@@ -161,7 +162,9 @@ impl ScheduleManager {
 
     pub async fn get_next_run(&self, schedule_id: &str) -> Option<i64> {
         let entries = self.entries.read().await;
-        entries.get(schedule_id).and_then(|entry| entry.state.next_run_at_ms)
+        entries
+            .get(schedule_id)
+            .and_then(|entry| entry.state.next_run_at_ms)
     }
 
     pub async fn add_schedule(&self, config: ScheduleConfig) -> Result<()> {
@@ -176,7 +179,9 @@ impl ScheduleManager {
 
         let yaml = serde_yaml::to_string(&config)?;
         tokio::fs::create_dir_all(&self.config_dir).await?;
-        let path = self.config_dir.join(format!("{}.yaml", &config.schedule_id));
+        let path = self
+            .config_dir
+            .join(format!("{}.yaml", &config.schedule_id));
         tokio::fs::write(&path, yaml).await?;
 
         let mut entries = self.entries.write().await;
@@ -329,7 +334,11 @@ impl ScheduleManager {
                         delivery_connector_id: entry.config.delivery.connector_id.clone(),
                         source_channel_type: entry.config.delivery.source_channel_type.clone(),
                         source_connector_id: entry.config.delivery.source_connector_id.clone(),
-                        source_conversation_scope: entry.config.delivery.source_conversation_scope.clone(),
+                        source_conversation_scope: entry
+                            .config
+                            .delivery
+                            .source_conversation_scope
+                            .clone(),
                         triggered_at: Utc::now(),
                     })
                     .await;

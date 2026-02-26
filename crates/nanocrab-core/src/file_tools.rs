@@ -10,13 +10,13 @@ fn validate_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
     if requested.is_empty() {
         return Err(anyhow!("path must not be empty"));
     }
-    
+
     tracing::debug!(
         "validate_path: workspace={}, requested={}",
         workspace.display(),
         requested
     );
-    
+
     let ws_canon = match workspace.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -28,13 +28,13 @@ fn validate_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
             return Err(anyhow!("workspace path error: {}", e));
         }
     };
-    
+
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
     } else {
         ws_canon.join(requested)
     };
-    
+
     tracing::debug!("validate_path: candidate={}", candidate.display());
 
     if let Ok(resolved) = candidate.canonicalize() {
@@ -125,7 +125,10 @@ impl ToolExecutor for ReadFileTool {
         // Hard baseline check - blocks sensitive files regardless of tool origin
         if HardBaseline::path_read_denied(&resolved) {
             return Ok(ToolOutput {
-                content: format!("Read access denied: sensitive file (hard baseline): {}", path_str),
+                content: format!(
+                    "Read access denied: sensitive file (hard baseline): {}",
+                    path_str
+                ),
                 is_error: true,
             });
         }
@@ -254,7 +257,10 @@ impl ToolExecutor for WriteFileTool {
         // Hard baseline check - blocks sensitive paths regardless of tool origin
         if HardBaseline::path_write_denied(&resolved) {
             return Ok(ToolOutput {
-                content: format!("Write access denied: sensitive path (hard baseline): {}", path_str),
+                content: format!(
+                    "Write access denied: sensitive path (hard baseline): {}",
+                    path_str
+                ),
                 is_error: true,
             });
         }
@@ -357,7 +363,10 @@ impl ToolExecutor for EditFileTool {
         // Hard baseline check - blocks sensitive paths regardless of tool origin
         if HardBaseline::path_write_denied(&resolved) {
             return Ok(ToolOutput {
-                content: format!("Write access denied: sensitive path (hard baseline): {}", path_str),
+                content: format!(
+                    "Write access denied: sensitive path (hard baseline): {}",
+                    path_str
+                ),
                 is_error: true,
             });
         }

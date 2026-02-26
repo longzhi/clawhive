@@ -79,7 +79,10 @@ async fn e2e_skill_with_fs_permissions_denies_write_when_only_read_declared() {
 
     let tool = WriteFileTool::new(workspace.clone());
     let result = tool
-        .execute(serde_json::json!({"path": "secret.txt", "content": "hack"}), &ctx)
+        .execute(
+            serde_json::json!({"path": "secret.txt", "content": "hack"}),
+            &ctx,
+        )
         .await
         .unwrap();
     assert!(result.is_error, "Should deny write: {}", result.content);
@@ -161,7 +164,10 @@ async fn e2e_multiple_skills_union_permissions() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let merged = registry.merged_permissions().unwrap();
 
-    assert!(!merged.fs.read.is_empty(), "Should have fs.read from skill-a");
+    assert!(
+        !merged.fs.read.is_empty(),
+        "Should have fs.read from skill-a"
+    );
     assert!(
         merged.exec.contains(&"cat".to_string()),
         "Should have exec from skill-b"

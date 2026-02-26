@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use nanocrab_auth::oauth::{
-    extract_chatgpt_account_id, profile_from_setup_token, prompt_setup_token,
-    run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig,
+    extract_chatgpt_account_id, profile_from_setup_token, prompt_setup_token, run_openai_pkce_flow,
+    validate_setup_token, OpenAiOAuthConfig,
 };
 use nanocrab_auth::{AuthProfile, AuthStore, TokenManager};
 

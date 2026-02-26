@@ -27,7 +27,6 @@ pub struct AuthStore {
     pub profiles: HashMap<String, AuthProfile>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{AuthProfile, AuthStore};

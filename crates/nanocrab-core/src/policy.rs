@@ -55,14 +55,7 @@ impl HardBaseline {
         let host_lower = host.to_lowercase();
 
         // IPv4 private/reserved ranges
-        let denied_prefixes = [
-            "127.",
-            "10.",
-            "192.168.",
-            "169.254.",
-            "0.0.0.0",
-            "0.",
-        ];
+        let denied_prefixes = ["127.", "10.", "192.168.", "169.254.", "0.0.0.0", "0."];
 
         // 172.16.0.0 - 172.31.255.255
         let is_172_private = host_lower.starts_with("172.")
@@ -485,9 +478,7 @@ mod tests {
         assert!(!HardBaseline::path_read_denied(Path::new(
             "/home/user/.ssh/known_hosts"
         )));
-        assert!(!HardBaseline::path_read_denied(Path::new(
-            "/etc/hosts"
-        )));
+        assert!(!HardBaseline::path_read_denied(Path::new("/etc/hosts")));
         assert!(!HardBaseline::path_read_denied(Path::new(
             "/workspace/secret.txt"
         )));
@@ -565,9 +556,15 @@ mod tests {
     #[test]
     fn glob_match_works() {
         assert!(PolicyContext::glob_match("**", "/any/path"));
-        assert!(PolicyContext::glob_match("/workspace/**", "/workspace/src/main.rs"));
+        assert!(PolicyContext::glob_match(
+            "/workspace/**",
+            "/workspace/src/main.rs"
+        ));
         assert!(PolicyContext::glob_match("/workspace/**", "/workspace"));
-        assert!(PolicyContext::glob_match("*.example.com:443", "api.example.com:443"));
+        assert!(PolicyContext::glob_match(
+            "*.example.com:443",
+            "api.example.com:443"
+        ));
         assert!(PolicyContext::glob_match("*:443", "anything:443"));
         assert!(PolicyContext::glob_match("/prefix*", "/prefix-something"));
 

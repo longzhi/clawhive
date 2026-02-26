@@ -5,7 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
-use nanocrab_auth::oauth::{extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow, validate_setup_token, OpenAiOAuthConfig};
+use nanocrab_auth::oauth::{
+    extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow,
+    validate_setup_token, OpenAiOAuthConfig,
+};
 use nanocrab_auth::{AuthProfile, TokenManager};
 
 use crate::setup_scan::{scan_config, ConfigState};
@@ -48,7 +51,6 @@ impl ProviderId {
             Self::OpenAi => "https://api.openai.com/v1",
         }
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +108,11 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
                         style(format!("Config validation warning: {err}")).yellow()
                     ))?;
                 }
-                term.write_line(&format!("{} {}", CRAB, style("Setup finished.").green().bold()))?;
+                term.write_line(&format!(
+                    "{} {}",
+                    CRAB,
+                    style("Setup finished.").green().bold()
+                ))?;
                 break;
             }
         }
@@ -128,7 +134,10 @@ fn build_action_labels(state: &ConfigState) -> Vec<(SetupAction, String)> {
             SetupAction::AddChannel,
             format!("{} Add Channel ({})", ARROW, state.channels.len()),
         ),
-        (SetupAction::Modify, format!("{} Modify existing item", ARROW)),
+        (
+            SetupAction::Modify,
+            format!("{} Modify existing item", ARROW),
+        ),
         (SetupAction::Remove, format!("{} Remove item", ARROW)),
         (SetupAction::Done, "Done".to_string()),
     ]
@@ -149,7 +158,10 @@ async fn handle_add_provider(
         .any(|item| item.provider_id == provider.as_str());
     if already_configured && !force {
         let should_reconfigure = Confirm::with_theme(theme)
-            .with_prompt(format!("{} already configured. Reconfigure?", provider.as_str()))
+            .with_prompt(format!(
+                "{} already configured. Reconfigure?",
+                provider.as_str()
+            ))
             .default(false)
             .interact()?;
         if !should_reconfigure {
@@ -162,7 +174,10 @@ async fn handle_add_provider(
     let path = write_provider_config_unchecked(config_root, provider, &auth)?;
     print_done(
         term,
-        &format!("Provider configuration saved: {}", display_rel(config_root, &path)),
+        &format!(
+            "Provider configuration saved: {}",
+            display_rel(config_root, &path)
+        ),
     );
     Ok(())
 }
@@ -425,7 +440,11 @@ fn handle_remove(
     Ok(())
 }
 
-fn add_channel_to_config(config_root: &Path, channel_type: &str, cfg: &ChannelConfig) -> Result<()> {
+fn add_channel_to_config(
+    config_root: &Path,
+    channel_type: &str,
+    cfg: &ChannelConfig,
+) -> Result<()> {
     let main_path = config_root.join("config/main.yaml");
     if !main_path.exists() {
         let tg = if channel_type == "telegram" {
@@ -470,9 +489,7 @@ fn add_channel_to_config(config_root: &Path, channel_type: &str, cfg: &ChannelCo
                 .and_then(|connectors| connectors.as_sequence_mut())
             {
                 seq.retain(|connector| {
-                    connector
-                        .get("connector_id")
-                        .and_then(|v| v.as_str())
+                    connector.get("connector_id").and_then(|v| v.as_str())
                         != Some(&cfg.connector_id)
                 });
                 seq.push(connector_value);
@@ -523,7 +540,10 @@ fn add_routing_binding(
         serde_yaml::Value::String(connector_id.into()),
     );
     binding_map.insert("match".into(), serde_yaml::Value::Mapping(match_map));
-    binding_map.insert("agent_id".into(), serde_yaml::Value::String(agent_id.into()));
+    binding_map.insert(
+        "agent_id".into(),
+        serde_yaml::Value::String(agent_id.into()),
+    );
     let new_binding = serde_yaml::Value::Mapping(binding_map);
 
     if let Some(seq) = doc
@@ -531,10 +551,7 @@ fn add_routing_binding(
         .and_then(|bindings| bindings.as_sequence_mut())
     {
         seq.retain(|binding| {
-            binding
-                .get("connector_id")
-                .and_then(|v| v.as_str())
-                != Some(connector_id)
+            binding.get("connector_id").and_then(|v| v.as_str()) != Some(connector_id)
         });
         seq.push(new_binding);
     } else {
@@ -589,10 +606,7 @@ fn remove_routing_binding(config_root: &Path, connector_id: &str) -> Result<()> 
         .and_then(|bindings| bindings.as_sequence_mut())
     {
         bindings.retain(|binding| {
-            binding
-                .get("connector_id")
-                .and_then(|value| value.as_str())
-                != Some(connector_id)
+            binding.get("connector_id").and_then(|value| value.as_str()) != Some(connector_id)
         });
     }
 
@@ -707,7 +721,8 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
         ProviderId::Anthropic => {
             let term = Term::stdout();
             let _ = term.write_line("");
-            let _ = term.write_line("  To use Anthropic with your subscription, you need a setup-token.");
+            let _ = term
+                .write_line("  To use Anthropic with your subscription, you need a setup-token.");
             let _ = term.write_line("  If you have Claude Code CLI installed, run:");
             let _ = term.write_line("");
             let _ = term.write_line("    claude setup-token");
@@ -721,7 +736,9 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
             let http = reqwest::Client::new();
             let ok = validate_setup_token(&http, &token, "https://api.anthropic.com").await?;
             if !ok {
-                anyhow::bail!("Anthropic setup-token validation failed. Check the log above for details.");
+                anyhow::bail!(
+                    "Anthropic setup-token validation failed. Check the log above for details."
+                );
             }
             manager.save_profile(&profile_name, profile_from_setup_token(token))?;
         }
@@ -875,7 +892,10 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
             "anthropic/claude-sonnet-4-5".to_string(),
             "anthropic/claude-3-haiku-20240307".to_string(),
         ],
-        ProviderId::OpenAi => vec!["openai/gpt-4o-mini".to_string(), "openai/gpt-4o".to_string()],
+        ProviderId::OpenAi => vec![
+            "openai/gpt-4o-mini".to_string(),
+            "openai/gpt-4o".to_string(),
+        ],
     }
 }
 
@@ -975,7 +995,10 @@ mod tests {
         );
         assert_eq!(
             openai,
-            vec!["openai/gpt-4o-mini".to_string(), "openai/gpt-4o".to_string()]
+            vec![
+                "openai/gpt-4o-mini".to_string(),
+                "openai/gpt-4o".to_string()
+            ]
         );
         assert!(unknown.is_empty());
     }
@@ -1137,12 +1160,7 @@ mod tests {
         .expect("write provider yaml");
         std::fs::write(
             temp.path().join("config/agents.d/nanocrab-main.yaml"),
-            generate_agent_yaml(
-                "nanocrab-main",
-                "Nanocrab",
-                "🦀",
-                "openai/gpt-4o-mini",
-            ),
+            generate_agent_yaml("nanocrab-main", "Nanocrab", "🦀", "openai/gpt-4o-mini"),
         )
         .expect("write agent yaml");
 

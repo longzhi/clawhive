@@ -21,11 +21,7 @@ impl Workspace {
     /// - Absolute path → use as-is
     /// - Relative path → resolve against project root
     /// - None → default to `<project_root>/workspaces/<agent_id>`
-    pub fn resolve(
-        project_root: &Path,
-        agent_id: &str,
-        configured: Option<&str>,
-    ) -> Self {
+    pub fn resolve(project_root: &Path, agent_id: &str, configured: Option<&str>) -> Self {
         let root = match configured {
             Some(path) => {
                 let p = PathBuf::from(path);
@@ -118,11 +114,11 @@ impl Workspace {
     /// Returns true if this is a new workspace (BOOTSTRAP.md was created).
     pub async fn init_with_defaults(&self) -> Result<bool> {
         use crate::templates;
-        
+
         self.ensure_dirs().await?;
-        
+
         let mut is_new = false;
-        
+
         // Create prompt files if they don't exist
         let files = [
             (self.agents_md(), templates::AGENTS_MD),
@@ -132,13 +128,13 @@ impl Workspace {
             (self.tools_md(), templates::TOOLS_MD),
             (self.heartbeat_md(), templates::HEARTBEAT_MD),
         ];
-        
+
         for (path, content) in files {
             if !path.exists() {
                 tokio::fs::write(&path, content).await?;
             }
         }
-        
+
         // BOOTSTRAP.md is special - only create for truly new workspaces
         // and it should be deleted after first run
         let bootstrap_path = self.bootstrap_md();
@@ -147,7 +143,7 @@ impl Workspace {
             tokio::fs::write(&bootstrap_path, templates::BOOTSTRAP_MD).await?;
             is_new = true;
         }
-        
+
         Ok(is_new)
     }
 }
@@ -158,21 +154,13 @@ mod tests {
 
     #[test]
     fn resolve_with_absolute_path() {
-        let ws = Workspace::resolve(
-            Path::new("/project"),
-            "main",
-            Some("/custom/workspace"),
-        );
+        let ws = Workspace::resolve(Path::new("/project"), "main", Some("/custom/workspace"));
         assert_eq!(ws.root(), Path::new("/custom/workspace"));
     }
 
     #[test]
     fn resolve_with_relative_path() {
-        let ws = Workspace::resolve(
-            Path::new("/project"),
-            "main",
-            Some("./workspaces/custom"),
-        );
+        let ws = Workspace::resolve(Path::new("/project"), "main", Some("./workspaces/custom"));
         assert_eq!(ws.root(), Path::new("/project/./workspaces/custom"));
     }
 
@@ -187,12 +175,21 @@ mod tests {
         let ws = Workspace::new("/home/agent");
         assert_eq!(ws.memory_dir(), PathBuf::from("/home/agent/memory"));
         assert_eq!(ws.sessions_dir(), PathBuf::from("/home/agent/sessions"));
-        assert_eq!(ws.long_term_memory(), PathBuf::from("/home/agent/MEMORY.md"));
+        assert_eq!(
+            ws.long_term_memory(),
+            PathBuf::from("/home/agent/MEMORY.md")
+        );
         assert_eq!(ws.index_db_path(), PathBuf::from("/home/agent/index.db"));
         assert_eq!(ws.prompts_dir(), PathBuf::from("/home/agent/prompts"));
-        assert_eq!(ws.agents_md(), PathBuf::from("/home/agent/prompts/AGENTS.md"));
+        assert_eq!(
+            ws.agents_md(),
+            PathBuf::from("/home/agent/prompts/AGENTS.md")
+        );
         assert_eq!(ws.soul_md(), PathBuf::from("/home/agent/prompts/SOUL.md"));
-        assert_eq!(ws.heartbeat_md(), PathBuf::from("/home/agent/prompts/HEARTBEAT.md"));
+        assert_eq!(
+            ws.heartbeat_md(),
+            PathBuf::from("/home/agent/prompts/HEARTBEAT.md")
+        );
     }
 
     #[tokio::test]

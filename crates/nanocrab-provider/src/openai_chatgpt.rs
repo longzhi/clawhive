@@ -346,7 +346,9 @@ fn parse_sse_event(
             if let Some(item) = event.item {
                 if item.item_type == Some("function_call".to_string()) {
                     let call_id = item.call_id.clone().unwrap_or_else(|| {
-                        item.id.clone().unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()))
+                        item.id
+                            .clone()
+                            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()))
                     });
                     let builder = function_calls.entry(call_id).or_default();
                     if let Some(name) = item.name {
@@ -396,7 +398,8 @@ fn parse_sse_event(
                             content_blocks: vec![ContentBlock::ToolUse {
                                 id: call_id,
                                 name,
-                                input: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+                                input: serde_json::from_str(&args)
+                                    .unwrap_or(serde_json::Value::Null),
                             }],
                         }));
                     }
@@ -425,7 +428,8 @@ fn parse_sse_event(
                         content_blocks: vec![ContentBlock::ToolUse {
                             id: call_id,
                             name,
-                            input: serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null),
+                            input: serde_json::from_str(&arguments)
+                                .unwrap_or(serde_json::Value::Null),
                         }],
                     }));
                 }
@@ -508,10 +512,7 @@ pub(crate) enum ResponsesInputItem {
         arguments: String,
     },
     /// Function call output (tool result)
-    FunctionCallOutput {
-        call_id: String,
-        output: String,
-    },
+    FunctionCallOutput { call_id: String, output: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -663,7 +664,8 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
                     }
 
                     // Add the function call
-                    let arguments = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                    let arguments =
+                        serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
                     result.push(ResponsesInputItem::FunctionCall {
                         id: Some(format!("fc_{}", uuid::Uuid::new_v4())),
                         call_id: id,
@@ -812,7 +814,7 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "get_weather");
         assert_eq!(payload.tool_choice, Some("auto".to_string()));
-        
+
         // Debug: print the actual JSON
         let json = serde_json::to_string_pretty(&tools).unwrap();
         println!("Tools JSON:\n{}", json);
@@ -931,7 +933,12 @@ mod tests {
         let chunks: Vec<Result<StreamChunk>> = parse_sse_stream(stream).collect().await;
 
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].as_ref().err().unwrap().to_string().contains("bad"));
+        assert!(chunks[0]
+            .as_ref()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("bad"));
     }
 
     #[tokio::test]

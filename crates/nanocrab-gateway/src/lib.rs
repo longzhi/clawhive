@@ -346,6 +346,7 @@ mod tests {
             memory_policy: None,
             sub_agent: None,
             workspace: None,
+        heartbeat: None,
         }];
         let orch = Arc::new(Orchestrator::new(
             router,
@@ -420,6 +421,7 @@ mod tests {
             memory_policy: None,
             sub_agent: None,
             workspace: None,
+        heartbeat: None,
         }];
         let orch = Arc::new(Orchestrator::new(
             router,

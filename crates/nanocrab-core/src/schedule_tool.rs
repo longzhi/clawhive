@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use nanocrab_provider::ToolDef;
-use nanocrab_scheduler::{DeliveryConfig, DeliveryMode, ScheduleConfig, ScheduleManager, ScheduleType, SessionMode};
+use nanocrab_scheduler::{
+    DeliveryConfig, DeliveryMode, ScheduleConfig, ScheduleManager, ScheduleType, SessionMode,
+};
 use serde::Deserialize;
 
 use crate::tool::{ToolContext, ToolExecutor, ToolOutput};
@@ -110,9 +112,9 @@ impl ScheduleJobInput {
         let schedule = normalize_schedule_type(self.schedule);
 
         // "at" schedules should default to delete_after_run=true since they're one-shot
-        let delete_after_run = self.delete_after_run.unwrap_or_else(|| {
-            matches!(schedule, ScheduleType::At { .. })
-        });
+        let delete_after_run = self
+            .delete_after_run
+            .unwrap_or_else(|| matches!(schedule, ScheduleType::At { .. }));
 
         ScheduleConfig {
             schedule_id: self
@@ -152,8 +154,8 @@ fn normalize_schedule_type(schedule: ScheduleType) -> ScheduleType {
             if let Some(ms) = try_parse_relative_ms(&at) {
                 let now_ms = Utc::now().timestamp_millis();
                 let target_ms = now_ms + ms;
-                let target_dt = chrono::DateTime::from_timestamp_millis(target_ms)
-                    .unwrap_or_else(Utc::now);
+                let target_dt =
+                    chrono::DateTime::from_timestamp_millis(target_ms).unwrap_or_else(Utc::now);
                 ScheduleType::At {
                     at: target_dt.to_rfc3339(),
                 }
@@ -351,7 +353,9 @@ impl ToolExecutor for ScheduleTool {
                 };
 
                 self.manager.trigger_now(&schedule_id).await?;
-                Ok(tool_ok(format!("Triggered immediate run of '{schedule_id}'")))
+                Ok(tool_ok(format!(
+                    "Triggered immediate run of '{schedule_id}'"
+                )))
             }
             other => Ok(tool_error(format!("Unknown action: {other}"))),
         }
@@ -370,7 +374,11 @@ mod tests {
     use super::ScheduleTool;
     use crate::tool::{ConversationMessage, ToolContext, ToolExecutor};
 
-    fn setup() -> (Arc<nanocrab_scheduler::ScheduleManager>, Arc<EventBus>, TempDir) {
+    fn setup() -> (
+        Arc<nanocrab_scheduler::ScheduleManager>,
+        Arc<EventBus>,
+        TempDir,
+    ) {
         let tmp = TempDir::new().unwrap();
         let config_dir = tmp.path().join("config/schedules.d");
         let data_dir = tmp.path().join("data/schedules");
@@ -388,16 +396,17 @@ mod tests {
     async fn add_action_supports_context_injection() {
         let (manager, _bus, _tmp) = setup();
         let tool = ScheduleTool::new(manager.clone());
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp")).with_recent_messages(vec![
-            ConversationMessage {
-                role: "user".to_string(),
-                content: "remember milk".to_string(),
-            },
-            ConversationMessage {
-                role: "assistant".to_string(),
-                content: "I will remind you".to_string(),
-            },
-        ]);
+        let ctx =
+            ToolContext::default_policy(std::path::Path::new("/tmp")).with_recent_messages(vec![
+                ConversationMessage {
+                    role: "user".to_string(),
+                    content: "remember milk".to_string(),
+                },
+                ConversationMessage {
+                    role: "assistant".to_string(),
+                    content: "I will remind you".to_string(),
+                },
+            ]);
 
         let result = tool
             .execute(
@@ -567,9 +576,12 @@ mod tests {
         assert_eq!(entries.len(), 1);
 
         let config = &entries[0].config;
-        
+
         // Should default to delete_after_run=true for "at" schedules
-        assert!(config.delete_after_run, "at schedules should default to delete_after_run=true");
+        assert!(
+            config.delete_after_run,
+            "at schedules should default to delete_after_run=true"
+        );
 
         // The "at" time should be converted to an absolute ISO timestamp, not "5m"
         if let nanocrab_scheduler::ScheduleType::At { at } = &config.schedule {
@@ -591,13 +603,13 @@ mod tests {
     #[test]
     fn try_parse_relative_ms_works() {
         use super::try_parse_relative_ms;
-        
+
         assert_eq!(try_parse_relative_ms("1m"), Some(60_000));
         assert_eq!(try_parse_relative_ms("5m"), Some(300_000));
         assert_eq!(try_parse_relative_ms("2h"), Some(7_200_000));
         assert_eq!(try_parse_relative_ms("30s"), Some(30_000));
         assert_eq!(try_parse_relative_ms("1d"), Some(86_400_000));
-        
+
         // Not relative times
         assert_eq!(try_parse_relative_ms("2026-02-25T10:00:00Z"), None);
         assert_eq!(try_parse_relative_ms("invalid"), None);

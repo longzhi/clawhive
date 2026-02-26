@@ -4,7 +4,9 @@ use chrono::Utc;
 use nanocrab_bus::{EventBus, Topic};
 use nanocrab_gateway::Gateway;
 use nanocrab_schema::{BusMessage, InboundMessage, OutboundMessage};
-use serenity::all::{ChannelId, Client, Context, EventHandler, GatewayIntents, Http, Message, Ready};
+use serenity::all::{
+    ChannelId, Client, Context, EventHandler, GatewayIntents, Http, Message, Ready,
+};
 use serenity::async_trait;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -190,7 +192,7 @@ impl EventHandler for DiscordHandler {
             });
 
             let result = gateway.handle_inbound(inbound).await;
-            
+
             // Stop typing indicator
             typing_handle.abort();
 
@@ -276,10 +278,7 @@ async fn spawn_delivery_listener(
         if let Err(e) = channel.say(&http, &text).await {
             tracing::error!("Failed to deliver announce message: {e}");
         } else {
-            tracing::info!(
-                "Delivered scheduled task result to channel {}",
-                channel_id
-            );
+            tracing::info!("Delivered scheduled task result to channel {}", channel_id);
         }
     }
 }

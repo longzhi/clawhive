@@ -25,7 +25,11 @@ pub const ANTHROPIC_OAUTH_BETAS: &str =
     "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14";
 
 const SETUP_TOKEN_PREFIX: &str = "sk-ant-oat01-";
-pub async fn validate_setup_token(http: &reqwest::Client, token: &str, base_url: &str) -> Result<bool> {
+pub async fn validate_setup_token(
+    http: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+) -> Result<bool> {
     if !token.starts_with(SETUP_TOKEN_PREFIX) {
         anyhow::bail!(
             "Invalid setup-token format. Expected token starting with {SETUP_TOKEN_PREFIX}\n\
@@ -79,7 +83,10 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .and(header("authorization", "Bearer sk-ant-oat01-test-token-abc123"))
+            .and(header(
+                "authorization",
+                "Bearer sk-ant-oat01-test-token-abc123",
+            ))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;

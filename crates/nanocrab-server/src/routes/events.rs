@@ -117,12 +117,7 @@ async fn get_metrics(State(state): State<AppState>) -> Json<Metrics> {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("jsonl")
-                })
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
                 .count()
         })
         .unwrap_or(0);
@@ -132,12 +127,7 @@ async fn get_metrics(State(state): State<AppState>) -> Json<Metrics> {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("yaml")
-                })
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("yaml"))
                 .count()
         })
         .unwrap_or(0);

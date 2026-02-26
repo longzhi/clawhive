@@ -301,7 +301,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput> {
             let text = input["text"].as_str().unwrap_or("").to_string();
             Ok(ToolOutput {
                 content: text,

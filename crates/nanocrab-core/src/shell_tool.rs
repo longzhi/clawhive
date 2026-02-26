@@ -435,10 +435,7 @@ impl ToolExecutor for ExecuteCommandTool {
                 );
                 entry.emit();
 
-                Ok(ToolOutput {
-                    content,
-                    is_error,
-                })
+                Ok(ToolOutput { content, is_error })
             }
             Err(e) => {
                 // Audit log failed execution

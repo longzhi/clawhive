@@ -522,7 +522,10 @@ mod tests {
 
         // Create a session
         writer.start_session("s1", "main").await.expect("start");
-        writer.append_message("s1", "user", "hello").await.expect("append");
+        writer
+            .append_message("s1", "user", "hello")
+            .await
+            .expect("append");
         assert!(reader.session_exists("s1").await);
 
         // Clear existing session returns true

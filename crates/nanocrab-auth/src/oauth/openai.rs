@@ -78,7 +78,11 @@ pub fn generate_pkce_pair() -> PkcePair {
 /// - `codex_cli_simplified_flow=true`
 /// - `originator` (client app identifier)
 /// - `id_token_add_organizations=true` (to get account ID in the id_token)
-pub fn build_authorize_url(config: &OpenAiOAuthConfig, code_challenge: &str, state: &str) -> String {
+pub fn build_authorize_url(
+    config: &OpenAiOAuthConfig,
+    code_challenge: &str,
+    state: &str,
+) -> String {
     format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&codex_cli_simplified_flow=true&id_token_add_organizations=true&originator={}",
         config.authorize_endpoint,
@@ -243,7 +247,13 @@ pub fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
     }
 
     // Fallback: top-level keys
-    for key in ["account_id", "accountId", "acct", "sub", "https://api.openai.com/account_id"] {
+    for key in [
+        "account_id",
+        "accountId",
+        "acct",
+        "sub",
+        "https://api.openai.com/account_id",
+    ] {
         if let Some(val) = claims.get(key).and_then(|v| v.as_str()) {
             if !val.trim().is_empty() {
                 return Some(val.to_string());
@@ -260,8 +270,8 @@ mod tests {
         build_authorize_url, exchange_code_for_tokens, exchange_id_token_for_api_key,
         extract_chatgpt_account_id, generate_pkce_pair, OpenAiOAuthConfig,
     };
-    use wiremock::matchers::{body_string_contains, method, path};
     use base64::Engine;
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_config() -> OpenAiOAuthConfig {
@@ -308,14 +318,12 @@ mod tests {
             .and(body_string_contains("grant_type=authorization_code"))
             .and(body_string_contains("client_id=client-123"))
             .and(body_string_contains("code=code-xyz"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "at_123",
-                    "refresh_token": "rt_456",
-                    "expires_in": 3600,
-                    "id_token": "id_tok_789"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at_123",
+                "refresh_token": "rt_456",
+                "expires_in": 3600,
+                "id_token": "id_tok_789"
+            })))
             .mount(&server)
             .await;
 
@@ -347,11 +355,9 @@ mod tests {
             .and(body_string_contains("token-exchange"))
             .and(body_string_contains("requested_token=openai-api-key"))
             .and(body_string_contains("subject_token=my-id-token"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "sk-openai-api-key-xyz"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "sk-openai-api-key-xyz"
+            })))
             .mount(&server)
             .await;
 

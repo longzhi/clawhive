@@ -133,7 +133,10 @@ impl Orchestrator {
         tool_registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
-        tool_registry.register(Box::new(ExecuteCommandTool::new(workspace_root.clone(), 30)));
+        tool_registry.register(Box::new(ExecuteCommandTool::new(
+            workspace_root.clone(),
+            30,
+        )));
         tool_registry.register(Box::new(WebFetchTool::new()));
         tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
         if let Some(api_key) = brave_api_key {
@@ -290,15 +293,21 @@ impl Orchestrator {
         ctx: &ToolContext,
     ) -> Result<super::tool::ToolOutput> {
         match name {
-            "read" => ReadFileTool::new(self.workspace_root_for(agent_id))
-                .execute(input, ctx)
-                .await,
-            "write" => WriteFileTool::new(self.workspace_root_for(agent_id))
-                .execute(input, ctx)
-                .await,
-            "edit" => EditFileTool::new(self.workspace_root_for(agent_id))
-                .execute(input, ctx)
-                .await,
+            "read" => {
+                ReadFileTool::new(self.workspace_root_for(agent_id))
+                    .execute(input, ctx)
+                    .await
+            }
+            "write" => {
+                WriteFileTool::new(self.workspace_root_for(agent_id))
+                    .execute(input, ctx)
+                    .await
+            }
+            "edit" => {
+                EditFileTool::new(self.workspace_root_for(agent_id))
+                    .execute(input, ctx)
+                    .await
+            }
             "exec" => {
                 ExecuteCommandTool::new(self.workspace_root_for(agent_id), 30)
                     .execute(input, ctx)
@@ -407,10 +416,14 @@ impl Orchestrator {
                 super::slash_commands::SlashCommand::New { model_hint } => {
                     // Reset the session: clear history and start fresh
                     let _ = self.session_mgr.reset(&session_key).await;
-                    let _ = self.session_writer_for(agent_id).clear_session(&session_key.0).await;
+                    let _ = self
+                        .session_writer_for(agent_id)
+                        .clear_session(&session_key.0)
+                        .await;
 
                     // Build post-reset prompt
-                    let post_reset_prompt = super::slash_commands::build_post_reset_prompt(agent_id);
+                    let post_reset_prompt =
+                        super::slash_commands::build_post_reset_prompt(agent_id);
 
                     // Log the model hint if provided (for future model switching)
                     if let Some(ref hint) = model_hint {
@@ -419,7 +432,13 @@ impl Orchestrator {
 
                     // Continue with normal flow but inject the post-reset prompt
                     return self
-                        .handle_post_reset_flow(inbound, agent_id, agent, &session_key, &post_reset_prompt)
+                        .handle_post_reset_flow(
+                            inbound,
+                            agent_id,
+                            agent,
+                            &session_key,
+                            &post_reset_prompt,
+                        )
                         .await;
                 }
             }
@@ -431,7 +450,8 @@ impl Orchestrator {
             .await?;
 
         if session_result.expired_previous {
-            self.try_fallback_summary(agent_id, &session_key, agent).await;
+            self.try_fallback_summary(agent_id, &session_key, agent)
+                .await;
         }
 
         let inbound_text = inbound.text.clone();
@@ -455,7 +475,10 @@ impl Orchestrator {
                 .iter()
                 .filter_map(|forced| {
                     if let Some(skill) = active_skills.get(forced) {
-                        skill.permissions.as_ref().map(|p| p.to_corral_permissions())
+                        skill
+                            .permissions
+                            .as_ref()
+                            .map(|p| p.to_corral_permissions())
                     } else {
                         missing.push(forced.clone());
                         None
@@ -492,11 +515,7 @@ impl Orchestrator {
 
         // Build system prompt with memory context injected (not fake dialogue)
         let system_prompt = if memory_context.is_empty() {
-            self.build_runtime_system_prompt(
-                agent_id,
-                &agent.model_policy.primary,
-                system_prompt,
-            )
+            self.build_runtime_system_prompt(agent_id, &agent.model_policy.primary, system_prompt)
         } else {
             let base_prompt = self.build_runtime_system_prompt(
                 agent_id,
@@ -618,7 +637,8 @@ impl Orchestrator {
             .await?;
 
         if session_result.expired_previous {
-            self.try_fallback_summary(agent_id, &session_key, agent).await;
+            self.try_fallback_summary(agent_id, &session_key, agent)
+                .await;
         }
 
         let system_prompt = self
@@ -640,7 +660,10 @@ impl Orchestrator {
                 .iter()
                 .filter_map(|forced| {
                     if let Some(skill) = active_skills.get(forced) {
-                        skill.permissions.as_ref().map(|p| p.to_corral_permissions())
+                        skill
+                            .permissions
+                            .as_ref()
+                            .map(|p| p.to_corral_permissions())
                     } else {
                         missing.push(forced.clone());
                         None
@@ -677,11 +700,7 @@ impl Orchestrator {
 
         // Build system prompt with memory context injected (stream variant)
         let system_prompt = if memory_context.is_empty() {
-            self.build_runtime_system_prompt(
-                agent_id,
-                &agent.model_policy.primary,
-                system_prompt,
-            )
+            self.build_runtime_system_prompt(agent_id, &agent.model_policy.primary, system_prompt)
         } else {
             let base_prompt = self.build_runtime_system_prompt(
                 agent_id,
@@ -989,11 +1008,8 @@ impl Orchestrator {
         } else {
             format!("{system_prompt}\n\n{skill_summary}")
         };
-        let system_prompt = self.build_runtime_system_prompt(
-            agent_id,
-            &agent.model_policy.primary,
-            system_prompt,
-        );
+        let system_prompt =
+            self.build_runtime_system_prompt(agent_id, &agent.model_policy.primary, system_prompt);
 
         // Build messages with post-reset prompt
         let messages = vec![LlmMessage::user(post_reset_prompt.to_string())];
@@ -1057,7 +1073,12 @@ impl Orchestrator {
         Ok(outbound)
     }
 
-    async fn try_fallback_summary(&self, agent_id: &str, session_key: &SessionKey, agent: &FullAgentConfig) {
+    async fn try_fallback_summary(
+        &self,
+        agent_id: &str,
+        session_key: &SessionKey,
+        agent: &FullAgentConfig,
+    ) {
         let messages = match self
             .session_reader_for(agent_id)
             .load_recent_messages(&session_key.0, 20)
@@ -1097,7 +1118,11 @@ impl Orchestrator {
             .await
         {
             Ok(resp) => {
-                if let Err(e) = self.file_store_for(agent_id).append_daily(today, &resp.text).await {
+                if let Err(e) = self
+                    .file_store_for(agent_id)
+                    .append_daily(today, &resp.text)
+                    .await
+                {
                     tracing::warn!("Failed to write fallback summary: {e}");
                 } else {
                     tracing::info!("Wrote fallback summary for expired session");
@@ -1109,7 +1134,12 @@ impl Orchestrator {
         }
     }
 
-    async fn build_memory_context(&self, agent_id: &str, _session_key: &SessionKey, query: &str) -> Result<String> {
+    async fn build_memory_context(
+        &self,
+        agent_id: &str,
+        _session_key: &SessionKey,
+        query: &str,
+    ) -> Result<String> {
         let results = self
             .search_index_for(agent_id)
             .search(query, self.embedding_provider.as_ref(), 6, 0.25)
