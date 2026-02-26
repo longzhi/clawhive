@@ -181,9 +181,15 @@ prompts/<agent_id>/             # Per-agent persona prompts (system.md, style.md
 skills/                         # Skill definitions (SKILL.md with frontmatter)
 ```
 
-## Installation (End Users)
+## Installation
 
-Download prebuilt binaries from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
+### Quick Install (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | bash
+```
+
+### Manual Install
 
 ### macOS (Apple Silicon)
 
