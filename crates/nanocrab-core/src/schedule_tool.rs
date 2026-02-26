@@ -397,17 +397,16 @@ mod tests {
     async fn add_action_supports_context_injection() {
         let (manager, _bus, _tmp) = setup();
         let tool = ScheduleTool::new(manager.clone());
-        let ctx =
-            ToolContext::builtin().with_recent_messages(vec![
-                ConversationMessage {
-                    role: "user".to_string(),
-                    content: "remember milk".to_string(),
-                },
-                ConversationMessage {
-                    role: "assistant".to_string(),
-                    content: "I will remind you".to_string(),
-                },
-            ]);
+        let ctx = ToolContext::builtin().with_recent_messages(vec![
+            ConversationMessage {
+                role: "user".to_string(),
+                content: "remember milk".to_string(),
+            },
+            ConversationMessage {
+                role: "assistant".to_string(),
+                content: "I will remind you".to_string(),
+            },
+        ]);
 
         let result = tool
             .execute(
