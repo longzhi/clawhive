@@ -82,8 +82,8 @@ Each agent has its own persona (system prompts), model policy (primary + fallbac
 | **Runtime** | Pure Rust binary, embedded SQLite | Node.js runtime |
 | **Security Model** | Two-layer policy (hard baseline + origin trust) | Tool allowlist |
 | **Permission System** | Declarative SKILL.md permissions | Runtime policy |
-| **Memory** | Markdown-native (MEMORY.md canonical) | Database-first |
-| **Integration Surface** | Focused (Telegram + CLI) | Broad connectors |
+| **Memory** | Markdown-native (MEMORY.md canonical) | Markdown + DB hybrid |
+| **Integration Surface** | Focused (Telegram + Discord + CLI) | Broad connectors |
 | **Dependency** | Single binary, no runtime deps | Node.js + npm |
 
 ### Key Architectural Choices
