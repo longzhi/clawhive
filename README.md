@@ -97,7 +97,8 @@ permissions:
 - Three-layer memory system: Session JSONL (working memory) → Daily files (short-term) → MEMORY.md (long-term)
 - Hybrid search: sqlite-vec vector similarity (70%) + FTS5 BM25 (30%) over memory chunks
 - Hippocampus consolidation: periodic LLM-driven synthesis of daily observations into long-term memory
-- Telegram channel adapter (multi-bot, multi-connector)
+- Telegram + Discord channel adapters (multi-bot, multi-connector)
+- More channel adapters in progress (Slack, WhatsApp, etc.)
 - ReAct reasoning loop with repeat guard
 - Sub-agent spawning with depth limits and timeout
 - Skill system (SKILL.md with frontmatter + prompt injection)
