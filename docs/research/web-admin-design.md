@@ -1,4 +1,4 @@
-# NanoCrab Web Admin Interface - Design Document
+# Clawhive Web Admin Interface - Design Document
 
 > **Status**: Research Phase (NOT implementing yet)  
 > **Created**: 2026-02-14  
@@ -8,7 +8,7 @@
 
 ## Overview
 
-Design a professional, responsive web admin interface for NanoCrab, supporting both mobile and PC.
+Design a professional, responsive web admin interface for Clawhive, supporting both mobile and PC.
 
 ## Manageable Entities
 

@@ -1,4 +1,4 @@
-# NanoCrab Web Admin - UI Design Specification
+# Clawhive Web Admin - UI Design Specification
 
 > **Status**: Design Complete  
 > **Created**: 2026-02-14  
@@ -78,7 +78,7 @@ Backend:
 
 ```
 ┌──────────────────────────┐
-│ [☰]  NanoCrab    [🔔][👤]│  ← Top Bar (sticky)
+│ [☰]  Clawhive    [🔔][👤]│  ← Top Bar (sticky)
 ├──────────────────────────┤
 │                          │
 │    Content Area          │
@@ -92,7 +92,7 @@ Backend:
 
 [☰] tap → slide-in drawer:
 ┌────────────────┐
-│ 🦀 NanoCrab    │
+│ 🦀 Clawhive    │
 │                │
 │ Dashboard      │
 │ Agents         │
@@ -602,7 +602,7 @@ Mobile:
 ### Sidebar Items (Desktop)
 
 ```
-🦀 NanoCrab                    ← Logo + app name
+🦀 Clawhive                    ← Logo + app name
 ─────────────────
 📊 Dashboard                   ← Main monitoring view
 🤖 Agents                      ← Agent management
