@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_core::Stream;
+use serde::{Deserialize, Serialize};
 use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
@@ -36,6 +37,141 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
+// ============================================================
+// Provider Configuration
+// ============================================================
+
+/// Provider type identifier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderType {
+    Anthropic,
+    OpenAI,
+    Gemini,
+    DeepSeek,
+    Groq,
+    Ollama,
+    OpenRouter,
+    Together,
+    Fireworks,
+    /// Custom OpenAI-compatible endpoint
+    Custom,
+}
+
+/// Configuration for a single provider instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Unique provider ID (e.g., "openai", "deepseek", "my-ollama")
+    pub id: String,
+    /// Provider type
+    #[serde(rename = "type")]
+    pub provider_type: ProviderType,
+    /// API key (optional for Ollama)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Custom base URL (optional, uses default for each provider type)
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl ProviderConfig {
+    pub fn new(id: impl Into<String>, provider_type: ProviderType) -> Self {
+        Self {
+            id: id.into(),
+            provider_type,
+            api_key: None,
+            base_url: None,
+        }
+    }
+
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
+    }
+
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = Some(url.into());
+        self
+    }
+}
+
+/// Create a provider from configuration.
+pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> {
+    let provider: Arc<dyn LlmProvider> = match config.provider_type {
+        ProviderType::Anthropic => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("anthropic requires api_key"))?;
+            let base_url = config.base_url.as_deref()
+                .unwrap_or("https://api.anthropic.com");
+            Arc::new(AnthropicProvider::new(key.clone(), base_url))
+        }
+        ProviderType::OpenAI => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("openai requires api_key"))?;
+            let base_url = config.base_url.as_deref()
+                .unwrap_or("https://api.openai.com/v1");
+            Arc::new(OpenAiProvider::new(key.clone(), base_url))
+        }
+        ProviderType::Gemini => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("gemini requires api_key"))?;
+            Arc::new(GeminiProvider::new(key.clone()))
+        }
+        ProviderType::DeepSeek => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("deepseek requires api_key"))?;
+            Arc::new(deepseek(key.clone()))
+        }
+        ProviderType::Groq => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("groq requires api_key"))?;
+            Arc::new(groq(key.clone()))
+        }
+        ProviderType::Ollama => {
+            let base_url = config.base_url.as_deref()
+                .unwrap_or("http://localhost:11434/v1");
+            Arc::new(ollama_with_base(base_url))
+        }
+        ProviderType::OpenRouter => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("openrouter requires api_key"))?;
+            Arc::new(openrouter(key.clone()))
+        }
+        ProviderType::Together => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("together requires api_key"))?;
+            Arc::new(together(key.clone()))
+        }
+        ProviderType::Fireworks => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("fireworks requires api_key"))?;
+            Arc::new(fireworks(key.clone()))
+        }
+        ProviderType::Custom => {
+            let key = config.api_key.as_ref()
+                .ok_or_else(|| anyhow!("custom provider requires api_key"))?;
+            let base_url = config.base_url.as_ref()
+                .ok_or_else(|| anyhow!("custom provider requires base_url"))?;
+            Arc::new(custom(key.clone(), base_url.clone()))
+        }
+    };
+    Ok(provider)
+}
+
+/// Register providers from a list of configurations.
+pub fn register_from_configs(registry: &mut ProviderRegistry, configs: &[ProviderConfig]) -> Result<()> {
+    for config in configs {
+        let provider = create_provider(config)?;
+        registry.register(&config.id, provider);
+        tracing::info!("Registered provider: {} ({:?})", config.id, config.provider_type);
+    }
+    Ok(())
+}
+
+// ============================================================
+// Provider Registry
+// ============================================================
+
 #[derive(Default)]
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
@@ -55,6 +191,10 @@ impl ProviderRegistry {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow!("provider not found: {id}"))
+    }
+
+    pub fn list(&self) -> Vec<&str> {
+        self.providers.keys().map(|s| s.as_str()).collect()
     }
 }
 
@@ -197,3 +337,32 @@ mod tests {
         assert!(provider.health().await.is_ok());
     }
 }
+
+    #[test]
+    fn provider_config_serialize_deserialize() {
+        let config = ProviderConfig::new("my-openai", ProviderType::OpenAI)
+            .with_api_key("sk-test")
+            .with_base_url("https://custom.example.com/v1");
+        
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: ProviderConfig = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(parsed.id, "my-openai");
+        assert_eq!(parsed.provider_type, ProviderType::OpenAI);
+        assert_eq!(parsed.api_key, Some("sk-test".to_string()));
+        assert_eq!(parsed.base_url, Some("https://custom.example.com/v1".to_string()));
+    }
+
+    #[test]
+    fn provider_config_list_example() {
+        let configs = vec![
+            ProviderConfig::new("openai", ProviderType::OpenAI).with_api_key("sk-xxx"),
+            ProviderConfig::new("deepseek", ProviderType::DeepSeek).with_api_key("sk-yyy"),
+            ProviderConfig::new("local-ollama", ProviderType::Ollama),
+        ];
+        
+        let json = serde_json::to_string_pretty(&configs).unwrap();
+        assert!(json.contains("openai"));
+        assert!(json.contains("deepseek"));
+        assert!(json.contains("local-ollama"));
+    }
