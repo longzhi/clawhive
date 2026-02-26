@@ -1,62 +1,62 @@
-# memsearch 调研分析
+# memsearch Research Analysis
 
-> 来源：2026-02-13 调研  
-> 推文：https://x.com/yinmin1987/status/2021835061801496604  
-> 项目：https://github.com/zilliztech/memsearch  
-> 作者：Zilliz 团队（Milvus 的公司）  
-> 协议：MIT
+> Source: 2026-02-13 research  
+> Tweet: https://x.com/yinmin1987/status/2021835061801496604  
+> Project: https://github.com/zilliztech/memsearch  
+> Author: Zilliz team (the company behind Milvus)  
+> License: MIT
 
 ---
 
-## 1. 项目定位
+## 1. Project Positioning
 
-把 OpenClaw 的记忆系统核心设计抽离出来，做成独立 Python 库。让任何 Agent 框架都能用 OpenClaw 同款记忆力，不必依赖整个 OpenClaw 生态。
+Extracts OpenClaw's core memory system design into a standalone Python library. Allows any Agent framework to use OpenClaw's memory capabilities without depending on the entire OpenClaw ecosystem.
 
-## 2. 核心理念
+## 2. Core Philosophy
 
-**Markdown 是 source of truth，向量数据库只是派生索引。**
+**Markdown is source of truth, vector database is just a derived index.**
 
 ```
 ~/your-project/
 └── memory/
-    ├── MEMORY.md              # 长期记忆（人工策展）
-    ├── 2026-02-09.md          # 每日日志
+    ├── MEMORY.md              # Long-term memory (human curated)
+    ├── 2026-02-09.md          # Daily log
     └── 2026-02-08.md
 ```
 
-- 透明：Markdown 明文，打开就知道 AI 记了什么
-- 可编辑：vim 改完自动重建索引
-- 可移植：复制文件夹就能迁移
-- 人机共创：AI 写日志细节，人定长期原则
+- Transparent: Markdown plaintext, open it to see what AI recorded
+- Editable: Edit with vim, auto-rebuild index
+- Portable: Copy folder to migrate
+- Human-AI co-creation: AI writes daily details, humans define long-term principles
 
-## 3. 四大工作流程
+## 3. Four Main Workflows
 
-### Watch（监听）
-- 监听 memory 文件夹下 Markdown 变化
-- 1500ms 去抖后自动触发重新索引
+### Watch
+- Monitor memory folder for Markdown changes
+- 1500ms debounce before auto-triggering re-index
 
-### Index（索引）
-- **分块**：按 heading/段落切分，语义边界清晰
-- **去重**：SHA-256 哈希，重复内容只 embed 一次（省 20%+ 成本）
-- **Chunk ID**：`hash(source_path:start_line:end_line:content_hash:model_version)`，换 embedding 模型自动识别过期索引
+### Index
+- **Chunking**: Split by heading/paragraph, clear semantic boundaries
+- **Deduplication**: SHA-256 hash, duplicate content only embedded once (saves 20%+ cost)
+- **Chunk ID**: `hash(source_path:start_line:end_line:content_hash:model_version)`, changing embedding model auto-detects stale indexes
 
-### Search（混合搜索）
-- **向量搜索 70%**：语义匹配（"Redis 缓存" ≈ "Redis L1 cache"）
-- **BM25 关键词 30%**：精确匹配（错误码、函数名、ID）
-- 渐进式披露：Top-K 返回摘要（200 字），需要时 expand 查看完整内容
+### Search (Hybrid)
+- **Vector search 70%**: Semantic matching ("Redis caching" ≈ "Redis L1 cache")
+- **BM25 keywords 30%**: Exact matching (error codes, function names, IDs)
+- Progressive disclosure: Top-K returns summary (200 chars), expand for full content when needed
 
-### Compact（压缩）
-- 调 LLM 总结历史记忆为精简摘要
-- 删除/归档原始文件
-- 可手动触发或定时自动执行
+### Compact
+- Call LLM to summarize historical memory into concise summary
+- Delete/archive original files
+- Can be manually triggered or scheduled auto-execution
 
-## 4. 技术选型
+## 4. Technology Stack
 
-- **向量数据库**：Milvus（Lite/Server/Zilliz Cloud，一行配置切换）
-- **Embedding**：OpenAI、Google、Voyage、Ollama、本地模型
-- **搜索**：向量 + BM25 混合（与 OpenClaw 一致的 70/30 配比）
+- **Vector database**: Milvus (Lite/Server/Zilliz Cloud, one-line config switch)
+- **Embedding**: OpenAI, Google, Voyage, Ollama, local models
+- **Search**: Vector + BM25 hybrid (same 70/30 ratio as OpenClaw)
 
-## 5. 使用方式
+## 5. Usage
 
 ### Python API
 ```python
@@ -73,104 +73,104 @@ memsearch watch ./docs/
 memsearch compact
 ```
 
-## 6. vs 其他方案对比
+## 6. Comparison with Other Solutions
 
-| 维度 | memsearch | Mem0 / Zep | OpenClaw 内置 |
-|------|-----------|------------|---------------|
-| 记忆存储 | Markdown 文件 | 向量数据库 | Markdown 文件 |
-| 透明度 | 高（明文可读） | 低（JSON/向量） | 高 |
-| 可编辑 | vim 改完自动索引 | 需要 API 调用 | 同 memsearch |
-| 向量数据库 | Milvus（可选） | 核心依赖 | sqlite-vec |
-| 独立性 | ✅ 独立库 | ✅ 独立库 | ❌ 需要整个 OpenClaw |
-| 混合搜索 | ✅ 向量 + BM25 | 部分支持 | ✅ 向量 + BM25 |
-| 人机共创 | ✅ | ❌ | ✅ |
+| Dimension | memsearch | Mem0 / Zep | OpenClaw built-in |
+|-----------|-----------|------------|-------------------|
+| Memory storage | Markdown files | Vector database | Markdown files |
+| Transparency | High (plaintext readable) | Low (JSON/vectors) | High |
+| Editable | vim edit → auto-index | Requires API calls | Same as memsearch |
+| Vector database | Milvus (optional) | Core dependency | sqlite-vec |
+| Independence | ✅ Standalone library | ✅ Standalone library | ❌ Needs full OpenClaw |
+| Hybrid search | ✅ Vector + BM25 | Partial support | ✅ Vector + BM25 |
+| Human-AI co-creation | ✅ | ❌ | ✅ |
 
 ---
 
-## 7. OpenClaw 记忆系统向量搜索实现细节
+## 7. OpenClaw Memory System Vector Search Implementation Details
 
-虽然 OpenClaw 以 Markdown 为 source of truth，但在上面建了完整的向量检索层：
+Although OpenClaw uses Markdown as source of truth, it built a complete vector retrieval layer on top:
 
-### 索引链路
+### Indexing Pipeline
 ```
-Markdown 文件
-  ▼  监听变化（debounce 1.5s）
-分块（~400 token/块，80 token 重叠）
+Markdown files
+  ▼  Watch for changes (debounce 1.5s)
+Chunking (~400 token/chunk, 80 token overlap)
   ▼
-Embedding（多 provider）
-  ├── OpenAI text-embedding-3-small（远程，默认）
-  ├── Gemini embedding-001（远程）
-  ├── Voyage（远程）
-  └── 本地 GGUF 模型（node-llama-cpp，离线可用）
+Embedding (multi-provider)
+  ├── OpenAI text-embedding-3-small (remote, default)
+  ├── Gemini embedding-001 (remote)
+  ├── Voyage (remote)
+  └── Local GGUF model (node-llama-cpp, offline available)
   ▼
-SQLite 存储（~/.openclaw/memory/<agentId>.sqlite）
-  ├── vec0 虚拟表（sqlite-vec 加速向量搜索）
-  ├── FTS5 全文索引（BM25 关键词搜索）
-  └── Embedding 缓存（SHA 去重）
+SQLite storage (~/.openclaw/memory/<agentId>.sqlite)
+  ├── vec0 virtual table (sqlite-vec accelerated vector search)
+  ├── FTS5 full-text index (BM25 keyword search)
+  └── Embedding cache (SHA dedup)
 ```
 
-### 混合搜索
+### Hybrid Search
 ```
 finalScore = 0.7 × vectorScore + 0.3 × textScore(BM25)
 ```
 
-- BM25 得分转换：`textScore = 1 / (1 + max(0, bm25Rank))`
-- 候选池：两侧各取 `maxResults × candidateMultiplier` 个候选
-- Union by chunk id，加权排序
+- BM25 score conversion: `textScore = 1 / (1 + max(0, bm25Rank))`
+- Candidate pool: Take `maxResults × candidateMultiplier` candidates from each side
+- Union by chunk id, weighted sort
 
-### Fallback 机制
-- sqlite-vec 不可用 → JS 进程内 cosine similarity
-- FTS5 不可用 → 纯向量搜索
-- 远程 embedding 失败 → 本地模型 fallback
+### Fallback Mechanism
+- sqlite-vec unavailable → JS in-process cosine similarity
+- FTS5 unavailable → pure vector search
+- Remote embedding failed → local model fallback
 
-### 额外能力
-- 实验性 QMD 后端（BM25 + 向量 + reranking，本地 sidecar）
-- Session transcript 索引（可选，opt-in）
-- Embedding 批量索引（OpenAI/Gemini Batch API，省钱快速）
-- 额外路径索引（`memorySearch.extraPaths`）
-
----
-
-## 8. BM25 算法简述
-
-**BM25（Best Matching 25）** 是经典关键词搜索算法，基于词频统计衡量文档与查询的相关度。
-
-核心公式考虑：
-- **词频（TF）**：关键词在文档中出现的次数（有饱和度，不是线性增长）
-- **逆文档频率（IDF）**：关键词的稀有度（越少见越有区分度）
-- **文档长度归一化**：长文档不会因为词多而占优
-
-### 向量搜索 vs BM25 互补关系
-
-| 场景 | 向量搜索 | BM25 |
-|------|---------|------|
-| 语义匹配（意思相同但用词不同） | ✅ 强 | ❌ 弱 |
-| 精确匹配（错误码、函数名、ID） | ❌ 弱 | ✅ 强 |
-| 同义词/改写 | ✅ 强 | ❌ 弱 |
-| 长尾关键词 | ❌ 弱 | ✅ 强 |
-
-在 SQLite 中通过 **FTS5 扩展**实现 BM25，创建全文索引即可使用，零额外依赖。
+### Additional Capabilities
+- Experimental QMD backend (BM25 + vector + reranking, local sidecar)
+- Session transcript indexing (optional, opt-in)
+- Embedding batch indexing (OpenAI/Gemini Batch API, cheaper and faster)
+- Additional path indexing (`memorySearch.extraPaths`)
 
 ---
 
-## 9. 对 clawhive 的启示
+## 8. BM25 Algorithm Brief
 
-### 可直接借鉴
-1. **混合搜索 70/30 配比**：向量 + BM25，经 OpenClaw 和 memsearch 验证有效
-2. **分块策略**：按 heading/段落切分，~400 token/块，80 token 重叠
-3. **SHA-256 去重**：避免重复 embedding，降低成本
-4. **Chunk ID 设计**：包含 model_version，换模型自动失效旧索引
-5. **Watch + 自动重建索引**：文件变更 → debounce → 重新索引
+**BM25 (Best Matching 25)** is a classic keyword search algorithm that measures document-query relevance based on term frequency statistics.
 
-### clawhive 的差异化优势
-1. **结构化知识**：concepts 表（类型/置信度/状态/证据链）— OpenClaw 和 memsearch 都没有
-2. **自动记录**：每条消息自动写入 episodes，不依赖 LLM 主动性
-3. **巩固机制**：Consolidator 从 episodes 自动提取 concepts，有证据链关联
-4. **零外部依赖**：sqlite-vec 嵌入式，不需要 Milvus/外部数据库
+Core formula considers:
+- **Term Frequency (TF)**: How often keyword appears in document (saturates, not linear growth)
+- **Inverse Document Frequency (IDF)**: Keyword rarity (rarer = more discriminative)
+- **Document length normalization**: Long documents don't win just because they have more words
 
-### 建议演进方向
-1. **补上 FTS5 + BM25**：在 SQLite 中建全文索引（零额外依赖）
-2. **实现 sqlite-vec 向量检索**：替代当前的 `LIKE '%query%'`
-3. **混合搜索**：向量 + BM25 加权融合
-4. **可选的 Markdown 可读层**：从 SQLite 导出 Markdown 视图供人审计
-5. **保持结构化优势**：concepts + confidence + evidence 是差异化竞争力
+### Vector Search vs BM25 Complementary Relationship
+
+| Scenario | Vector Search | BM25 |
+|----------|--------------|------|
+| Semantic matching (same meaning, different wording) | ✅ Strong | ❌ Weak |
+| Exact matching (error codes, function names, IDs) | ❌ Weak | ✅ Strong |
+| Synonyms/paraphrases | ✅ Strong | ❌ Weak |
+| Long-tail keywords | ❌ Weak | ✅ Strong |
+
+In SQLite, BM25 is implemented via **FTS5 extension** - create full-text index and use it, zero additional dependencies.
+
+---
+
+## 9. Implications for clawhive
+
+### Can Directly Adopt
+1. **Hybrid search 70/30 ratio**: Vector + BM25, validated by OpenClaw and memsearch
+2. **Chunking strategy**: Split by heading/paragraph, ~400 token/chunk, 80 token overlap
+3. **SHA-256 dedup**: Avoid duplicate embedding, reduce costs
+4. **Chunk ID design**: Include model_version, changing model auto-invalidates old indexes
+5. **Watch + auto-rebuild index**: File change → debounce → re-index
+
+### clawhive's Differentiation Advantages
+1. **Structured knowledge**: concepts table (type/confidence/status/evidence chain) — neither OpenClaw nor memsearch has this
+2. **Auto-recording**: Every message auto-written to episodes, doesn't rely on LLM initiative
+3. **Consolidation mechanism**: Consolidator auto-extracts concepts from episodes, with evidence chain association
+4. **Zero external dependencies**: sqlite-vec embedded, no need for Milvus/external database
+
+### Suggested Evolution Direction
+1. **Add FTS5 + BM25**: Build full-text index in SQLite (zero additional dependencies)
+2. **Implement sqlite-vec vector retrieval**: Replace current `LIKE '%query%'`
+3. **Hybrid search**: Vector + BM25 weighted fusion
+4. **Optional Markdown readable layer**: Export Markdown view from SQLite for human audit
+5. **Maintain structural advantage**: concepts + confidence + evidence is differentiated competitiveness

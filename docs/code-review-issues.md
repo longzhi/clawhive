@@ -1,131 +1,131 @@
 # clawhive Code Review Issues
 
-> 来源：2026-02-13 消息入口链路 review（Telegram → Agent）  
-> 状态标记：🔴 待修复 | 🟡 待讨论 | 🟢 已解决
+> Source: 2026-02-13 message entry path review (Telegram → Agent)  
+> Status markers: 🔴 To Fix | 🟡 To Discuss | 🟢 Resolved
 
 ---
 
-## Issue #1: Bus 是旁路，非主链路驱动
+## Issue #1: Bus is Sidecar, Not Main Path Driver
 
-**状态：** 🟡 M2/M3 延期  
-**模块：** `clawhive-gateway`, `clawhive-bus`  
-**描述：**  
-当前消息流是 TelegramBot → Gateway → Orchestrator 的直接同步调用链，Bus 仅用于旁路通知（`MessageAccepted` / `ReplyReady` / `TaskFailed`）。与 MVP 技术文档 §3 设计的「Command/Event 驱动」模式有差距。  
-**影响：** 模块耦合度高于预期，后续接入新通道或做异步编排时需要重构调用方式。  
-**建议：** MVP 阶段可接受，但应在 M2/M3 阶段将主链路切换为 Bus 驱动（Gateway publish Command → Core subscribe 处理 → publish Event → Gateway 回写）。
+**Status:** 🟡 Deferred to M2/M3  
+**Modules:** `clawhive-gateway`, `clawhive-bus`  
+**Description:**  
+Current message flow is direct synchronous call chain from TelegramBot → Gateway → Orchestrator. Bus is only used for sidecar notifications (`MessageAccepted` / `ReplyReady` / `TaskFailed`). This differs from the "Command/Event driven" pattern designed in MVP technical document §3.  
+**Impact:** Module coupling is higher than expected; adding new channels or async orchestration will require refactoring call patterns.  
+**Recommendation:** Acceptable for MVP phase, but should switch main path to Bus-driven in M2/M3 phase (Gateway publish Command → Core subscribe and handle → publish Event → Gateway write back).
 
-> **MVP 决定：** 保持当前 Bus 旁路架构，M2/M3 阶段再切换为 Bus 驱动主链路。
-
----
-
-## Issue #2: 无消息队列缓冲，LLM 慢响应会积压
-
-**状态：** 🟢 已解决  
-**模块：** `clawhive-channels-telegram`  
-**描述：**  
-`TelegramBot::run()` 的 endpoint closure 直接 await Gateway 返回。如果 LLM 响应慢（数秒甚至超时），teloxide dispatcher 的并发处理能力受限，可能导致消息积压或丢失。  
-**影响：** 高并发场景下用户体验差，消息处理可能超时。  
-**修复：** endpoint 中先发 `ChatAction::Typing`，然后 `tokio::spawn` gateway 调用，endpoint 立即返回。spawned task 完成后主动 `bot.send_message()` 发送回复。
+> **MVP Decision:** Keep current Bus sidecar architecture, switch to Bus-driven main path in M2/M3 phase.
 
 ---
 
-## Issue #3: Session 不加载历史对话
+## Issue #2: No Message Queue Buffer, Slow LLM Response Causes Backlog
 
-**状态：** 🟢 已解决  
-**模块：** `clawhive-core/orchestrator.rs`  
-**描述：**  
-`Orchestrator::handle_inbound()` 中 `SessionManager::get_or_create()` 只管理 session 元数据（创建/续期/过期），没有将 session 内的历史对话消息加入 LLM 的 messages 列表。当前每次对话只有：
-- 记忆召回的 episodes（作为 `[memory context]`）
-- 当前用户输入
-
-缺少 conversation history（最近 N 轮对话），导致 agent 无法进行连续多轮对话。  
-**影响：** 用户体验：agent 没有短期对话记忆，每次都像新对话。  
-**修复：** `handle_inbound` 通过 `SessionReader::load_recent_messages()` 加载最近 10 条对话历史，注入到 memory context 之后、当前用户消息之前的 LLM messages 列表中。Session JSONL 作为历史来源。
+**Status:** 🟢 Resolved  
+**Module:** `clawhive-channels-telegram`  
+**Description:**  
+`TelegramBot::run()`'s endpoint closure directly awaits Gateway return. If LLM response is slow (seconds or even timeout), teloxide dispatcher's concurrent processing capacity is limited, potentially causing message backlog or loss.  
+**Impact:** Poor user experience in high-concurrency scenarios, message processing may timeout.  
+**Fix:** In endpoint, first send `ChatAction::Typing`, then `tokio::spawn` the gateway call, endpoint returns immediately. Spawned task actively calls `bot.send_message()` to send reply when complete.
 
 ---
 
-## Issue #4: Runtime `execute()` 语义不明确
+## Issue #3: Session Doesn't Load Conversation History
 
-**状态：** 🟢 已解决  
-**模块：** `clawhive-core/orchestrator.rs`, `clawhive-runtime`  
-**描述：**  
-`runtime.execute()` 在 `handle_inbound` 中被调用了两次：
-1. 处理用户输入文本：`self.runtime.execute(&inbound.text)`
-2. 处理 LLM 输出文本：`self.runtime.execute(&reply_text)`
+**Status:** 🟢 Resolved  
+**Module:** `clawhive-core/orchestrator.rs`  
+**Description:**  
+In `Orchestrator::handle_inbound()`, `SessionManager::get_or_create()` only manages session metadata (create/renew/expire), doesn't add session's historical conversation messages to LLM's messages list. Current conversation only has:
+- Memory recall episodes (as `[memory context]`)
+- Current user input
 
-从上下文看 `NativeExecutor` 可能是 pass-through（原样返回），但语义不清晰——用户输入为什么需要经过 runtime execute？LLM 输出又为什么需要？  
-**影响：** 代码可读性差，后续维护者容易困惑。如果 execute 有副作用，可能产生非预期行为。  
-**修复：** `TaskExecutor::execute()` 拆分为 `preprocess_input()`（用户输入预处理）和 `postprocess_output()`（LLM 输出后处理），语义明确。NativeExecutor 两者均为 passthrough，WasmExecutor 预留沙箱处理。
-
----
-
-## Issue #5: Weak ReAct 缺少 Prompt 指令
-
-**状态：** 🟢 已解决  
-**模块：** `clawhive-core/orchestrator.rs`, `clawhive-core/persona.rs`  
-**描述：**  
-`weak_react_loop()` 依赖 LLM 输出特定标记（`[think]`、`[action]`、`[finish]`）来驱动循环，但当前没有看到在 system prompt 中注入这些标记的使用说明。Persona 的 `assembled_system_prompt()` 和 Skill 的 `summary_prompt()` 中是否包含 ReAct 指令需要确认。  
-**影响：** 如果 LLM 不知道这些标记的存在，永远不会输出 `[think]`/`[action]`，ReAct 循环实际上退化为单轮调用。  
-**修复：** `tool_use_loop` 取代 `weak_react_loop` 作为主循环。通过 Anthropic 原生 tool calling API（`tool_use` stop_reason + `tool_result` messages）驱动多轮工具调用，不再依赖文本标记。`ToolRegistry` 注册 `memory_search` 和 `memory_get` 工具，定义通过 JSON Schema 传递给 API。
+Missing conversation history (recent N turns), causing agent unable to conduct continuous multi-turn dialogue.  
+**Impact:** User experience: agent has no short-term conversation memory, every interaction is like a new conversation.  
+**Fix:** `handle_inbound` loads recent 10 conversation history messages via `SessionReader::load_recent_messages()`, injected into LLM messages list after memory context and before current user message. Session JSONL serves as history source.
 
 ---
 
-## Issue #6: TelegramBot endpoint 阻塞 dispatcher
+## Issue #4: Runtime `execute()` Semantics Unclear
 
-**状态：** 🟢 已解决（同 Issue #2）  
-**模块：** `clawhive-channels-telegram`  
-**描述：**  
-当前 TelegramBot 的 endpoint handler 直接 `await gateway.handle_inbound(inbound)`，LLM 响应期间（5-30 秒）阻塞 teloxide dispatcher。多用户并发时后续消息排队等待，严重时可能因 long polling 超时导致消息丢失。  
-**影响：** 并发场景下用户体验差，消息处理可能超时或丢失。  
-**修复：** 同 Issue #2。endpoint 发 `ChatAction::Typing` 后 `tokio::spawn` 异步处理，立即返回 dispatcher。
+**Status:** 🟢 Resolved  
+**Modules:** `clawhive-core/orchestrator.rs`, `clawhive-runtime`  
+**Description:**  
+`runtime.execute()` is called twice in `handle_inbound`:
+1. Processing user input text: `self.runtime.execute(&inbound.text)`
+2. Processing LLM output text: `self.runtime.execute(&reply_text)`
 
----
-
-## Issue #7: Bus 事件无消费者
-
-**状态：** 🟢 已解决  
-**模块：** `clawhive-bus`  
-**描述：**  
-Bus 当前发布了 `MessageAccepted`、`ReplyReady`、`TaskFailed` 等事件，但没有任何代码订阅和消费这些事件。Bus 处于"发了没人听"的状态。  
-**影响：** Bus 占用代码但无实际作用，TUI 面板和审计日志也没有数据源。  
-**修复：** TUI 已订阅并处理全部 10 种事件类型。6 种事件（CancelTask、RunScheduledConsolidation、MemoryWriteRequested、NeedHumanApproval、MemoryReadRequested、ConsolidationCompleted）暂无生产代码发布——属于功能占位，待对应功能实现时自然接入。
+From context, `NativeExecutor` might be pass-through (returns as-is), but semantics are unclear—why does user input need to go through runtime execute? And why LLM output?  
+**Impact:** Poor code readability, future maintainers easily confused. If execute has side effects, may produce unexpected behavior.  
+**Fix:** `TaskExecutor::execute()` split into `preprocess_input()` (user input preprocessing) and `postprocess_output()` (LLM output postprocessing), clear semantics. NativeExecutor both are passthrough, WasmExecutor reserves sandbox processing.
 
 ---
 
-## Issue #8: SubAgentRunner 未接入 Orchestrator
+## Issue #5: Weak ReAct Missing Prompt Instructions
 
-**状态：** 🟢 已解决  
-**模块：** `clawhive-core/orchestrator.rs`, `clawhive-core/subagent.rs`  
-**描述：**  
-`SubAgentRunner` 骨架已实现（spawn/cancel/wait_result/result_merge），但 Orchestrator 中没有任何代码使用它。Sub-Agent 能力处于"写了但没接上"的状态。  
-**影响：** MVP 文档 §6 明确要求 Sub-Agent 为必做项，当前无法使用。  
-**修复：** 创建 `SubAgentTool` 实现 `ToolExecutor` trait，通过 `delegate_task` 工具名注册到 `ToolRegistry`。LLM 可通过 tool_use 调用触发 sub-agent spawn，同步等待结果返回。Orchestrator 在 `new()` 中自动创建 `SubAgentRunner` 并注册该工具。
-
----
-
-## Issue #9: 流式输出链路未打通（Provider 已实现，上层未接入）
-
-**状态：** 🟢 已解决  
-**模块：** `clawhive-core/router.rs`, `clawhive-core/orchestrator.rs`, `clawhive-tui`  
-**描述：**  
-`AnthropicProvider::stream()` 和 `StreamChunk` 类型已完整实现（SSE 解析、三种事件类型），但上层链路完全未接入：
-- `LlmRouter` 只有 `chat()` 没有 `stream()`
-- `Orchestrator` 只有同步 `handle_inbound()` 没有流式接口
-- TUI 没有 Chat 面板消费 stream
-
-**影响：** TUI 作为本地 Chat 入口无法提供流式交互体验，与 Claude Code 类似的逐字输出无法实现。  
-**修复：** 三层打通：
-1. `LlmRouter::stream()` — 路由到 provider.stream()，支持 fallback（仅在 stream 启动前）
-2. `Orchestrator::handle_inbound_stream()` — tool_use_loop 保持阻塞，最终响应流式返回，同时发布 `StreamDelta` bus 事件
-3. TUI `StreamDelta` handler — Logs 面板实时显示流式 delta
-4. `BusMessage::StreamDelta` + `Topic::StreamDelta` — schema/bus 层新增流式事件类型
+**Status:** 🟢 Resolved  
+**Modules:** `clawhive-core/orchestrator.rs`, `clawhive-core/persona.rs`  
+**Description:**  
+`weak_react_loop()` relies on LLM outputting specific markers (`[think]`, `[action]`, `[finish]`) to drive the loop, but currently no system prompt injection of usage instructions for these markers is visible. Whether Persona's `assembled_system_prompt()` and Skill's `summary_prompt()` include ReAct instructions needs confirmation.  
+**Impact:** If LLM doesn't know these markers exist, will never output `[think]`/`[action]`, ReAct loop actually degrades to single-turn call.  
+**Fix:** `tool_use_loop` replaces `weak_react_loop` as main loop. Drives multi-turn tool calling through Anthropic native tool calling API (`tool_use` stop_reason + `tool_result` messages), no longer relies on text markers. `ToolRegistry` registers `memory_search` and `memory_get` tools, definitions passed to API via JSON Schema.
 
 ---
 
-## 后续 Review 计划
+## Issue #6: TelegramBot Endpoint Blocks Dispatcher
 
-- [ ] 记忆系统存取细节（MemoryStore / retrieve_context / consolidation）
-- [ ] Provider 实现（Anthropic adapter）
-- [ ] Config 加载与校验链路
-- [ ] Skill 系统加载与注入
-- [ ] Sub-Agent spawn 与生命周期
+**Status:** 🟢 Resolved (same as Issue #2)  
+**Module:** `clawhive-channels-telegram`  
+**Description:**  
+Current TelegramBot endpoint handler directly `await gateway.handle_inbound(inbound)`, blocking teloxide dispatcher during LLM response period (5-30 seconds). With multiple concurrent users, subsequent messages queue waiting; in severe cases may lose messages due to long polling timeout.  
+**Impact:** Poor user experience in concurrent scenarios, message processing may timeout or be lost.  
+**Fix:** Same as Issue #2. Endpoint sends `ChatAction::Typing` then `tokio::spawn` async processing, immediately returns to dispatcher.
+
+---
+
+## Issue #7: Bus Events Have No Consumers
+
+**Status:** 🟢 Resolved  
+**Module:** `clawhive-bus`  
+**Description:**  
+Bus currently publishes `MessageAccepted`, `ReplyReady`, `TaskFailed` and other events, but no code subscribes to and consumes these events. Bus is in "publishing but nobody listening" state.  
+**Impact:** Bus occupies code but has no actual function, TUI panel and audit log also have no data source.  
+**Fix:** TUI now subscribes and handles all 10 event types. 6 events (CancelTask, RunScheduledConsolidation, MemoryWriteRequested, NeedHumanApproval, MemoryReadRequested, ConsolidationCompleted) have no production code publishing yet—these are feature placeholders, will naturally integrate when corresponding features are implemented.
+
+---
+
+## Issue #8: SubAgentRunner Not Integrated with Orchestrator
+
+**Status:** 🟢 Resolved  
+**Modules:** `clawhive-core/orchestrator.rs`, `clawhive-core/subagent.rs`  
+**Description:**  
+`SubAgentRunner` skeleton is implemented (spawn/cancel/wait_result/result_merge), but no code in Orchestrator uses it. Sub-Agent capability is in "written but not connected" state.  
+**Impact:** MVP document §6 explicitly requires Sub-Agent as must-have, currently unusable.  
+**Fix:** Created `SubAgentTool` implementing `ToolExecutor` trait, registered to `ToolRegistry` with `delegate_task` tool name. LLM can trigger sub-agent spawn via tool_use call, synchronously waits for result return. Orchestrator automatically creates `SubAgentRunner` and registers this tool in `new()`.
+
+---
+
+## Issue #9: Streaming Output Path Not Connected (Provider Implemented, Upper Layers Not Integrated)
+
+**Status:** 🟢 Resolved  
+**Modules:** `clawhive-core/router.rs`, `clawhive-core/orchestrator.rs`, `clawhive-tui`  
+**Description:**  
+`AnthropicProvider::stream()` and `StreamChunk` type fully implemented (SSE parsing, three event types), but upper layer path completely not integrated:
+- `LlmRouter` only has `chat()`, no `stream()`
+- `Orchestrator` only has sync `handle_inbound()`, no streaming interface
+- TUI has no Chat panel consuming stream
+
+**Impact:** TUI as local Chat entry cannot provide streaming interaction experience, character-by-character output similar to Claude Code cannot be achieved.  
+**Fix:** Three layers connected:
+1. `LlmRouter::stream()` — routes to provider.stream(), supports fallback (only before stream starts)
+2. `Orchestrator::handle_inbound_stream()` — tool_use_loop remains blocking, final response streams back, simultaneously publishes `StreamDelta` bus events
+3. TUI `StreamDelta` handler — Logs panel displays streaming delta in real-time
+4. `BusMessage::StreamDelta` + `Topic::StreamDelta` — schema/bus layer adds streaming event type
+
+---
+
+## Future Review Plan
+
+- [ ] Memory system storage details (MemoryStore / retrieve_context / consolidation)
+- [ ] Provider implementation (Anthropic adapter)
+- [ ] Config loading and validation path
+- [ ] Skill system loading and injection
+- [ ] Sub-Agent spawn and lifecycle
