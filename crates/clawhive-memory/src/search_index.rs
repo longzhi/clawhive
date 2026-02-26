@@ -616,11 +616,101 @@ impl SearchIndex {
             .filter(|item| item.score >= min_score)
             .collect::<Vec<SearchResult>>();
 
-        results.sort_by(|a, b| b.score.total_cmp(&a.score));
-        results.truncate(target_results);
+        // --- Temporal Decay ---
+        // Boost recent memories, decay older ones (half-life = 30 days)
+        let half_life_days = 30.0_f64;
+        let decay_lambda = (2.0_f64).ln() / half_life_days;
+        let today = chrono::Utc::now().date_naive();
 
-        Ok(results)
+        for result in &mut results {
+            // Extract date from path like "memory/2026-02-25.md"
+            let age_days = extract_date_from_path(&result.path)
+                .map(|date| (today - date).num_days().max(0) as f64)
+                .unwrap_or(0.0); // Non-dated files (MEMORY.md etc) get no decay
+
+            if age_days > 0.0 {
+                let decay = (-decay_lambda * age_days).exp();
+                result.score *= decay;
+            }
+        }
+
+        results.sort_by(|a, b| b.score.total_cmp(&a.score));
+
+        // --- MMR (Maximal Marginal Relevance) ---
+        // Re-rank to reduce redundancy (lambda=0.7: balance relevance + diversity)
+        let mmr_lambda = 0.7_f64;
+        let mmr_results = mmr_rerank(&results, mmr_lambda, target_results);
+
+        Ok(mmr_results)
     }
+}
+
+/// Extract a date from a path like "memory/2026-02-25.md"
+fn extract_date_from_path(path: &str) -> Option<chrono::NaiveDate> {
+    // Match YYYY-MM-DD pattern in the path
+    let re_pattern = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches(".md");
+
+    chrono::NaiveDate::parse_from_str(re_pattern, "%Y-%m-%d").ok()
+}
+
+/// Jaccard similarity between two texts (tokenized by whitespace)
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let tokens_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let tokens_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+
+    if tokens_a.is_empty() && tokens_b.is_empty() {
+        return 1.0;
+    }
+
+    let intersection = tokens_a.intersection(&tokens_b).count() as f64;
+    let union = tokens_a.union(&tokens_b).count() as f64;
+
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+/// MMR re-ranking: iteratively select results balancing relevance and diversity
+fn mmr_rerank(candidates: &[SearchResult], lambda: f64, max_results: usize) -> Vec<SearchResult> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut selected: Vec<SearchResult> = Vec::new();
+    let mut remaining: Vec<usize> = (0..candidates.len()).collect();
+
+    while selected.len() < max_results && !remaining.is_empty() {
+        let mut best_idx = 0;
+        let mut best_mmr = f64::NEG_INFINITY;
+
+        for (ri, &ci) in remaining.iter().enumerate() {
+            let relevance = candidates[ci].score;
+
+            // Max similarity to any already-selected result
+            let max_sim = selected
+                .iter()
+                .map(|s| jaccard_similarity(&candidates[ci].text, &s.text))
+                .fold(0.0_f64, f64::max);
+
+            let mmr_score = lambda * relevance - (1.0 - lambda) * max_sim;
+
+            if mmr_score > best_mmr {
+                best_mmr = mmr_score;
+                best_idx = ri;
+            }
+        }
+
+        let chosen = remaining.remove(best_idx);
+        selected.push(candidates[chosen].clone());
+    }
+
+    selected
 }
 
 fn embedding_to_json(embedding: &[f32]) -> String {

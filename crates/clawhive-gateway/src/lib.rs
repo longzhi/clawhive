@@ -81,6 +81,16 @@ pub struct Gateway {
     routing: RoutingConfig,
     bus: BusPublisher,
     rate_limiter: RateLimiter,
+    /// Tracks the last active channel per agent for heartbeat delivery.
+    last_active_channels: Arc<TokioMutex<StdHashMap<String, ChannelTarget>>>,
+}
+
+/// Channel target info for delivering messages.
+#[derive(Debug, Clone)]
+pub struct ChannelTarget {
+    pub channel_type: String,
+    pub connector_id: String,
+    pub conversation_scope: String,
 }
 
 impl Gateway {
@@ -95,6 +105,7 @@ impl Gateway {
             routing,
             bus,
             rate_limiter,
+            last_active_channels: Arc::new(TokioMutex::new(StdHashMap::new())),
         }
     }
 
@@ -132,6 +143,19 @@ impl Gateway {
         let agent_id = self.resolve_agent(&inbound);
         let trace_id = inbound.trace_id;
 
+        // Track last active channel per agent (skip heartbeat/system channels)
+        if inbound.channel_type != "heartbeat" && inbound.channel_type != "system" {
+            let mut channels = self.last_active_channels.lock().await;
+            channels.insert(
+                agent_id.clone(),
+                ChannelTarget {
+                    channel_type: inbound.channel_type.clone(),
+                    connector_id: inbound.connector_id.clone(),
+                    conversation_scope: inbound.conversation_scope.clone(),
+                },
+            );
+        }
+
         let _ = self
             .bus
             .publish(BusMessage::HandleIncomingMessage {
@@ -158,6 +182,12 @@ impl Gateway {
                 Err(err)
             }
         }
+    }
+
+    /// Get the last active channel for an agent (for heartbeat delivery).
+    pub async fn last_active_channel(&self, agent_id: &str) -> Option<ChannelTarget> {
+        let channels = self.last_active_channels.lock().await;
+        channels.get(agent_id).cloned()
     }
 }
 

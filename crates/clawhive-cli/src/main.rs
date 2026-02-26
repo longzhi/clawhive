@@ -997,6 +997,25 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
             tracing::debug!("Ollama not available for auto-detection");
         }
         "openai" => {} // Fall through to OpenAI logic below
+        "gemini" | "google" => {
+            let api_key = embedding_config.api_key.clone();
+            if !api_key.is_empty() {
+                let provider = GeminiEmbeddingProvider::with_model(
+                    api_key,
+                    embedding_config.model.clone(),
+                    embedding_config.dimensions,
+                )
+                .with_base_url(embedding_config.base_url.clone());
+
+                tracing::info!(
+                    "Gemini embedding provider initialized (model: {}, dimensions: {})",
+                    embedding_config.model,
+                    embedding_config.dimensions
+                );
+                return Arc::new(provider);
+            }
+            tracing::warn!("Gemini embedding API key not set, falling back");
+        }
         other => {
             tracing::warn!("Unknown embedding provider '{}', falling back", other);
         }
@@ -1021,7 +1040,9 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
     }
 
     // Try to reuse API key from configured LLM providers
-    // Look for OpenAI-compatible providers that support embeddings
+    // Priority: OpenAI > Gemini (both support embeddings)
+    let mut gemini_key: Option<String> = None;
+
     for p in &config.providers {
         if !p.enabled {
             continue;
@@ -1030,34 +1051,47 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
             if key.is_empty() {
                 continue;
             }
-            // Check if this is an OpenAI-compatible provider
-            let is_openai_compat = p.api_base.contains("openai.com")
-                || p.api_base.contains("api.deepseek.com")
-                || p.provider_id == "openai";
 
-            if is_openai_compat {
-                let model = if p.api_base.contains("openai.com") {
-                    "text-embedding-3-small".to_string()
-                } else {
-                    // Non-OpenAI providers may not support embeddings
-                    continue;
-                };
+            // OpenAI (direct API only, not compatible proxies)
+            if p.api_base.contains("openai.com") || p.provider_id == "openai" {
+                if p.api_base.contains("openai.com") {
+                    let provider = OpenAiEmbeddingProvider::with_model(
+                        key.clone(),
+                        "text-embedding-3-small".to_string(),
+                        1536,
+                    )
+                    .with_base_url(p.api_base.clone());
 
-                let provider = OpenAiEmbeddingProvider::with_model(
-                    key.clone(),
-                    model.clone(),
-                    1536,
-                )
-                .with_base_url(p.api_base.clone());
+                    tracing::info!(
+                        "Reusing OpenAI API key for embeddings (text-embedding-3-small)"
+                    );
+                    return Arc::new(provider);
+                }
+            }
 
-                tracing::info!(
-                    "Reusing {} API key for embeddings (model: {})",
-                    p.provider_id,
-                    model
-                );
-                return Arc::new(provider);
+            // Gemini / Google
+            if p.provider_id == "gemini"
+                || p.provider_id == "google"
+                || p.api_base.contains("generativelanguage.googleapis.com")
+                || p.api_base.contains("google")
+            {
+                gemini_key = Some(key.clone());
             }
         }
+    }
+
+    // Also check env var for Gemini
+    if gemini_key.is_none() {
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            if !key.is_empty() {
+                gemini_key = Some(key);
+            }
+        }
+    }
+
+    if let Some(key) = gemini_key {
+        tracing::info!("Using Gemini API key for embeddings (gemini-embedding-001)");
+        return Arc::new(GeminiEmbeddingProvider::new(key));
     }
 
     // No embedding provider available — stub will be used
