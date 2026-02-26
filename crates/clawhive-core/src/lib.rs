@@ -11,6 +11,7 @@ pub mod persona;
 pub mod policy;
 pub mod router;
 pub mod schedule_tool;
+pub mod wait_tool;
 pub mod session;
 pub mod session_lock;
 pub mod shell_tool;

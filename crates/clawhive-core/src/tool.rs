@@ -45,6 +45,8 @@ pub struct ToolContext {
     source_connector_id: Option<String>,
     /// Source conversation scope (e.g., "guild:123:channel:456")
     source_conversation_scope: Option<String>,
+    /// Session key for the current conversation
+    session_key: String,
 }
 
 impl ToolContext {
@@ -63,6 +65,7 @@ impl ToolContext {
             source_channel_type: None,
             source_connector_id: None,
             source_conversation_scope: None,
+            session_key: String::new(),
         }
     }
 
@@ -77,6 +80,7 @@ impl ToolContext {
             source_channel_type: None,
             source_connector_id: None,
             source_conversation_scope: None,
+            session_key: String::new(),
         }
     }
 
@@ -92,6 +96,7 @@ impl ToolContext {
             source_channel_type: None,
             source_connector_id: None,
             source_conversation_scope: None,
+            session_key: String::new(),
         }
     }
 
@@ -132,6 +137,12 @@ impl ToolContext {
         self
     }
 
+    /// Set the session key for the current conversation.
+    pub fn with_session_key(mut self, session_key: impl Into<String>) -> Self {
+        self.session_key = session_key.into();
+        self
+    }
+
     // ============================================================
     // Accessors
     // ============================================================
@@ -154,6 +165,11 @@ impl ToolContext {
     /// Get the source conversation scope.
     pub fn source_conversation_scope(&self) -> Option<&str> {
         self.source_conversation_scope.as_deref()
+    }
+
+    /// Get the session key for the current conversation.
+    pub fn session_key(&self) -> &str {
+        &self.session_key
     }
 
     /// Get recent messages up to a limit.
