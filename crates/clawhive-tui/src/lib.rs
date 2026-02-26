@@ -341,6 +341,9 @@ impl App {
                 self.push_event(format!("[{ts}] WaitTask {task_id}: {status}"));
                 self.push_log(format!("[{ts}] WaitTask completed: {message}"));
             }
+            BusMessage::ActionReady { ref action } => {
+                self.push_event(format!("[{ts}] ActionReady: {:?}", action.action));
+            }
         }
     }
 }
@@ -653,6 +656,8 @@ mod tests {
             conversation_scope: "chat:1".into(),
             text: "done".into(),
             at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
         };
 
         app.handle_bus_message(BusMessage::ReplyReady { outbound });
@@ -678,6 +683,8 @@ mod tests {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: None,
+            attachments: vec![],
         };
 
         app.handle_bus_message(BusMessage::HandleIncomingMessage {

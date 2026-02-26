@@ -21,7 +21,7 @@ impl TelegramAdapter {
         }
     }
 
-    pub fn to_inbound(&self, chat_id: i64, user_id: i64, text: &str) -> InboundMessage {
+    pub fn to_inbound(&self, chat_id: i64, user_id: i64, text: &str, message_id: Option<i32>) -> InboundMessage {
         InboundMessage {
             trace_id: Uuid::new_v4(),
             channel_type: "telegram".to_string(),
@@ -33,6 +33,8 @@ impl TelegramAdapter {
             thread_id: None,
             is_mention: false,
             mention_target: None,
+            message_id: message_id.map(|id| id.to_string()),
+            attachments: vec![],
         }
     }
 
@@ -98,8 +100,9 @@ impl TelegramBot {
                 let chat_id = msg.chat.id;
                 let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(0);
                 let (is_mention, mention_target) = detect_mention(&msg);
+                let message_id = msg.id.0;
 
-                let mut inbound = adapter.to_inbound(chat_id.0, user_id, &text);
+                let mut inbound = adapter.to_inbound(chat_id.0, user_id, &text, Some(message_id));
                 inbound.is_mention = is_mention;
                 inbound.mention_target = mention_target;
                 inbound.thread_id = msg.thread_id.map(|thread| thread.0.to_string());
@@ -300,7 +303,7 @@ mod tests {
     #[test]
     fn adapter_to_inbound_sets_fields() {
         let adapter = TelegramAdapter::new("tg_main");
-        let msg = adapter.to_inbound(123, 456, "hello");
+        let msg = adapter.to_inbound(123, 456, "hello", Some(789));
         assert_eq!(msg.channel_type, "telegram");
         assert_eq!(msg.connector_id, "tg_main");
         assert_eq!(msg.conversation_scope, "chat:123");
@@ -308,15 +311,17 @@ mod tests {
         assert_eq!(msg.text, "hello");
         assert!(!msg.is_mention);
         assert!(msg.thread_id.is_none());
+        assert_eq!(msg.message_id, Some("789".to_string()));
     }
 
     #[test]
     fn adapter_to_inbound_new_fields_defaults() {
         let adapter = TelegramAdapter::new("test");
-        let msg = adapter.to_inbound(1, 2, "test");
+        let msg = adapter.to_inbound(1, 2, "test", None);
         assert!(!msg.is_mention);
         assert_eq!(msg.mention_target, None);
         assert_eq!(msg.thread_id, None);
+        assert_eq!(msg.message_id, None);
     }
 
     #[test]
@@ -329,6 +334,8 @@ mod tests {
             conversation_scope: "chat:123".into(),
             text: "hello world".into(),
             at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[telegram:chat:123] hello world");
@@ -368,7 +375,7 @@ mod tests {
     #[test]
     fn adapter_to_inbound_negative_chat_id() {
         let adapter = TelegramAdapter::new("tg");
-        let msg = adapter.to_inbound(-100123, 456, "group msg");
+        let msg = adapter.to_inbound(-100123, 456, "group msg", Some(1));
         assert_eq!(msg.conversation_scope, "chat:-100123");
     }
 }

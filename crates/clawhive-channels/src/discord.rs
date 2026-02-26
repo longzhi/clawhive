@@ -359,6 +359,8 @@ mod tests {
             conversation_scope: "dm:789".into(),
             text: "reply text".into(),
             at: Utc::now(),
+            reply_to: None,
+            attachments: vec![],
         };
         let rendered = adapter.render_outbound(&outbound);
         assert_eq!(rendered, "[discord:dm:789] reply text");
