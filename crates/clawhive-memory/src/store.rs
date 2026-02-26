@@ -2,7 +2,7 @@ use crate::migrations::run_migrations;
 use crate::models::{Concept, ConceptStatus, ConceptType, Episode, Link, LinkRelation};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, TimeDelta, Utc};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -461,6 +461,101 @@ impl MemoryStore {
             let affected = conn.execute(
                 "DELETE FROM episodes WHERE ts < ?1 AND importance < 0.3",
                 params![cutoff],
+            )?;
+            Ok::<usize, anyhow::Error>(affected)
+        })
+        .await?
+    }
+
+    // ============================================================
+    // Embedding Cache
+    // ============================================================
+
+    /// Get cached embedding by hash.
+    pub async fn get_embedding_cache(
+        &self,
+        provider: &str,
+        model: &str,
+        provider_key: &str,
+        hash: &str,
+    ) -> Result<Option<Vec<f32>>> {
+        let db = Arc::clone(&self.db);
+        let provider = provider.to_string();
+        let model = model.to_string();
+        let provider_key = provider_key.to_string();
+        let hash = hash.to_string();
+
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt = conn.prepare_cached(
+                "SELECT embedding FROM embedding_cache 
+                 WHERE provider = ?1 AND model = ?2 AND provider_key = ?3 AND hash = ?4",
+            )?;
+            let embedding: Option<String> = stmt
+                .query_row(params![provider, model, provider_key, hash], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+
+            match embedding {
+                Some(json) => {
+                    let vec: Vec<f32> = serde_json::from_str(&json)?;
+                    Ok(Some(vec))
+                }
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    /// Store embedding in cache.
+    pub async fn set_embedding_cache(
+        &self,
+        provider: &str,
+        model: &str,
+        provider_key: &str,
+        hash: &str,
+        embedding: &[f32],
+        dims: usize,
+    ) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let provider = provider.to_string();
+        let model = model.to_string();
+        let provider_key = provider_key.to_string();
+        let hash = hash.to_string();
+        let embedding_json = serde_json::to_string(embedding)?;
+        let now = Utc::now().timestamp();
+
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO embedding_cache 
+                 (provider, model, provider_key, hash, embedding, dims, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![provider, model, provider_key, hash, embedding_json, dims as i64, now],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?
+    }
+
+    /// Clear all cached embeddings for a provider/model.
+    pub async fn clear_embedding_cache(&self, provider: &str, model: &str) -> Result<usize> {
+        let db = Arc::clone(&self.db);
+        let provider = provider.to_string();
+        let model = model.to_string();
+
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let affected = conn.execute(
+                "DELETE FROM embedding_cache WHERE provider = ?1 AND model = ?2",
+                params![provider, model],
             )?;
             Ok::<usize, anyhow::Error>(affected)
         })

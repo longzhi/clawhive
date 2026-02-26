@@ -214,7 +214,11 @@ fn compute_text_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
-    hex::encode(&result[..16]) // Use first 16 bytes (32 hex chars)
+    // Convert first 16 bytes to hex string
+    result[..16]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Cached embedding provider that stores results in SQLite.
