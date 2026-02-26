@@ -10,7 +10,6 @@ telegram = ["dep:teloxide", "dep:log"]
 discord = ["dep:serenity"]
 slack = ["dep:slack-morphism"]
 imessage = []
-whatsapp = ["dep:reqwest"]
 
 [dependencies]
 anyhow.workspace = true
@@ -28,4 +27,3 @@ teloxide = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 serenity = { workspace = true, optional = true }
 slack-morphism = { version = "2.18", default-features = false, features = ["hyper"], optional = true }
-reqwest = { workspace = true, optional = true, features = ["json"] }

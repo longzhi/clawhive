@@ -540,7 +540,6 @@ dependencies = [
  "clawhive-gateway",
  "clawhive-schema",
  "log",
- "reqwest 0.12.28",
  "serde",
  "serenity",
  "slack-morphism",
