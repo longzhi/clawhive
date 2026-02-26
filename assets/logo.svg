@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="honeyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F59E0B"/>
+      <stop offset="100%" style="stop-color:#D97706"/>
+    </linearGradient>
+    <linearGradient id="clawGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#374151"/>
+      <stop offset="100%" style="stop-color:#1F2937"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="#1F2937"/>
+  
+  <!-- Hexagon honeycomb pattern -->
+  <g fill="url(#honeyGrad)" opacity="0.9">
+    <!-- Center hexagon -->
+    <polygon points="100,60 130,77.5 130,112.5 100,130 70,112.5 70,77.5" stroke="#F59E0B" stroke-width="2"/>
+    <!-- Top hexagon -->
+    <polygon points="100,15 125,30 125,60 100,75 75,60 75,30" stroke="#F59E0B" stroke-width="1.5" fill-opacity="0.6"/>
+    <!-- Top right -->
+    <polygon points="145,37.5 170,52.5 170,82.5 145,97.5 120,82.5 120,52.5" stroke="#F59E0B" stroke-width="1.5" fill-opacity="0.5"/>
+    <!-- Top left -->
+    <polygon points="55,37.5 80,52.5 80,82.5 55,97.5 30,82.5 30,52.5" stroke="#F59E0B" stroke-width="1.5" fill-opacity="0.5"/>
+    <!-- Bottom right -->
+    <polygon points="145,102.5 170,117.5 170,147.5 145,162.5 120,147.5 120,117.5" stroke="#F59E0B" stroke-width="1.5" fill-opacity="0.5"/>
+    <!-- Bottom left -->
+    <polygon points="55,102.5 80,117.5 80,147.5 55,162.5 30,147.5 30,117.5" stroke="#F59E0B" stroke-width="1.5" fill-opacity="0.5"/>
+    <!-- Bottom -->
+    <polygon points="100,125 125,140 125,170 100,185 75,170 75,140" stroke="#F59E0B" stroke-width="1.5" fill-opacity="0.6"/>
+  </g>
+  
+  <!-- Claw mark in center -->
+  <g fill="url(#clawGrad)">
+    <!-- Three claw slashes -->
+    <path d="M85,75 L80,115 Q78,120 82,118 L92,85 Q94,78 88,76 Z" fill="#1F2937"/>
+    <path d="M98,70 L100,120 Q100,126 104,120 L106,70 Q106,64 102,64 Z" fill="#1F2937"/>
+    <path d="M115,75 L120,115 Q122,120 118,118 L108,85 Q106,78 112,76 Z" fill="#1F2937"/>
+  </g>
+  
+  <!-- Subtle glow on claw -->
+  <g opacity="0.3">
+    <path d="M85,75 L80,115 Q78,120 82,118 L92,85 Q94,78 88,76 Z" fill="#F59E0B"/>
+    <path d="M98,70 L100,120 Q100,126 104,120 L106,70 Q106,64 102,64 Z" fill="#F59E0B"/>
+    <path d="M115,75 L120,115 Q122,120 118,118 L108,85 Q106,78 112,76 Z" fill="#F59E0B"/>
+  </g>
+</svg>

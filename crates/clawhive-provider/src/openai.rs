@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures_core::Stream;
 use clawhive_auth::AuthProfile;
+use futures_core::Stream;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;

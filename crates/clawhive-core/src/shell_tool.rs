@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use clawhive_provider::ToolDef;
 use corral_core::{
     start_broker, BrokerConfig, Permissions, PolicyEngine, Sandbox, SandboxConfig, ServiceHandler,
     ServicePermission,
 };
-use clawhive_provider::ToolDef;
 use tokio::sync::OnceCell;
 
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};

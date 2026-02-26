@@ -7,8 +7,8 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use futures_core::Stream;
 use clawhive_bus::Topic;
+use futures_core::Stream;
 use serde::Serialize;
 
 use crate::state::AppState;

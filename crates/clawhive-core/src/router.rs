@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use futures_core::Stream;
 use clawhive_provider::{LlmMessage, LlmRequest, LlmResponse, ProviderRegistry, StreamChunk};
+use futures_core::Stream;
 use tokio::time;
 
 const MAX_RETRIES: usize = 2;

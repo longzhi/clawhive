@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use console::{style, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use clawhive_auth::oauth::{
     extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow,
     validate_setup_token, OpenAiOAuthConfig,
 };
 use clawhive_auth::{AuthProfile, TokenManager};
+use console::{style, Term};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 
 use crate::setup_scan::{scan_config, ConfigState};
 use crate::setup_ui::{print_done, print_logo, render_dashboard, ARROW, CRAB};

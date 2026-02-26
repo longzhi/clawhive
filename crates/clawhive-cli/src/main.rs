@@ -15,7 +15,6 @@ mod setup;
 mod setup_scan;
 mod setup_ui;
 
-use commands::auth::{handle_auth_command, AuthCommands};
 use clawhive_auth::{AuthProfile, TokenManager};
 use clawhive_bus::EventBus;
 use clawhive_channels::discord::DiscordBot;
@@ -36,6 +35,7 @@ use clawhive_provider::{
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, ScheduleType};
 use clawhive_schema::InboundMessage;
+use commands::auth::{handle_auth_command, AuthCommands};
 use setup::run_setup;
 
 #[derive(Parser)]

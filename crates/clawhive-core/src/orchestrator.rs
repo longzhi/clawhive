@@ -3,7 +3,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use futures_core::Stream;
 use clawhive_bus::BusPublisher;
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::file_store::MemoryFileStore;
@@ -13,6 +12,7 @@ use clawhive_memory::{SessionReader, SessionWriter};
 use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use clawhive_runtime::TaskExecutor;
 use clawhive_schema::*;
+use futures_core::Stream;
 
 use super::config::FullAgentConfig;
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};

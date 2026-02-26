@@ -2,13 +2,13 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
+use clawhive_bus::{EventBus, Topic};
+use clawhive_schema::BusMessage;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use clawhive_bus::{EventBus, Topic};
-use clawhive_schema::BusMessage;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},

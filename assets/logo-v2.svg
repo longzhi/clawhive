@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="clawGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fbbf24"/>
+    </linearGradient>
+    <!-- Glow filter -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="innerShadow">
+      <feOffset dx="0" dy="2"/>
+      <feGaussianBlur stdDeviation="3"/>
+      <feComposite operator="out" in="SourceGraphic"/>
+      <feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.4 0"/>
+      <feBlend in="SourceGraphic" mode="normal"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <circle cx="256" cy="256" r="250" fill="url(#bgGrad)"/>
+  <circle cx="256" cy="256" r="250" fill="none" stroke="#f59e0b" stroke-width="3" opacity="0.3"/>
+  
+  <!-- Honeycomb hexagons - outer ring -->
+  <g fill="none" stroke="url(#goldGrad)" stroke-width="2.5" opacity="0.4">
+    <polygon points="256,80 296,103 296,149 256,172 216,149 216,103"/>
+    <polygon points="326,126 366,149 366,195 326,218 286,195 286,149"/>
+    <polygon points="186,126 226,149 226,195 186,218 146,195 146,149"/>
+    <polygon points="326,264 366,287 366,333 326,356 286,333 286,287"/>
+    <polygon points="186,264 226,287 226,333 186,356 146,333 146,287"/>
+    <polygon points="256,310 296,333 296,379 256,402 216,379 216,333"/>
+  </g>
+  
+  <!-- Center hexagon - main -->
+  <polygon points="256,150 316,184.6 316,253.8 256,288.4 196,253.8 196,184.6" 
+           fill="url(#goldGrad)" opacity="0.15"/>
+  <polygon points="256,150 316,184.6 316,253.8 256,288.4 196,253.8 196,184.6" 
+           fill="none" stroke="url(#goldGrad)" stroke-width="4"/>
+  
+  <!-- Three claw marks -->
+  <g filter="url(#glow)">
+    <!-- Left claw -->
+    <path d="M220,175 
+             Q215,178 218,185
+             L228,250
+             Q230,260 236,258
+             L240,252
+             Q244,248 242,240
+             L234,185
+             Q232,175 225,175
+             Z" 
+          fill="url(#clawGrad)"/>
+    
+    <!-- Center claw -->
+    <path d="M250,165
+             Q245,165 246,175
+             L252,255
+             Q254,268 260,268
+             Q266,268 268,255
+             L274,175
+             Q275,165 270,165
+             Z"
+          fill="url(#clawGrad)"/>
+    
+    <!-- Right claw -->
+    <path d="M300,175
+             Q295,175 293,185
+             L285,240
+             Q283,248 287,252
+             L291,258
+             Q297,260 299,250
+             L309,185
+             Q312,178 307,175
+             Z"
+          fill="url(#clawGrad)"/>
+  </g>
+  
+  <!-- Subtle highlight on top -->
+  <ellipse cx="256" cy="120" rx="80" ry="20" fill="white" opacity="0.05"/>
+</svg>
