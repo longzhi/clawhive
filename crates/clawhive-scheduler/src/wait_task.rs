@@ -3,8 +3,6 @@
 //! Unlike full LLM-driven agents, WaitTask runs simple command-based checks
 //! without LLM involvement, notifying the session only when complete.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -12,11 +10,12 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 
 use clawhive_bus::EventBus;
 use clawhive_schema::BusMessage;
+
+use crate::SqliteStore;
 
 /// A lightweight wait task that polls a command until a condition is met
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,46 +154,29 @@ impl WaitTask {
     }
 }
 
-/// Manages wait tasks with persistence and background execution
+/// Manages wait tasks with SQLite persistence and background execution
 pub struct WaitTaskManager {
-    tasks: Arc<RwLock<HashMap<String, WaitTask>>>,
+    store: Arc<SqliteStore>,
     bus: Arc<EventBus>,
-    data_path: PathBuf,
 }
 
 impl WaitTaskManager {
-    /// Create a new WaitTaskManager
-    pub fn new(data_dir: &Path, bus: Arc<EventBus>) -> Result<Self> {
-        let data_path = data_dir.join("wait_tasks.json");
-        let tasks = if data_path.exists() {
-            let content = std::fs::read_to_string(&data_path)?;
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            HashMap::new()
-        };
-
-        Ok(Self {
-            tasks: Arc::new(RwLock::new(tasks)),
-            bus,
-            data_path,
-        })
+    /// Create a new WaitTaskManager with SQLite storage
+    pub fn new(store: Arc<SqliteStore>, bus: Arc<EventBus>) -> Self {
+        Self { store, bus }
     }
 
     /// Add a new wait task
     pub async fn add(&self, task: WaitTask) -> Result<()> {
-        let mut tasks = self.tasks.write().await;
-        tasks.insert(task.id.clone(), task);
-        self.persist(&tasks).await?;
-        Ok(())
+        self.store.save_wait_task(&task).await
     }
 
     /// Cancel a wait task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
-        let mut tasks = self.tasks.write().await;
-        if let Some(task) = tasks.get_mut(task_id) {
+        if let Some(mut task) = self.store.get_wait_task(task_id).await? {
             if task.status == WaitTaskStatus::Pending || task.status == WaitTaskStatus::Running {
                 task.status = WaitTaskStatus::Cancelled;
-                self.persist(&tasks).await?;
+                self.store.save_wait_task(&task).await?;
                 return Ok(true);
             }
         }
@@ -202,29 +184,13 @@ impl WaitTaskManager {
     }
 
     /// Get task by ID
-    pub async fn get(&self, task_id: &str) -> Option<WaitTask> {
-        self.tasks.read().await.get(task_id).cloned()
+    pub async fn get(&self, task_id: &str) -> Result<Option<WaitTask>> {
+        self.store.get_wait_task(task_id).await
     }
 
     /// List all tasks for a session
-    pub async fn list_by_session(&self, session_key: &str) -> Vec<WaitTask> {
-        self.tasks
-            .read()
-            .await
-            .values()
-            .filter(|t| t.session_key == session_key)
-            .cloned()
-            .collect()
-    }
-
-    /// Persist tasks to disk
-    async fn persist(&self, tasks: &HashMap<String, WaitTask>) -> Result<()> {
-        if let Some(parent) = self.data_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let json = serde_json::to_string_pretty(tasks)?;
-        tokio::fs::write(&self.data_path, json).await?;
-        Ok(())
+    pub async fn list_by_session(&self, session_key: &str) -> Result<Vec<WaitTask>> {
+        self.store.list_wait_tasks_by_session(session_key).await
     }
 
     /// Run the task manager loop
@@ -235,29 +201,34 @@ impl WaitTaskManager {
             ticker.tick().await;
             let now = Utc::now().timestamp_millis();
 
-            // Get pending tasks that need checking
-            let tasks_to_check: Vec<WaitTask> = {
-                let tasks = self.tasks.read().await;
-                tasks
-                    .values()
-                    .filter(|t| {
-                        matches!(t.status, WaitTaskStatus::Pending | WaitTaskStatus::Running)
-                    })
-                    .filter(|t| {
-                        t.last_check_at_ms
-                            .map(|last| now - last >= t.poll_interval_ms as i64)
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect()
+            // Load pending tasks from SQLite
+            let tasks = match self.store.load_pending_wait_tasks().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load pending wait tasks");
+                    continue;
+                }
             };
+
+            // Filter tasks that need checking
+            let tasks_to_check: Vec<WaitTask> = tasks
+                .into_iter()
+                .filter(|t| {
+                    t.last_check_at_ms
+                        .map(|last| now - last >= t.poll_interval_ms as i64)
+                        .unwrap_or(true)
+                })
+                .collect();
 
             for task in tasks_to_check {
                 self.process_task(&task, now).await;
             }
 
-            // Cleanup completed tasks older than 24 hours
-            self.cleanup_old_tasks(now).await;
+            // Cleanup old completed tasks (older than 24 hours)
+            let cutoff = now - 24 * 60 * 60 * 1000;
+            if let Err(e) = self.store.cleanup_old_wait_tasks(cutoff).await {
+                tracing::warn!(error = %e, "Failed to cleanup old wait tasks");
+            }
         }
     }
 
@@ -274,15 +245,14 @@ impl WaitTaskManager {
         // Execute check
         match task.execute_check().await {
             Ok((exit_code, output)) => {
-                // Update last check
-                {
-                    let mut tasks = self.tasks.write().await;
-                    if let Some(t) = tasks.get_mut(&task_id) {
-                        t.last_check_at_ms = Some(now);
-                        t.last_output = Some(output.clone());
-                        t.status = WaitTaskStatus::Running;
-                    }
-                    let _ = self.persist(&tasks).await;
+                // Update last check in database
+                let mut updated_task = task.clone();
+                updated_task.last_check_at_ms = Some(now);
+                updated_task.last_output = Some(output.clone());
+                updated_task.status = WaitTaskStatus::Running;
+
+                if let Err(e) = self.store.save_wait_task(&updated_task).await {
+                    tracing::warn!(task_id = %task_id, error = %e, "Failed to update task");
                 }
 
                 // Evaluate conditions
@@ -303,12 +273,10 @@ impl WaitTaskManager {
             Err(e) => {
                 tracing::warn!(task_id = %task_id, error = %e, "Wait task check failed");
                 // Update last check time but don't fail - transient errors are ok
-                let mut tasks = self.tasks.write().await;
-                if let Some(t) = tasks.get_mut(&task_id) {
-                    t.last_check_at_ms = Some(now);
-                    t.error = Some(e.to_string());
-                }
-                let _ = self.persist(&tasks).await;
+                let mut updated_task = task.clone();
+                updated_task.last_check_at_ms = Some(now);
+                updated_task.error = Some(e.to_string());
+                let _ = self.store.save_wait_task(&updated_task).await;
             }
         }
     }
@@ -320,70 +288,45 @@ impl WaitTaskManager {
         output: Option<String>,
         error: Option<String>,
     ) {
-        let task = {
-            let mut tasks = self.tasks.write().await;
-            if let Some(t) = tasks.get_mut(task_id) {
+        // Load and update task
+        let task = match self.store.get_wait_task(task_id).await {
+            Ok(Some(mut t)) => {
                 t.status = status.clone();
                 t.last_output = output;
                 t.error = error;
-                let cloned = t.clone();
-                let _ = self.persist(&tasks).await;
-                Some(cloned)
-            } else {
-                None
+                if let Err(e) = self.store.save_wait_task(&t).await {
+                    tracing::error!(task_id = %task_id, error = %e, "Failed to save completed task");
+                }
+                t
             }
+            _ => return,
         };
 
-        if let Some(task) = task {
-            let message = match status {
-                WaitTaskStatus::Success => task
-                    .on_success_message
-                    .unwrap_or_else(|| format!("✅ Task '{}' completed successfully", task.id)),
-                WaitTaskStatus::Failed => task
-                    .on_failure_message
-                    .unwrap_or_else(|| format!("❌ Task '{}' failed", task.id)),
-                WaitTaskStatus::Timeout => task
-                    .on_timeout_message
-                    .unwrap_or_else(|| format!("⏱️ Task '{}' timed out", task.id)),
-                _ => return,
-            };
+        // Build notification message
+        let message = match status {
+            WaitTaskStatus::Success => task
+                .on_success_message
+                .unwrap_or_else(|| format!("✅ Task '{}' completed successfully", task.id)),
+            WaitTaskStatus::Failed => task
+                .on_failure_message
+                .unwrap_or_else(|| format!("❌ Task '{}' failed", task.id)),
+            WaitTaskStatus::Timeout => task
+                .on_timeout_message
+                .unwrap_or_else(|| format!("⏱️ Task '{}' timed out", task.id)),
+            _ => return,
+        };
 
-            // Notify via event bus
-            let event = BusMessage::WaitTaskCompleted {
-                task_id: task.id,
-                session_key: task.session_key,
-                status: format!("{:?}", status).to_lowercase(),
-                message,
-                output: task.last_output,
-            };
+        // Notify via event bus
+        let event = BusMessage::WaitTaskCompleted {
+            task_id: task.id,
+            session_key: task.session_key,
+            status: format!("{:?}", status).to_lowercase(),
+            message,
+            output: task.last_output,
+        };
 
-            if let Err(e) = self.bus.publish(event).await {
-                tracing::error!(error = %e, "Failed to publish wait task completion event");
-            }
-        }
-    }
-
-    async fn cleanup_old_tasks(&self, now: i64) {
-        const RETENTION_MS: i64 = 24 * 60 * 60 * 1000; // 24 hours
-
-        let mut tasks = self.tasks.write().await;
-        let ids_to_remove: Vec<String> = tasks
-            .iter()
-            .filter(|(_, t)| {
-                !matches!(
-                    t.status,
-                    WaitTaskStatus::Pending | WaitTaskStatus::Running
-                ) && (now - t.created_at_ms > RETENTION_MS)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        for id in ids_to_remove {
-            tasks.remove(&id);
-        }
-
-        if !tasks.is_empty() {
-            let _ = self.persist(&tasks).await;
+        if let Err(e) = self.bus.publish(event).await {
+            tracing::error!(error = %e, "Failed to publish wait task completion event");
         }
     }
 }
@@ -394,8 +337,16 @@ mod tests {
 
     #[test]
     fn test_condition_contains() {
-        assert!(WaitTask::evaluate_condition("contains:success", 0, "Build success!"));
-        assert!(!WaitTask::evaluate_condition("contains:success", 0, "Build failed"));
+        assert!(WaitTask::evaluate_condition(
+            "contains:success",
+            0,
+            "Build success!"
+        ));
+        assert!(!WaitTask::evaluate_condition(
+            "contains:success",
+            0,
+            "Build failed"
+        ));
     }
 
     #[test]

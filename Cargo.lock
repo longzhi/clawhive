@@ -665,6 +665,7 @@ dependencies = [
  "clawhive-schema",
  "cron",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

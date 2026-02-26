@@ -3,6 +3,7 @@ pub mod compute;
 pub mod config;
 pub mod manager;
 pub mod persistence;
+pub mod sqlite_store;
 pub mod state;
 pub mod wait_task;
 
@@ -11,5 +12,6 @@ pub use compute::*;
 pub use config::*;
 pub use manager::*;
 pub use persistence::*;
+pub use sqlite_store::*;
 pub use state::*;
 pub use wait_task::*;
