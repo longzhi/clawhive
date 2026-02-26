@@ -10,6 +10,7 @@ telegram = ["dep:teloxide", "dep:log"]
 discord = ["dep:serenity"]
 slack = ["dep:slack-morphism"]
 imessage = []
+whatsapp = ["dep:whatsapp-rust", "dep:whatsapp-rust-tokio-transport", "dep:whatsapp-rust-ureq-http-client", "dep:wacore", "dep:whatsapp-rust-sqlite-storage", "dep:waproto"]
 
 [dependencies]
 anyhow.workspace = true
@@ -27,3 +28,9 @@ teloxide = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 serenity = { workspace = true, optional = true }
 slack-morphism = { version = "2.18", default-features = false, features = ["hyper"], optional = true }
+whatsapp-rust = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+whatsapp-rust-tokio-transport = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+whatsapp-rust-ureq-http-client = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+wacore = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+whatsapp-rust-sqlite-storage = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+waproto = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
