@@ -1,6 +1,8 @@
 pub mod anthropic;
+pub mod gemini;
 pub mod openai;
 pub mod openai_chatgpt;
+pub mod openai_compat;
 pub mod types;
 
 use std::collections::HashMap;
@@ -13,8 +15,10 @@ use futures_core::Stream;
 use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
+pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use openai_chatgpt::OpenAiChatGptProvider;
+pub use openai_compat::{custom, deepseek, fireworks, groq, ollama, ollama_with_base, openrouter, together};
 pub use types::StreamChunk;
 pub use types::*;
 
