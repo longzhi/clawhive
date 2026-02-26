@@ -289,6 +289,70 @@ pub fn spawn_scheduled_task_listener(
     })
 }
 
+/// Spawns a listener that handles WaitTask completion events.
+/// When a wait task completes, the result is delivered to the originating session.
+pub fn spawn_wait_task_listener(
+    _gateway: Arc<Gateway>,
+    bus: Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = bus.subscribe(Topic::WaitTaskCompleted).await;
+        while let Some(msg) = rx.recv().await {
+            let BusMessage::WaitTaskCompleted {
+                task_id,
+                session_key,
+                status,
+                message,
+                output,
+            } = msg
+            else {
+                continue;
+            };
+
+            tracing::info!(
+                task_id = %task_id,
+                session_key = %session_key,
+                status = %status,
+                "Wait task completed"
+            );
+
+            // Parse session_key to extract channel info
+            // Session keys follow format: "channel_type:connector_id:conversation_scope"
+            // e.g., "telegram:tg_main:chat:12345"
+            let parts: Vec<&str> = session_key.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                tracing::warn!(
+                    session_key = %session_key,
+                    "Invalid session key format for wait task delivery"
+                );
+                continue;
+            }
+
+            let channel_type = parts[0].to_string();
+            let connector_id = parts[1].to_string();
+            let conversation_scope = parts[2].to_string();
+
+            // Format the delivery message
+            let delivery_text = if let Some(out) = output {
+                let output_preview: String = out.chars().take(500).collect();
+                format!("{}\n\n```\n{}\n```", message, output_preview)
+            } else {
+                message
+            };
+
+            // Deliver via DeliverAnnounce
+            let _ = bus
+                .publish(BusMessage::DeliverAnnounce {
+                    channel_type,
+                    connector_id,
+                    conversation_scope,
+                    text: delivery_text,
+                })
+                .await;
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

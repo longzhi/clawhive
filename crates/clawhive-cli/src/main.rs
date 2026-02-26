@@ -22,7 +22,7 @@ use clawhive_channels::telegram::TelegramBot;
 use clawhive_channels::ChannelBot;
 use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
 use clawhive_core::*;
-use clawhive_gateway::{spawn_scheduled_task_listener, Gateway, RateLimitConfig, RateLimiter};
+use clawhive_gateway::{spawn_scheduled_task_listener, spawn_wait_task_listener, Gateway, RateLimitConfig, RateLimiter};
 use clawhive_memory::embedding::{
     EmbeddingProvider, OpenAiEmbeddingProvider, StubEmbeddingProvider,
 };
@@ -1162,6 +1162,10 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     let _schedule_listener_handle =
         spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Scheduled task gateway listener started");
+
+    let _wait_task_listener_handle =
+        spawn_wait_task_listener(gateway.clone(), Arc::clone(&bus));
+    tracing::info!("Wait task gateway listener started");
 
     // Spawn heartbeat tasks for agents with heartbeat enabled
     for agent_config in &config.agents {
