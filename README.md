@@ -185,20 +185,23 @@ skills/                         # Skill definitions (SKILL.md with frontmatter)
 
 Download prebuilt binaries from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
 
-### macOS (Intel)
+### macOS (Apple Silicon)
 
 ```bash
-curl -LO https://github.com/longzhi/clawhive/releases/download/vX.Y.Z/clawhive-vX.Y.Z-x86_64-apple-darwin.tar.gz
-tar -xzf clawhive-vX.Y.Z-x86_64-apple-darwin.tar.gz
+# Auto-detect latest version
+VERSION=$(curl -s https://api.github.com/repos/longzhi/clawhive/releases/latest | grep tag_name | cut -d '"' -f 4)
+curl -LO "https://github.com/longzhi/clawhive/releases/download/${VERSION}/clawhive-${VERSION}-aarch64-apple-darwin.tar.gz"
+tar -xzf clawhive-${VERSION}-aarch64-apple-darwin.tar.gz
 chmod +x clawhive
 sudo mv clawhive /usr/local/bin/
 ```
 
-### macOS (Apple Silicon)
+### macOS (Intel)
 
 ```bash
-curl -LO https://github.com/longzhi/clawhive/releases/download/vX.Y.Z/clawhive-vX.Y.Z-aarch64-apple-darwin.tar.gz
-tar -xzf clawhive-vX.Y.Z-aarch64-apple-darwin.tar.gz
+VERSION=$(curl -s https://api.github.com/repos/longzhi/clawhive/releases/latest | grep tag_name | cut -d '"' -f 4)
+curl -LO "https://github.com/longzhi/clawhive/releases/download/${VERSION}/clawhive-${VERSION}-x86_64-apple-darwin.tar.gz"
+tar -xzf clawhive-${VERSION}-x86_64-apple-darwin.tar.gz
 chmod +x clawhive
 sudo mv clawhive /usr/local/bin/
 ```
