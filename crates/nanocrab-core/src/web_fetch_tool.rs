@@ -347,7 +347,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_scheme() {
         let tool = WebFetchTool::new();
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"url": "ftp://example.com"}), &ctx)
             .await
@@ -362,7 +362,7 @@ mod tests {
         let perms = corral_core::Permissions::builder()
             .network_allow(["api.example.com:443"])
             .build();
-        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+        let ctx = ToolContext::external(perms);
 
         let result = tool
             .execute(serde_json::json!({"url": "https://evil.com/steal"}), &ctx)

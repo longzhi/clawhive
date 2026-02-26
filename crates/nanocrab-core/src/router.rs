@@ -181,6 +181,7 @@ fn classify_failover_reason(err_str: &str) -> Option<FailoverReason> {
 }
 
 /// Check if an error should trigger failover
+#[allow(dead_code)]
 fn is_failover_error(err_str: &str) -> bool {
     classify_failover_reason(err_str).is_some()
 }

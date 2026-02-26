@@ -151,7 +151,7 @@ mod tests {
     #[tokio::test]
     async fn delegate_to_valid_agent() {
         let tool = make_sub_agent_tool();
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({
@@ -169,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn delegate_to_unknown_agent() {
         let tool = make_sub_agent_tool();
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({
@@ -187,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn missing_required_field() {
         let tool = make_sub_agent_tool();
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(
                 serde_json::json!({

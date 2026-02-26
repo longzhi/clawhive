@@ -489,7 +489,7 @@ mod tests {
         let perms = corral_core::Permissions::builder()
             .fs_read([format!("{}/**/*.md", tmp.path().display())])
             .build();
-        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+        let ctx = ToolContext::external(perms);
 
         let result = tool
             .execute(serde_json::json!({"path": "secret.txt"}), &ctx)
@@ -509,7 +509,7 @@ mod tests {
         let perms = corral_core::Permissions::builder()
             .fs_read([format!("{}/**", tmp.path().display())])
             .build();
-        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+        let ctx = ToolContext::external(perms);
 
         let result = tool
             .execute(serde_json::json!({"path": "readme.md"}), &ctx)
@@ -573,7 +573,7 @@ mod tests {
         let perms = corral_core::Permissions::builder()
             .fs_write([format!("{}/**/*.log", tmp.path().display())])
             .build();
-        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+        let ctx = ToolContext::external(perms);
 
         let result = tool
             .execute(
@@ -647,7 +647,7 @@ mod tests {
         let perms = corral_core::Permissions::builder()
             .fs_read([format!("{}/**", tmp.path().display())])
             .build();
-        let ctx = ToolContext::new(corral_core::PolicyEngine::new(perms));
+        let ctx = ToolContext::external(perms);
 
         let result = tool
             .execute(

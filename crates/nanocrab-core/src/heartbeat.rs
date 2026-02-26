@@ -72,6 +72,7 @@ pub fn should_skip_heartbeat(heartbeat_content: &str) -> bool {
 /// Heartbeat manager that runs periodic heartbeats for agents.
 pub struct HeartbeatManager {
     config: HeartbeatConfig,
+    #[allow(dead_code)]
     running: Arc<RwLock<bool>>,
 }
 

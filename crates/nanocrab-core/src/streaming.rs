@@ -134,7 +134,7 @@ impl BlockChunker {
         let mut text = std::mem::take(&mut self.buffer);
         if self.in_code_fence {
             if let Some(marker) = &self.code_fence_marker {
-                text.push_str("\n");
+                text.push('\n');
                 text.push_str(marker);
             }
         }
@@ -169,7 +169,7 @@ impl BlockChunker {
         if self.in_code_fence && !self.buffer.is_empty() {
             // Close the fence in this chunk
             if let Some(marker) = &self.code_fence_marker {
-                chunk_text.push_str("\n");
+                chunk_text.push('\n');
                 chunk_text.push_str(marker);
             }
             // Reopen in the remaining buffer
@@ -330,7 +330,7 @@ mod tests {
         assert!(chunks.is_empty(), "Expected no chunks for short text");
 
         // Build up to min_chars but no break point
-        let chunks = chunker.push(" world, this is more text");
+        let _chunks = chunker.push(" world, this is more text");
         // May or may not emit depending on break points
         // Just verify we can push without panic
 

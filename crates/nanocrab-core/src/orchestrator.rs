@@ -47,9 +47,11 @@ pub struct Orchestrator {
     hook_registry: super::hooks::HookRegistry,
     skill_registry: SkillRegistry,
     skills_root: std::path::PathBuf,
+    #[allow(dead_code)]
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     runtime: Arc<dyn TaskExecutor>,
+    #[allow(dead_code)]
     workspace_root: std::path::PathBuf,
     /// Per-agent workspace state, keyed by agent_id
     agent_workspaces: HashMap<String, AgentWorkspaceState>,
@@ -799,6 +801,7 @@ impl Orchestrator {
     /// (including all intermediate assistant/tool_result turns). Callers that
     /// need the full conversation context (e.g. `handle_inbound_stream`)
     /// should use the returned messages instead of the original input.
+    #[allow(clippy::too_many_arguments)]
     async fn tool_use_loop(
         &self,
         agent_id: &str,

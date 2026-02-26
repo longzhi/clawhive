@@ -1742,15 +1742,14 @@ fn install_skill_with_confirmation(
             .iter()
             .any(|f| f.severity == "high" || f.severity == "critical");
 
-        if high_risk {
-            if !dialoguer::Confirm::new()
+        if high_risk
+            && !dialoguer::Confirm::new()
                 .with_prompt("High-risk patterns detected. Confirm install anyway?")
                 .default(false)
                 .interact()?
-            {
-                println!("Installation cancelled due to risk findings.");
-                return Ok(());
-            }
+        {
+            println!("Installation cancelled due to risk findings.");
+            return Ok(());
         }
     }
 

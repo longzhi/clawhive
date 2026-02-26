@@ -192,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn memory_search_returns_results() {
         let (_tmp, tool, _) = setup();
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"query": "test query"}), &ctx)
             .await
@@ -204,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn memory_get_long_term() {
         let (tmp, _, tool) = setup();
-        let ctx = ToolContext::default_policy(tmp.path());
+        let ctx = ToolContext::builtin();
         let file_store = MemoryFileStore::new(tmp.path());
         file_store
             .write_long_term("# Long term memory")

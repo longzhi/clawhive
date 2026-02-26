@@ -112,6 +112,7 @@ impl ScheduleJobInput {
         let schedule = normalize_schedule_type(self.schedule);
 
         // "at" schedules should default to delete_after_run=true since they're one-shot
+        #[allow(clippy::unnecessary_lazy_evaluations)]
         let delete_after_run = self
             .delete_after_run
             .unwrap_or_else(|| matches!(schedule, ScheduleType::At { .. }));
@@ -397,7 +398,7 @@ mod tests {
         let (manager, _bus, _tmp) = setup();
         let tool = ScheduleTool::new(manager.clone());
         let ctx =
-            ToolContext::default_policy(std::path::Path::new("/tmp")).with_recent_messages(vec![
+            ToolContext::builtin().with_recent_messages(vec![
                 ConversationMessage {
                     role: "user".to_string(),
                     content: "remember milk".to_string(),
@@ -457,7 +458,7 @@ mod tests {
             .unwrap();
 
         let tool = ScheduleTool::new(manager);
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({ "action": "list" }), &ctx)
             .await
@@ -474,7 +475,7 @@ mod tests {
     async fn run_action_publishes_trigger_event() {
         let (manager, bus, _tmp) = setup();
         let tool = ScheduleTool::new(manager.clone());
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
 
         let _ = tool
             .execute(
@@ -516,7 +517,7 @@ mod tests {
     async fn remove_action_deletes_schedule() {
         let (manager, _bus, _tmp) = setup();
         let tool = ScheduleTool::new(manager.clone());
-        let ctx = ToolContext::default_policy(std::path::Path::new("/tmp"));
+        let ctx = ToolContext::builtin();
 
         let add_result = tool
             .execute(

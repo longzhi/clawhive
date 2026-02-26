@@ -33,10 +33,6 @@ pub fn estimate_message_tokens(msg: &LlmMessage) -> usize {
             nanocrab_provider::ContentBlock::ToolResult { content, .. } => {
                 total += estimate_tokens(content);
             }
-            _ => {
-                // Other block types (images, etc.) - estimate ~100 tokens
-                total += 100;
-            }
         }
     }
     total.max(10) // Minimum overhead per message
