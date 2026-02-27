@@ -1028,17 +1028,17 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
         ],
         ProviderId::OpenAi => vec![
             format!("{prefix}/gpt-5.3-codex"),
-            format!("{prefix}/o3"),
-            format!("{prefix}/o4-mini"),
-            format!("{prefix}/gpt-4.1"),
-            format!("{prefix}/gpt-4o"),
+            format!("{prefix}/gpt-5.2"),
+            format!("{prefix}/gpt-5.2-codex"),
+            format!("{prefix}/gpt-5.1-codex-max"),
+            format!("{prefix}/o3-pro"),
         ],
         ProviderId::AzureOpenAi => vec![
             format!("{prefix}/gpt-5.3-codex"),
-            format!("{prefix}/o3"),
-            format!("{prefix}/o4-mini"),
-            format!("{prefix}/gpt-4.1"),
-            format!("{prefix}/gpt-4o"),
+            format!("{prefix}/gpt-5.2"),
+            format!("{prefix}/gpt-5.2-codex"),
+            format!("{prefix}/gpt-5.1-codex-max"),
+            format!("{prefix}/o3-pro"),
         ],
         ProviderId::Gemini => vec![
             format!("{prefix}/gemini-2.5-pro"),
@@ -1059,9 +1059,10 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
             format!("{prefix}/mistral"),
         ],
         ProviderId::OpenRouter => vec![
-            format!("{prefix}/anthropic/claude-opus-4-6"),
             format!("{prefix}/openai/gpt-5.3-codex"),
+            format!("{prefix}/anthropic/claude-opus-4-6"),
             format!("{prefix}/google/gemini-2.5-pro"),
+            format!("{prefix}/openai/gpt-5.2"),
         ],
         ProviderId::Together => vec![
             format!("{prefix}/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
