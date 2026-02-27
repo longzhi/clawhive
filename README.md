@@ -187,7 +187,7 @@ skills/                         # Skill definitions (SKILL.md with frontmatter)
 curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | bash
 ```
 
-Auto-detects architecture (Apple Silicon / Intel), downloads latest release, installs to `/usr/local/bin`.
+Auto-detects OS/architecture, downloads latest release, installs to `~/.clawhive/bin` and adds to PATH.
 
 Or download manually from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
 

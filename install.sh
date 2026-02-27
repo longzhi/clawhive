@@ -2,14 +2,17 @@
 set -e
 
 REPO="longzhi/clawhive"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="$HOME/.clawhive/bin"
 
-# Detect architecture
+# Detect OS and architecture
+OS=$(uname -s)
 ARCH=$(uname -m)
-case "$ARCH" in
-    arm64|aarch64) TARGET="aarch64-apple-darwin" ;;
-    x86_64) TARGET="x86_64-apple-darwin" ;;
-    *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+case "$OS-$ARCH" in
+    Darwin-arm64|Darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
+    Darwin-x86_64)               TARGET="x86_64-apple-darwin" ;;
+    Linux-x86_64)                TARGET="x86_64-unknown-linux-gnu" ;;
+    Linux-aarch64)               TARGET="aarch64-unknown-linux-gnu" ;;
+    *) echo "Unsupported platform: $OS $ARCH"; exit 1 ;;
 esac
 
 # Get latest version
@@ -21,17 +24,50 @@ fi
 
 echo "Installing clawhive ${VERSION} for ${TARGET}..."
 
+# Create install directory
+mkdir -p "$INSTALL_DIR"
+
 # Download and extract
 TARBALL="clawhive-${VERSION}-${TARGET}.tar.gz"
 curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/${TARBALL}" -o "/tmp/${TARBALL}"
 tar -xzf "/tmp/${TARBALL}" -C /tmp
 
 # Install
-sudo mv /tmp/clawhive "${INSTALL_DIR}/clawhive"
-sudo chmod +x "${INSTALL_DIR}/clawhive"
+mv /tmp/clawhive "$INSTALL_DIR/clawhive"
+chmod +x "$INSTALL_DIR/clawhive"
 
 # Cleanup
 rm -f "/tmp/${TARBALL}"
 
-echo "✅ clawhive ${VERSION} installed to ${INSTALL_DIR}/clawhive"
+# Add to PATH if not already present
+add_to_path() {
+    local rc_file="$1"
+    if [ -f "$rc_file" ] && grep -q '\.clawhive/bin' "$rc_file" 2>/dev/null; then
+        return
+    fi
+    if [ -f "$rc_file" ] || [ "$rc_file" = "$HOME/.profile" ]; then
+        echo '' >> "$rc_file"
+        echo '# clawhive' >> "$rc_file"
+        echo 'export PATH="$HOME/.clawhive/bin:$PATH"' >> "$rc_file"
+        echo "Added to PATH in $rc_file"
+    fi
+}
+
+if ! echo "$PATH" | grep -q '\.clawhive/bin'; then
+    SHELL_NAME=$(basename "$SHELL")
+    case "$SHELL_NAME" in
+        zsh)  add_to_path "$HOME/.zshrc" ;;
+        bash)
+            if [ -f "$HOME/.bashrc" ]; then
+                add_to_path "$HOME/.bashrc"
+            else
+                add_to_path "$HOME/.profile"
+            fi
+            ;;
+        *)    add_to_path "$HOME/.profile" ;;
+    esac
+    export PATH="$INSTALL_DIR:$PATH"
+fi
+
+echo "clawhive ${VERSION} installed to ${INSTALL_DIR}/clawhive"
 clawhive --version 2>/dev/null || true
