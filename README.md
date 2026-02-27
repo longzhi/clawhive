@@ -229,11 +229,11 @@ clawhive stop
 
 # Dashboard mode (observability TUI)
 clawhive dashboard
-clawhive dashboard --port 3001
+clawhive dashboard --port 3000
 
 # Code mode (developer TUI)
 clawhive code
-clawhive code --port 3001
+clawhive code --port 3000
 
 # Agents / sessions
 clawhive agent list
@@ -279,11 +279,11 @@ cargo run -- stop
 
 # Dashboard mode (observability TUI)
 cargo run -- dashboard
-cargo run -- dashboard --port 3001
+cargo run -- dashboard --port 3000
 
 # Coding agent mode (attach local TUI channel to running gateway)
 cargo run -- code
-cargo run -- code --port 3001
+cargo run -- code --port 3000
 ```
 
 ## Developer Workflow

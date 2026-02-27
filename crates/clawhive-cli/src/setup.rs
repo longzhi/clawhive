@@ -92,7 +92,7 @@ impl ProviderId {
             Self::DeepSeek => "deepseek-chat",
             Self::Groq => "llama-3.3-70b-versatile",
             Self::Ollama => "llama3.2",
-            Self::OpenRouter => "anthropic/claude-sonnet-4-5",
+            Self::OpenRouter => "anthropic/claude-sonnet-4-6",
             Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
             Self::Fireworks => "accounts/fireworks/models/llama-v3p3-70b-instruct",
         }
@@ -1101,6 +1101,7 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
     match provider {
         ProviderId::Anthropic => vec![
             format!("{prefix}/claude-opus-4-6"),
+            format!("{prefix}/claude-sonnet-4-6"),
             format!("{prefix}/claude-sonnet-4-5"),
             format!("{prefix}/claude-haiku-4-5"),
         ],

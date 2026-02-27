@@ -64,7 +64,7 @@ enum Commands {
         daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
-        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        #[arg(long, default_value = "3000", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Stop a running clawhive process")]
@@ -75,17 +75,17 @@ enum Commands {
         daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
-        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        #[arg(long, default_value = "3000", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Code mode: open developer TUI")]
     Code {
-        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        #[arg(long, default_value = "3000", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Dashboard mode: attach TUI observability panel to running gateway")]
     Dashboard {
-        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        #[arg(long, default_value = "3000", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Local REPL for testing (no Telegram needed)")]
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Code { port } => {
-            run_code_tui(port).await?;
+            run_code_tui(&cli.config_root, port).await?;
         }
         Commands::Dashboard { port } => {
             run_dashboard_tui(port).await?;
@@ -967,15 +967,39 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
             );
         }
     }
+    // Anthropic model aliases: short names → latest models
     aliases
         .entry("sonnet".to_string())
-        .or_insert_with(|| "anthropic/claude-sonnet-4-5".to_string());
+        .or_insert_with(|| "anthropic/claude-sonnet-4-6".to_string());
     aliases
         .entry("haiku".to_string())
-        .or_insert_with(|| "anthropic/claude-3-haiku-20240307".to_string());
+        .or_insert_with(|| "anthropic/claude-haiku-4-5".to_string());
     aliases
         .entry("opus".to_string())
         .or_insert_with(|| "anthropic/claude-opus-4-6".to_string());
+
+    // Anthropic model aliases: bare model IDs (without provider prefix) → fully qualified
+    for model_id in &[
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-5",
+        "claude-opus-4-5-20251101",
+        "claude-opus-4-1",
+        "claude-opus-4-1-20250805",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-0",
+        "claude-opus-4-20250514",
+        "claude-3-haiku-20240307",
+    ] {
+        aliases
+            .entry(model_id.to_string())
+            .or_insert_with(|| format!("anthropic/{model_id}"));
+    }
     // Use gpt-5.3-codex for ChatGPT OAuth compatibility (Codex Responses API)
     // gpt-4o-mini and other non-Codex models are not supported via ChatGPT OAuth
     aliases
@@ -1643,10 +1667,11 @@ async fn run_dashboard_tui(port: u16) -> Result<()> {
     clawhive_tui::run_tui(&bus).await
 }
 
-async fn run_code_tui(port: u16) -> Result<()> {
-    // Current implementation reuses the existing TUI runtime.
-    // Code-specific interactive workflow will diverge in a follow-up.
-    run_dashboard_tui(port).await
+async fn run_code_tui(root: &Path, port: u16) -> Result<()> {
+    let _ = port;
+    let (bus, _memory, gateway, _config, _schedule_manager, _wait_manager) =
+        bootstrap(root).await?;
+    clawhive_tui::run_code_tui(bus.as_ref(), gateway).await
 }
 
 async fn forward_sse_to_bus(
