@@ -621,10 +621,7 @@ fn display_rel(root: &Path, path: &Path) -> String {
 }
 
 fn ensure_required_dirs(config_root: &Path) -> Result<()> {
-    for rel in [
-        "config/agents.d",
-        "config/providers.d",
-    ] {
+    for rel in ["config/agents.d", "config/providers.d"] {
         let dir = config_root.join(rel);
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     }
@@ -1117,10 +1114,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         ensure_required_dirs(temp.path()).expect("create required directories");
 
-        for rel in [
-            "config/agents.d",
-            "config/providers.d",
-        ] {
+        for rel in ["config/agents.d", "config/providers.d"] {
             assert!(temp.path().join(rel).exists(), "missing {rel}");
         }
     }

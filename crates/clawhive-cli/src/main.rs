@@ -2143,19 +2143,28 @@ mod tests {
     #[test]
     fn parses_start_tui_flag() {
         let cli = Cli::try_parse_from(["clawhive", "start", "--tui"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Start { tui: true, .. }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Start { tui: true, .. }
+        ));
     }
 
     #[test]
     fn parses_agent_list_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "agent", "list"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Agent(AgentCommands::List)));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Agent(AgentCommands::List)
+        ));
     }
 
     #[test]
     fn parses_skill_list_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "skill", "list"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Skill(SkillCommands::List)));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Skill(SkillCommands::List)
+        ));
     }
 
     #[test]
@@ -2188,7 +2197,10 @@ mod tests {
     #[test]
     fn parses_auth_status_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "auth", "status"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Auth(AuthCommands::Status)));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Auth(AuthCommands::Status)
+        ));
     }
 
     #[test]
@@ -2210,7 +2222,10 @@ mod tests {
     #[test]
     fn parses_setup_force_flag() {
         let cli = Cli::try_parse_from(["clawhive", "setup", "--force"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Setup { force: true }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Setup { force: true }
+        ));
     }
 
     #[test]
@@ -2222,7 +2237,10 @@ mod tests {
     #[test]
     fn parses_restart_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "restart"]).unwrap();
-        assert!(matches!(cli.command.unwrap(), Commands::Restart { tui: false, .. }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Restart { tui: false, .. }
+        ));
     }
 
     #[test]
