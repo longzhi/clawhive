@@ -296,6 +296,35 @@ cargo run -- code
 cargo run -- code --port 3001
 ```
 
+## Developer Workflow
+
+Use local quality gates before pushing:
+
+```bash
+# One-time: install repo-managed git hooks
+just install-hooks
+
+# Run all CI-equivalent checks locally
+just check
+
+# Release flow: check -> push main -> replace tag and push tag
+just release v0.1.0-alpha.15
+```
+
+If you don't use `just`, use scripts directly:
+
+```bash
+bash scripts/install-git-hooks.sh
+bash scripts/check.sh
+bash scripts/release.sh v0.1.0-alpha.15
+```
+
+`just check` runs:
+
+1. `cargo fmt --all -- --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo test --workspace`
+
 ## Configuration
 
 Configuration is managed through `clawhive setup`, which interactively generates YAML files under `~/.clawhive/config/`:
