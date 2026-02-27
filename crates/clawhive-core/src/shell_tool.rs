@@ -223,14 +223,19 @@ fn collect_env_vars() -> HashMap<String, String> {
 }
 
 fn base_permissions(workspace: &Path, extra_dirs: &[(PathBuf, AccessLevel)]) -> Permissions {
-    let workspace_pattern = format!("{}/**", workspace.display());
-    let mut read_patterns = vec![workspace_pattern.clone()];
-    let mut write_patterns = vec![workspace_pattern];
+    let workspace_self = workspace.display().to_string();
+    let workspace_pattern = format!("{workspace_self}/**");
+    // Include the directory itself (for opendir) AND its contents (for files within)
+    let mut read_patterns = vec![workspace_self.clone(), workspace_pattern.clone()];
+    let mut write_patterns = vec![workspace_self, workspace_pattern];
 
     for (dir, level) in extra_dirs {
-        let pattern = format!("{}/**", dir.display());
+        let dir_self = dir.display().to_string();
+        let pattern = format!("{dir_self}/**");
+        read_patterns.push(dir_self.clone());
         read_patterns.push(pattern.clone());
         if *level == AccessLevel::Rw {
+            write_patterns.push(dir_self);
             write_patterns.push(pattern);
         }
     }
