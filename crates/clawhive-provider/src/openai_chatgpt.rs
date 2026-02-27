@@ -635,7 +635,7 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
                     }
                     continue;
                 }
-                tracing::warn!(
+                tracing::debug!(
                     role = %message.role,
                     "unsupported role for ChatGPT Responses API, skipping message"
                 );
