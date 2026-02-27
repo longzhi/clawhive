@@ -684,7 +684,16 @@ fn add_routing_binding(
 ) -> Result<()> {
     let routing_path = config_root.join("config/routing.yaml");
     if !routing_path.exists() {
-        let yaml = generate_routing_yaml(agent_id, None, None);
+        let cfg = ChannelConfig {
+            connector_id: connector_id.to_string(),
+            token: String::new(),
+        };
+        let (tg, dc) = match channel_type {
+            "telegram" => (Some(cfg), None),
+            "discord" => (None, Some(cfg)),
+            _ => (None, None),
+        };
+        let yaml = generate_routing_yaml(agent_id, tg, dc);
         fs::write(&routing_path, yaml)?;
         return Ok(());
     }
