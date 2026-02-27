@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::TimeZone;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -40,6 +40,7 @@ use clawhive_scheduler::{ScheduleManager, ScheduleType, SqliteStore, WaitTask, W
 use clawhive_schema::InboundMessage;
 use commands::auth::{handle_auth_command, AuthCommands};
 use setup::run_setup;
+use tokio::time::sleep;
 
 #[derive(Parser)]
 #[command(name = "clawhive", version, about = "clawhive AI agent framework")]
@@ -74,6 +75,16 @@ enum Commands {
         daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
+        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        port: u16,
+    },
+    #[command(about = "Code mode: open developer TUI")]
+    Code {
+        #[arg(long, default_value = "3001", help = "HTTP API server port")]
+        port: u16,
+    },
+    #[command(about = "Dashboard mode: attach TUI observability panel to running gateway")]
+    Dashboard {
         #[arg(long, default_value = "3001", help = "HTTP API server port")]
         port: u16,
     },
@@ -272,9 +283,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let command = cli.command.unwrap_or(Commands::Chat {
-        agent: "clawhive-main".to_string(),
-    });
+    let Some(command) = cli.command else {
+        Cli::command().print_help()?;
+        println!();
+        return Ok(());
+    };
 
     match command {
         Commands::Validate => {
@@ -307,6 +320,12 @@ async fn main() -> Result<()> {
             } else {
                 start_bot(&cli.config_root, tui, port).await?;
             }
+        }
+        Commands::Code { port } => {
+            run_code_tui(port).await?;
+        }
+        Commands::Dashboard { port } => {
+            run_dashboard_tui(port).await?;
         }
         Commands::Chat { agent } => {
             run_repl(&cli.config_root, &agent).await?;
@@ -1422,6 +1441,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     let http_state = clawhive_server::state::AppState {
         root: root.to_path_buf(),
         bus: Arc::clone(&bus),
+        gateway: Some(gateway.clone()),
     };
     let http_addr = format!("0.0.0.0:{port}");
     tokio::spawn(async move {
@@ -1582,6 +1602,127 @@ async fn run_consolidate(root: &Path) -> Result<()> {
     println!("  Reindexed: {}", report.reindexed);
     println!("  Summary: {}", report.summary);
     Ok(())
+}
+
+async fn run_dashboard_tui(port: u16) -> Result<()> {
+    let base_url = format!("http://127.0.0.1:{port}");
+    let metrics_url = format!("{base_url}/api/events/metrics");
+    let stream_url = format!("{base_url}/api/events/stream");
+
+    let client = reqwest::Client::new();
+    let probe = client
+        .get(&metrics_url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await;
+
+    match probe {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            anyhow::bail!(
+                "Gateway not ready at {base_url} (HTTP {}). Start it first with `clawhive start`.",
+                resp.status()
+            );
+        }
+        Err(err) => {
+            anyhow::bail!(
+                "Cannot connect to Gateway at {base_url}: {err}. Start it first with `clawhive start`."
+            );
+        }
+    }
+
+    let bus = EventBus::new(1024);
+    let publisher = bus.publisher();
+    let stream_url_bg = stream_url.clone();
+    tokio::spawn(async move {
+        if let Err(err) = forward_sse_to_bus(stream_url_bg, publisher).await {
+            tracing::error!("dev stream relay stopped: {err}");
+        }
+    });
+
+    clawhive_tui::run_tui(&bus).await
+}
+
+async fn run_code_tui(port: u16) -> Result<()> {
+    // Current implementation reuses the existing TUI runtime.
+    // Code-specific interactive workflow will diverge in a follow-up.
+    run_dashboard_tui(port).await
+}
+
+async fn forward_sse_to_bus(stream_url: String, publisher: clawhive_bus::BusPublisher) -> Result<()> {
+    let client = reqwest::Client::new();
+
+    loop {
+        let response = client
+            .get(&stream_url)
+            .header("accept", "text/event-stream")
+            .send()
+            .await;
+
+        let mut response = match response {
+            Ok(resp) if resp.status().is_success() => resp,
+            Ok(resp) => {
+                tracing::warn!("dev stream connect failed: HTTP {}", resp.status());
+                sleep(Duration::from_millis(800)).await;
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!("dev stream connect error: {err}");
+                sleep(Duration::from_millis(800)).await;
+                continue;
+            }
+        };
+
+        let mut buffer = String::new();
+        let mut event_data: Vec<String> = Vec::new();
+
+        loop {
+            let chunk = response.chunk().await;
+            let Some(chunk) = (match chunk {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!("dev stream read error: {err}");
+                    None
+                }
+            }) else {
+                break;
+            };
+
+            let text = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&text);
+
+            while let Some(pos) = buffer.find('\n') {
+                let mut line = buffer[..pos].to_string();
+                buffer.drain(..=pos);
+
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+
+                if line.is_empty() {
+                    if !event_data.is_empty() {
+                        let payload = event_data.join("\n");
+                        event_data.clear();
+                        match serde_json::from_str::<clawhive_schema::BusMessage>(&payload) {
+                            Ok(msg) => {
+                                let _ = publisher.publish(msg).await;
+                            }
+                            Err(err) => {
+                                tracing::warn!("dev stream invalid bus payload: {err}");
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("data:") {
+                    event_data.push(rest.trim_start().to_string());
+                }
+            }
+        }
+
+        sleep(Duration::from_millis(300)).await;
+    }
 }
 
 async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
@@ -2253,6 +2394,24 @@ mod tests {
                 port: 8080,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_dashboard_with_port() {
+        let cli = Cli::try_parse_from(["clawhive", "dashboard", "--port", "8081"]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Dashboard { port: 8081 }
+        ));
+    }
+
+    #[test]
+    fn parses_code_with_port() {
+        let cli = Cli::try_parse_from(["clawhive", "code", "--port", "8082"]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Code { port: 8082 }
         ));
     }
 

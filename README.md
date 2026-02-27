@@ -213,25 +213,50 @@ clawhive setup
 ### Run
 
 ```bash
-# Validate configuration
+# Setup / config
+clawhive setup
 clawhive validate
 
 # Chat mode (local REPL)
 clawhive chat
 
-# Start all configured channel bots
+# Service lifecycle
 clawhive start
-
-# Start with TUI dashboard
-clawhive start --tui
-
-# Start as background daemon
 clawhive start --daemon
+clawhive start -d
+clawhive start --tui
+clawhive restart
+clawhive restart --daemon
+clawhive restart -d
+clawhive restart --tui
+clawhive stop
+
+# Dashboard mode (observability TUI)
+clawhive dashboard
+clawhive dashboard --port 3001
+
+# Code mode (developer TUI)
+clawhive code
+clawhive code --port 3001
+
+# Agents / sessions
+clawhive agent list
+clawhive agent show clawhive-main
+clawhive session reset <session_key>
+
+# Schedules / tasks
+clawhive schedule list
+clawhive schedule run <schedule_id>
+clawhive task trigger clawhive-main "summarize today's work"
+
+# Auth
+clawhive auth status
+clawhive auth login openai
 ```
 
 ## Quick Start (Developers)
 
-Prerequisites: Rust 1.75+
+Prerequisites: Rust 1.92+
 
 ```bash
 # Clone and build
@@ -248,8 +273,27 @@ cargo run -- chat
 # Start all configured channel bots
 cargo run -- start
 
+# Start as background daemon
+cargo run -- start --daemon
+cargo run -- start -d
+
 # Start with TUI dashboard
 cargo run -- start --tui
+
+# Restart / stop
+cargo run -- restart
+cargo run -- restart --daemon
+cargo run -- restart -d
+cargo run -- restart --tui
+cargo run -- stop
+
+# Dashboard mode (observability TUI)
+cargo run -- dashboard
+cargo run -- dashboard --port 3001
+
+# Coding agent mode (attach local TUI channel to running gateway)
+cargo run -- code
+cargo run -- code --port 3001
 ```
 
 ## Configuration

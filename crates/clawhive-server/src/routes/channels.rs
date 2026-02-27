@@ -279,6 +279,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             bus: Arc::new(clawhive_bus::EventBus::new(16)),
+            gateway: None,
         };
         (
             Router::new()

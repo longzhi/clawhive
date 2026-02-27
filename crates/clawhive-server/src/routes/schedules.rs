@@ -189,6 +189,7 @@ mod tests {
             AppState {
                 root: root.to_path_buf(),
                 bus: Arc::new(EventBus::new(16)),
+                gateway: None,
             },
             tmp,
         )
