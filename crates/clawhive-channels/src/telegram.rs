@@ -191,7 +191,10 @@ impl TelegramBot {
 
                     match result {
                         Ok(outbound) => {
-                            if let Err(err) = bot.send_message(chat_id, outbound.text).await {
+                            if outbound.text.is_empty() {
+                                tracing::warn!("outbound text is empty, skipping send");
+                            } else if let Err(err) = bot.send_message(chat_id, outbound.text).await
+                            {
                                 tracing::error!("failed to send reply: {err}");
                             }
                         }
