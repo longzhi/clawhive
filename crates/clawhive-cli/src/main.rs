@@ -52,7 +52,7 @@ struct Cli {
     config_root: PathBuf,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -272,7 +272,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    match cli.command {
+    let command = cli.command.unwrap_or(Commands::Chat {
+        agent: "clawhive-main".to_string(),
+    });
+
+    match command {
         Commands::Validate => {
             let config = load_config(&cli.config_root.join("config"))?;
             println!(
@@ -2133,32 +2137,32 @@ mod tests {
     #[test]
     fn parses_consolidate_subcommand() {
         let cli = Cli::parse_from(["clawhive", "consolidate"]);
-        assert!(matches!(cli.command, Commands::Consolidate));
+        assert!(matches!(cli.command.unwrap(), Commands::Consolidate));
     }
 
     #[test]
     fn parses_start_tui_flag() {
         let cli = Cli::try_parse_from(["clawhive", "start", "--tui"]).unwrap();
-        assert!(matches!(cli.command, Commands::Start { tui: true, .. }));
+        assert!(matches!(cli.command.unwrap(), Commands::Start { tui: true, .. }));
     }
 
     #[test]
     fn parses_agent_list_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "agent", "list"]).unwrap();
-        assert!(matches!(cli.command, Commands::Agent(AgentCommands::List)));
+        assert!(matches!(cli.command.unwrap(), Commands::Agent(AgentCommands::List)));
     }
 
     #[test]
     fn parses_skill_list_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "skill", "list"]).unwrap();
-        assert!(matches!(cli.command, Commands::Skill(SkillCommands::List)));
+        assert!(matches!(cli.command.unwrap(), Commands::Skill(SkillCommands::List)));
     }
 
     #[test]
     fn parses_session_reset_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "session", "reset", "my-session"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Commands::Session(SessionCommands::Reset { .. })
         ));
     }
@@ -2167,7 +2171,7 @@ mod tests {
     fn parses_task_trigger_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "task", "trigger", "main", "do stuff"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Commands::Task(TaskCommands::Trigger { .. })
         ));
     }
@@ -2176,7 +2180,7 @@ mod tests {
     fn parses_agent_enable_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "agent", "enable", "my-agent"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Commands::Agent(AgentCommands::Enable { .. })
         ));
     }
@@ -2184,14 +2188,14 @@ mod tests {
     #[test]
     fn parses_auth_status_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "auth", "status"]).unwrap();
-        assert!(matches!(cli.command, Commands::Auth(AuthCommands::Status)));
+        assert!(matches!(cli.command.unwrap(), Commands::Auth(AuthCommands::Status)));
     }
 
     #[test]
     fn parses_auth_login_openai_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "auth", "login", "openai"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Commands::Auth(AuthCommands::Login { .. })
         ));
     }
@@ -2206,32 +2210,38 @@ mod tests {
     #[test]
     fn parses_setup_force_flag() {
         let cli = Cli::try_parse_from(["clawhive", "setup", "--force"]).unwrap();
-        assert!(matches!(cli.command, Commands::Setup { force: true }));
+        assert!(matches!(cli.command.unwrap(), Commands::Setup { force: true }));
     }
 
     #[test]
     fn parses_stop_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "stop"]).unwrap();
-        assert!(matches!(cli.command, Commands::Stop));
+        assert!(matches!(cli.command.unwrap(), Commands::Stop));
     }
 
     #[test]
     fn parses_restart_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "restart"]).unwrap();
-        assert!(matches!(cli.command, Commands::Restart { tui: false, .. }));
+        assert!(matches!(cli.command.unwrap(), Commands::Restart { tui: false, .. }));
     }
 
     #[test]
     fn parses_restart_with_flags() {
         let cli = Cli::try_parse_from(["clawhive", "restart", "--tui", "--port", "8080"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Commands::Restart {
                 tui: true,
                 port: 8080,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn no_args_defaults_to_chat() {
+        let cli = Cli::try_parse_from(["clawhive"]).unwrap();
+        assert!(cli.command.is_none());
     }
 
     #[test]
