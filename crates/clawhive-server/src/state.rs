@@ -1,6 +1,6 @@
+use clawhive_gateway::Gateway;
 use std::path::PathBuf;
 use std::sync::Arc;
-use clawhive_gateway::Gateway;
 
 /// Shared application state accessible from all route handlers.
 #[derive(Clone)]

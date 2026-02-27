@@ -1649,7 +1649,10 @@ async fn run_code_tui(port: u16) -> Result<()> {
     run_dashboard_tui(port).await
 }
 
-async fn forward_sse_to_bus(stream_url: String, publisher: clawhive_bus::BusPublisher) -> Result<()> {
+async fn forward_sse_to_bus(
+    stream_url: String,
+    publisher: clawhive_bus::BusPublisher,
+) -> Result<()> {
     let client = reqwest::Client::new();
 
     loop {
