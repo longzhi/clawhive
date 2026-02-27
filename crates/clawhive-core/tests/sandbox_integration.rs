@@ -54,7 +54,10 @@ async fn e2e_skill_with_fs_permissions_allows_matching_paths() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let ctx = context_from_registry(&registry, &workspace);
 
-    let gate = Arc::new(AccessGate::new(workspace.clone(), workspace.join("access_policy.json")));
+    let gate = Arc::new(AccessGate::new(
+        workspace.clone(),
+        workspace.join("access_policy.json"),
+    ));
     let tool = ReadFileTool::new(workspace.clone(), gate);
     let result = tool
         .execute(serde_json::json!({"path": "allowed.txt"}), &ctx)
@@ -80,7 +83,10 @@ async fn e2e_skill_with_fs_permissions_denies_write_when_only_read_declared() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let ctx = context_from_registry(&registry, &workspace);
 
-    let gate = Arc::new(AccessGate::new(workspace.clone(), workspace.join("access_policy.json")));
+    let gate = Arc::new(AccessGate::new(
+        workspace.clone(),
+        workspace.join("access_policy.json"),
+    ));
     let tool = WriteFileTool::new(workspace.clone(), gate);
     let result = tool
         .execute(
@@ -198,7 +204,10 @@ async fn e2e_shell_tool_with_skill_permissions() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let ctx = context_from_registry(&registry, &workspace);
 
-    let gate = Arc::new(AccessGate::new(workspace.clone(), workspace.join("access_policy.json")));
+    let gate = Arc::new(AccessGate::new(
+        workspace.clone(),
+        workspace.join("access_policy.json"),
+    ));
     let tool = ExecuteCommandTool::new(workspace.clone(), 10, gate);
     let result = tool
         .execute(serde_json::json!({"command": "cat hello.txt"}), &ctx)

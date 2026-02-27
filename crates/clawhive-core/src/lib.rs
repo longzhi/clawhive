@@ -73,4 +73,3 @@ pub struct AgentConfig {
     pub enabled: bool,
     pub model_policy: ModelPolicy,
 }
-

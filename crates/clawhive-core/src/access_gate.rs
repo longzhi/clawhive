@@ -69,10 +69,7 @@ pub struct AccessPolicy {
 pub enum AccessResult {
     Allowed,
     Denied(String),
-    NeedGrant {
-        dir: String,
-        need: AccessLevel,
-    },
+    NeedGrant { dir: String, need: AccessLevel },
 }
 
 // ───────────────────────────── AccessGate ─────────────────────────
@@ -163,9 +160,7 @@ impl AccessGate {
         let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let path_str = canonical_path.to_string_lossy();
         for entry in &policy.allowed {
-            if path_str.starts_with(&entry.path)
-                || path_str.as_ref() == entry.path.as_str()
-            {
+            if path_str.starts_with(&entry.path) || path_str.as_ref() == entry.path.as_str() {
                 if entry.level.satisfies(need) {
                     return AccessResult::Allowed;
                 } else {
@@ -194,8 +189,10 @@ impl AccessGate {
         let dir_str = canonical.to_string_lossy().to_string();
 
         // Block granting to hard-baseline paths (check both original and canonical)
-        if HardBaseline::path_write_denied(dir) || HardBaseline::path_read_denied(dir)
-            || HardBaseline::path_write_denied(&canonical) || HardBaseline::path_read_denied(&canonical)
+        if HardBaseline::path_write_denied(dir)
+            || HardBaseline::path_read_denied(dir)
+            || HardBaseline::path_write_denied(&canonical)
+            || HardBaseline::path_read_denied(&canonical)
         {
             return Err(anyhow!(
                 "Cannot grant access to sensitive path: {}",
@@ -407,7 +404,9 @@ impl ToolExecutor for ListAccessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "list_access".into(),
-            description: "List all directories the agent has been granted access to outside the workspace.".into(),
+            description:
+                "List all directories the agent has been granted access to outside the workspace."
+                    .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -518,9 +517,7 @@ mod tests {
     #[tokio::test]
     async fn hard_baseline_write_denied() {
         let (_tmp, gate) = setup();
-        let result = gate
-            .check(Path::new("/etc/passwd"), AccessLevel::Rw)
-            .await;
+        let result = gate.check(Path::new("/etc/passwd"), AccessLevel::Rw).await;
         assert!(matches!(result, AccessResult::Denied(_)));
     }
 
@@ -596,7 +593,9 @@ mod tests {
     #[tokio::test]
     async fn grant_sensitive_path_blocked() {
         let (_tmp, gate) = setup();
-        let result = gate.grant(Path::new("/etc/something"), AccessLevel::Ro).await;
+        let result = gate
+            .grant(Path::new("/etc/something"), AccessLevel::Ro)
+            .await;
         assert!(result.is_err());
     }
 

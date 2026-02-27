@@ -14,9 +14,7 @@ use clawhive_runtime::TaskExecutor;
 use clawhive_schema::*;
 use futures_core::Stream;
 
-use super::access_gate::{
-    AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool,
-};
+use super::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
 use super::config::FullAgentConfig;
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
@@ -109,10 +107,7 @@ impl Orchestrator {
                 agent_cfg.workspace.as_deref(),
             );
             let ws_root = ws.root().to_path_buf();
-            let gate = Arc::new(AccessGate::new(
-                ws_root.clone(),
-                ws.access_policy_path(),
-            ));
+            let gate = Arc::new(AccessGate::new(ws_root.clone(), ws.access_policy_path()));
             let state = AgentWorkspaceState {
                 workspace: ws,
                 file_store: MemoryFileStore::new(&ws_root),
@@ -166,9 +161,7 @@ impl Orchestrator {
         // Access control tools
         tool_registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
         tool_registry.register(Box::new(ListAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(RevokeAccessTool::new(
-            default_access_gate.clone(),
-        )));
+        tool_registry.register(Box::new(RevokeAccessTool::new(default_access_gate.clone())));
         tool_registry.register(Box::new(WebFetchTool::new()));
         tool_registry.register(Box::new(ImageTool::new()));
         tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
@@ -334,21 +327,9 @@ impl Orchestrator {
         let gate = self.access_gate_for(agent_id);
         let ws = self.workspace_root_for(agent_id);
         match name {
-            "read" => {
-                ReadFileTool::new(ws, gate)
-                    .execute(input, ctx)
-                    .await
-            }
-            "write" => {
-                WriteFileTool::new(ws, gate)
-                    .execute(input, ctx)
-                    .await
-            }
-            "edit" => {
-                EditFileTool::new(ws, gate)
-                    .execute(input, ctx)
-                    .await
-            }
+            "read" => ReadFileTool::new(ws, gate).execute(input, ctx).await,
+            "write" => WriteFileTool::new(ws, gate).execute(input, ctx).await,
+            "edit" => EditFileTool::new(ws, gate).execute(input, ctx).await,
             "exec" => {
                 ExecuteCommandTool::new(ws, 30, gate)
                     .execute(input, ctx)

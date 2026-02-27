@@ -222,10 +222,7 @@ fn collect_env_vars() -> HashMap<String, String> {
     env_vars
 }
 
-fn base_permissions(
-    workspace: &Path,
-    extra_dirs: &[(PathBuf, AccessLevel)],
-) -> Permissions {
+fn base_permissions(workspace: &Path, extra_dirs: &[(PathBuf, AccessLevel)]) -> Permissions {
     let workspace_pattern = format!("{}/**", workspace.display());
     let mut read_patterns = vec![workspace_pattern.clone()];
     let mut write_patterns = vec![workspace_pattern];
@@ -247,10 +244,7 @@ fn base_permissions(
         .build()
 }
 
-fn make_sandbox(
-    workspace: &Path,
-    extra_dirs: &[(PathBuf, AccessLevel)],
-) -> Result<Sandbox> {
+fn make_sandbox(workspace: &Path, extra_dirs: &[(PathBuf, AccessLevel)]) -> Result<Sandbox> {
     let config = SandboxConfig {
         permissions: base_permissions(workspace, extra_dirs),
         work_dir: workspace.to_path_buf(),
