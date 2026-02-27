@@ -1,78 +1,46 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use clawhive_provider::ToolDef;
 
+use super::access_gate::{resolve_path, AccessGate, AccessLevel, AccessResult};
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
-fn validate_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
-    if requested.is_empty() {
-        return Err(anyhow!("path must not be empty"));
+/// Check the AccessGate and return an error ToolOutput if access is not allowed.
+/// Returns `None` when the access is allowed.
+async fn gate_check(
+    gate: &AccessGate,
+    resolved: &Path,
+    level: AccessLevel,
+    path_str: &str,
+) -> Option<ToolOutput> {
+    match gate.check(resolved, level).await {
+        AccessResult::Allowed => None,
+        AccessResult::Denied(reason) => Some(ToolOutput {
+            content: reason,
+            is_error: true,
+        }),
+        AccessResult::NeedGrant { dir, need } => Some(ToolOutput {
+            content: format!(
+                "Access denied: directory {dir} is not authorized. Ask the user to grant {need} access to {path_str}."
+            ),
+            is_error: true,
+        }),
     }
-
-    tracing::debug!(
-        "validate_path: workspace={}, requested={}",
-        workspace.display(),
-        requested
-    );
-
-    let ws_canon = match workspace.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to canonicalize workspace {}: {}",
-                workspace.display(),
-                e
-            );
-            return Err(anyhow!("workspace path error: {}", e));
-        }
-    };
-
-    let candidate = if Path::new(requested).is_absolute() {
-        PathBuf::from(requested)
-    } else {
-        ws_canon.join(requested)
-    };
-
-    tracing::debug!("validate_path: candidate={}", candidate.display());
-
-    if let Ok(resolved) = candidate.canonicalize() {
-        if !resolved.starts_with(&ws_canon) {
-            return Err(anyhow!("path escapes workspace: {}", requested));
-        }
-        tracing::debug!("validate_path: resolved={}", resolved.display());
-        return Ok(resolved);
-    }
-
-    // File doesn't exist yet — normalize logically for new-file writes
-    let mut components = Vec::new();
-    for comp in candidate.components() {
-        match comp {
-            std::path::Component::ParentDir => {
-                if !components.is_empty() {
-                    components.pop();
-                }
-            }
-            std::path::Component::CurDir => {}
-            other => components.push(other),
-        }
-    }
-    let normalized: PathBuf = components.iter().collect();
-
-    if !normalized.starts_with(&ws_canon) {
-        return Err(anyhow!("path escapes workspace: {}", requested));
-    }
-    Ok(normalized)
 }
+
+// ───────────────────────────── ReadFileTool ───────────────────────
 
 pub struct ReadFileTool {
     workspace: PathBuf,
+    gate: Arc<AccessGate>,
 }
 
 impl ReadFileTool {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    pub fn new(workspace: PathBuf, gate: Arc<AccessGate>) -> Self {
+        Self { workspace, gate }
     }
 }
 
@@ -81,13 +49,13 @@ impl ToolExecutor for ReadFileTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "read_file".into(),
-            description: "Read a file from the workspace. Returns its content. Supports offset and limit for large files.".into(),
+            description: "Read a file. Returns its content. Supports offset and limit for large files. Works with workspace-relative or absolute paths.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path relative to workspace root, or absolute path within workspace"
+                        "description": "File path relative to workspace root, or an absolute path"
                     },
                     "offset": {
                         "type": "integer",
@@ -104,15 +72,13 @@ impl ToolExecutor for ReadFileTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        use super::policy::HardBaseline;
-
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = input["limit"].as_u64().unwrap_or(200) as usize;
 
-        let resolved = match validate_path(&self.workspace, path_str) {
+        let resolved = match resolve_path(&self.workspace, path_str) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(ToolOutput {
@@ -122,17 +88,12 @@ impl ToolExecutor for ReadFileTool {
             }
         };
 
-        // Hard baseline check - blocks sensitive files regardless of tool origin
-        if HardBaseline::path_read_denied(&resolved) {
-            return Ok(ToolOutput {
-                content: format!(
-                    "Read access denied: sensitive file (hard baseline): {}",
-                    path_str
-                ),
-                is_error: true,
-            });
+        // AccessGate check (includes HardBaseline)
+        if let Some(denied) = gate_check(&self.gate, &resolved, AccessLevel::Ro, path_str).await {
+            return Ok(denied);
         }
 
+        // External skill policy check (ToolContext)
         let resolved_str = resolved.to_str().unwrap_or("");
         let requested_abs = if Path::new(path_str).is_absolute() {
             path_str.to_string()
@@ -201,13 +162,16 @@ impl ToolExecutor for ReadFileTool {
     }
 }
 
+// ───────────────────────────── WriteFileTool ──────────────────────
+
 pub struct WriteFileTool {
     workspace: PathBuf,
+    gate: Arc<AccessGate>,
 }
 
 impl WriteFileTool {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    pub fn new(workspace: PathBuf, gate: Arc<AccessGate>) -> Self {
+        Self { workspace, gate }
     }
 }
 
@@ -216,13 +180,13 @@ impl ToolExecutor for WriteFileTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "write_file".into(),
-            description: "Write content to a file in the workspace. Creates the file and parent directories if they don't exist. Overwrites existing content.".into(),
+            description: "Write content to a file. Creates the file and parent directories if they don't exist. Overwrites existing content. Works with workspace-relative or absolute paths.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path relative to workspace root"
+                        "description": "File path relative to workspace root, or an absolute path"
                     },
                     "content": {
                         "type": "string",
@@ -235,8 +199,6 @@ impl ToolExecutor for WriteFileTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        use super::policy::HardBaseline;
-
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -244,7 +206,7 @@ impl ToolExecutor for WriteFileTool {
             .as_str()
             .ok_or_else(|| anyhow!("missing 'content' field"))?;
 
-        let resolved = match validate_path(&self.workspace, path_str) {
+        let resolved = match resolve_path(&self.workspace, path_str) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(ToolOutput {
@@ -254,17 +216,12 @@ impl ToolExecutor for WriteFileTool {
             }
         };
 
-        // Hard baseline check - blocks sensitive paths regardless of tool origin
-        if HardBaseline::path_write_denied(&resolved) {
-            return Ok(ToolOutput {
-                content: format!(
-                    "Write access denied: sensitive path (hard baseline): {}",
-                    path_str
-                ),
-                is_error: true,
-            });
+        // AccessGate check (includes HardBaseline)
+        if let Some(denied) = gate_check(&self.gate, &resolved, AccessLevel::Rw, path_str).await {
+            return Ok(denied);
         }
 
+        // External skill policy check
         let resolved_str = resolved.to_str().unwrap_or("");
         let requested_abs = if Path::new(path_str).is_absolute() {
             path_str.to_string()
@@ -300,13 +257,16 @@ impl ToolExecutor for WriteFileTool {
     }
 }
 
+// ───────────────────────────── EditFileTool ──────────────────────
+
 pub struct EditFileTool {
     workspace: PathBuf,
+    gate: Arc<AccessGate>,
 }
 
 impl EditFileTool {
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    pub fn new(workspace: PathBuf, gate: Arc<AccessGate>) -> Self {
+        Self { workspace, gate }
     }
 }
 
@@ -321,7 +281,7 @@ impl ToolExecutor for EditFileTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path relative to workspace root"
+                        "description": "File path relative to workspace root, or an absolute path"
                     },
                     "old_text": {
                         "type": "string",
@@ -338,8 +298,6 @@ impl ToolExecutor for EditFileTool {
     }
 
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        use super::policy::HardBaseline;
-
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| anyhow!("missing 'path' field"))?;
@@ -350,7 +308,7 @@ impl ToolExecutor for EditFileTool {
             .as_str()
             .ok_or_else(|| anyhow!("missing 'new_text' field"))?;
 
-        let resolved = match validate_path(&self.workspace, path_str) {
+        let resolved = match resolve_path(&self.workspace, path_str) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(ToolOutput {
@@ -360,17 +318,12 @@ impl ToolExecutor for EditFileTool {
             }
         };
 
-        // Hard baseline check - blocks sensitive paths regardless of tool origin
-        if HardBaseline::path_write_denied(&resolved) {
-            return Ok(ToolOutput {
-                content: format!(
-                    "Write access denied: sensitive path (hard baseline): {}",
-                    path_str
-                ),
-                is_error: true,
-            });
+        // AccessGate check (includes HardBaseline)
+        if let Some(denied) = gate_check(&self.gate, &resolved, AccessLevel::Rw, path_str).await {
+            return Ok(denied);
         }
 
+        // External skill policy check
         let resolved_str = resolved.to_str().unwrap_or("");
         let requested_abs = if Path::new(path_str).is_absolute() {
             path_str.to_string()
@@ -429,11 +382,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn make_gate(workspace: &Path) -> Arc<AccessGate> {
+        Arc::new(AccessGate::in_memory(workspace.to_path_buf()))
+    }
+
     #[tokio::test]
     async fn read_file_basic() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("hello.txt"), "line1\nline2\nline3").unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = ReadFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"path": "hello.txt"}), &ctx)
@@ -448,7 +406,8 @@ mod tests {
     async fn read_file_offset() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "a\nb\nc\nd\ne").unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = ReadFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -468,7 +427,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("subdir")).unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = ReadFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"path": "."}), &ctx)
@@ -484,7 +444,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("secret.txt"), "classified").unwrap();
 
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = ReadFileTool::new(tmp.path().to_path_buf(), gate);
 
         let perms = corral_core::Permissions::builder()
             .fs_read([format!("{}/**/*.md", tmp.path().display())])
@@ -504,7 +465,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("readme.md"), "hello").unwrap();
 
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = ReadFileTool::new(tmp.path().to_path_buf(), gate);
 
         let perms = corral_core::Permissions::builder()
             .fs_read([format!("{}/**", tmp.path().display())])
@@ -520,22 +482,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn path_escape_blocked() {
+    async fn outside_workspace_blocked_without_grant() {
         let tmp = TempDir::new().unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
+        // Create an "outside" directory
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("file.txt"), "external").unwrap();
+
+        // Workspace is a sibling directory
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir(&ws).unwrap();
+        let gate = make_gate(&ws);
+        let tool = ReadFileTool::new(ws, gate);
         let ctx = ToolContext::builtin();
         let result = tool
-            .execute(serde_json::json!({"path": "../../../etc/passwd"}), &ctx)
+            .execute(
+                serde_json::json!({"path": outside.join("file.txt").to_str().unwrap()}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("escapes workspace"));
+        assert!(result.content.contains("not authorized"));
+    }
+
+    #[tokio::test]
+    async fn outside_workspace_allowed_after_grant() {
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("file.txt"), "external data").unwrap();
+
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir(&ws).unwrap();
+        let gate = make_gate(&ws);
+        gate.grant(&outside, AccessLevel::Ro).await.unwrap();
+        let tool = ReadFileTool::new(ws, gate);
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": outside.join("file.txt").to_str().unwrap()}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("external data"));
     }
 
     #[tokio::test]
     async fn write_file_basic() {
         let tmp = TempDir::new().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = WriteFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -552,7 +551,8 @@ mod tests {
     #[tokio::test]
     async fn write_file_creates_dirs() {
         let tmp = TempDir::new().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = WriteFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -568,7 +568,8 @@ mod tests {
     #[tokio::test]
     async fn write_file_denied_by_policy() {
         let tmp = TempDir::new().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = WriteFileTool::new(tmp.path().to_path_buf(), gate);
 
         let perms = corral_core::Permissions::builder()
             .fs_write([format!("{}/**/*.log", tmp.path().display())])
@@ -590,7 +591,8 @@ mod tests {
     async fn edit_file_basic() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "foo bar baz").unwrap();
-        let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = EditFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -608,7 +610,8 @@ mod tests {
     async fn edit_file_not_found() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "foo bar").unwrap();
-        let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = EditFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -625,7 +628,8 @@ mod tests {
     async fn edit_file_multiple_matches() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("e.txt"), "aaa aaa").unwrap();
-        let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = EditFileTool::new(tmp.path().to_path_buf(), gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -642,7 +646,8 @@ mod tests {
     async fn edit_file_denied_by_policy() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("config.yaml"), "key: value").unwrap();
-        let tool = EditFileTool::new(tmp.path().to_path_buf());
+        let gate = make_gate(tmp.path());
+        let tool = EditFileTool::new(tmp.path().to_path_buf(), gate);
 
         let perms = corral_core::Permissions::builder()
             .fs_read([format!("{}/**", tmp.path().display())])

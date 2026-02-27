@@ -1,5 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 
+use clawhive_core::access_gate::AccessGate;
 use clawhive_core::file_tools::{ReadFileTool, WriteFileTool};
 use clawhive_core::shell_tool::ExecuteCommandTool;
 use clawhive_core::skill::SkillRegistry;
@@ -52,7 +54,8 @@ async fn e2e_skill_with_fs_permissions_allows_matching_paths() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let ctx = context_from_registry(&registry, &workspace);
 
-    let tool = ReadFileTool::new(workspace.clone());
+    let gate = Arc::new(AccessGate::new(workspace.clone(), workspace.join("access_policy.json")));
+    let tool = ReadFileTool::new(workspace.clone(), gate);
     let result = tool
         .execute(serde_json::json!({"path": "allowed.txt"}), &ctx)
         .await
@@ -77,7 +80,8 @@ async fn e2e_skill_with_fs_permissions_denies_write_when_only_read_declared() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let ctx = context_from_registry(&registry, &workspace);
 
-    let tool = WriteFileTool::new(workspace.clone());
+    let gate = Arc::new(AccessGate::new(workspace.clone(), workspace.join("access_policy.json")));
+    let tool = WriteFileTool::new(workspace.clone(), gate);
     let result = tool
         .execute(
             serde_json::json!({"path": "secret.txt", "content": "hack"}),
@@ -194,7 +198,8 @@ async fn e2e_shell_tool_with_skill_permissions() {
     let registry = SkillRegistry::load_from_dir(&skills_dir).unwrap();
     let ctx = context_from_registry(&registry, &workspace);
 
-    let tool = ExecuteCommandTool::new(workspace.clone(), 10);
+    let gate = Arc::new(AccessGate::new(workspace.clone(), workspace.join("access_policy.json")));
+    let tool = ExecuteCommandTool::new(workspace.clone(), 10, gate);
     let result = tool
         .execute(serde_json::json!({"command": "cat hello.txt"}), &ctx)
         .await

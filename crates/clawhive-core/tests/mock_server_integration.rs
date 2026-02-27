@@ -114,11 +114,7 @@ fn make_orchestrator_with_provider(
             None,
             None,
             schedule_manager,
-        )
-        .with_react_config(WeakReActConfig {
-            max_steps: 1,
-            repeat_guard: 1,
-        }),
+        ),
         tmp,
     )
 }

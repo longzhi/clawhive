@@ -14,6 +14,9 @@ use clawhive_runtime::TaskExecutor;
 use clawhive_schema::*;
 use futures_core::Stream;
 
+use super::access_gate::{
+    AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool,
+};
 use super::config::FullAgentConfig;
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
@@ -36,6 +39,7 @@ struct AgentWorkspaceState {
     session_writer: SessionWriter,
     session_reader: SessionReader,
     search_index: SearchIndex,
+    access_gate: Arc<AccessGate>,
 }
 
 pub struct Orchestrator {
@@ -64,8 +68,7 @@ pub struct Orchestrator {
     embedding_provider: Arc<dyn EmbeddingProvider>,
     tool_registry: ToolRegistry,
     default_workspace_root: std::path::PathBuf,
-    react_max_steps: usize,
-    react_repeat_guard: usize,
+    default_access_gate: Arc<AccessGate>,
 }
 
 impl Orchestrator {
@@ -106,12 +109,17 @@ impl Orchestrator {
                 agent_cfg.workspace.as_deref(),
             );
             let ws_root = ws.root().to_path_buf();
+            let gate = Arc::new(AccessGate::new(
+                ws_root.clone(),
+                ws.access_policy_path(),
+            ));
             let state = AgentWorkspaceState {
                 workspace: ws,
                 file_store: MemoryFileStore::new(&ws_root),
                 session_writer: SessionWriter::new(&ws_root),
                 session_reader: SessionReader::new(&ws_root),
                 search_index: SearchIndex::new(memory.db()),
+                access_gate: gate,
             };
             agent_workspaces.insert(agent_id.clone(), state);
         }
@@ -133,12 +141,33 @@ impl Orchestrator {
             sub_agent_runner,
             30,
         )));
-        tool_registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
-        tool_registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
-        tool_registry.register(Box::new(EditFileTool::new(workspace_root.clone())));
+        // Default access gate for the global tool registry
+        let default_access_gate = Arc::new(AccessGate::new(
+            effective_project_root.clone(),
+            effective_project_root.join("access_policy.json"),
+        ));
+        tool_registry.register(Box::new(ReadFileTool::new(
+            workspace_root.clone(),
+            default_access_gate.clone(),
+        )));
+        tool_registry.register(Box::new(WriteFileTool::new(
+            workspace_root.clone(),
+            default_access_gate.clone(),
+        )));
+        tool_registry.register(Box::new(EditFileTool::new(
+            workspace_root.clone(),
+            default_access_gate.clone(),
+        )));
         tool_registry.register(Box::new(ExecuteCommandTool::new(
             workspace_root.clone(),
             30,
+            default_access_gate.clone(),
+        )));
+        // Access control tools
+        tool_registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
+        tool_registry.register(Box::new(ListAccessTool::new(default_access_gate.clone())));
+        tool_registry.register(Box::new(RevokeAccessTool::new(
+            default_access_gate.clone(),
         )));
         tool_registry.register(Box::new(WebFetchTool::new()));
         tool_registry.register(Box::new(ImageTool::new()));
@@ -174,8 +203,7 @@ impl Orchestrator {
             embedding_provider,
             tool_registry,
             default_workspace_root: effective_project_root,
-            react_max_steps: 4,
-            react_repeat_guard: 2,
+            default_access_gate,
         }
     }
 
@@ -184,6 +212,13 @@ impl Orchestrator {
             .get(agent_id)
             .map(|ws| ws.workspace.root().to_path_buf())
             .unwrap_or_else(|| self.default_workspace_root.clone())
+    }
+
+    fn access_gate_for(&self, agent_id: &str) -> Arc<AccessGate> {
+        self.agent_workspaces
+            .get(agent_id)
+            .map(|ws| ws.access_gate.clone())
+            .unwrap_or_else(|| self.default_access_gate.clone())
     }
 
     fn active_skill_registry(&self) -> SkillRegistry {
@@ -296,24 +331,26 @@ impl Orchestrator {
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<super::tool::ToolOutput> {
+        let gate = self.access_gate_for(agent_id);
+        let ws = self.workspace_root_for(agent_id);
         match name {
             "read" => {
-                ReadFileTool::new(self.workspace_root_for(agent_id))
+                ReadFileTool::new(ws, gate)
                     .execute(input, ctx)
                     .await
             }
             "write" => {
-                WriteFileTool::new(self.workspace_root_for(agent_id))
+                WriteFileTool::new(ws, gate)
                     .execute(input, ctx)
                     .await
             }
             "edit" => {
-                EditFileTool::new(self.workspace_root_for(agent_id))
+                EditFileTool::new(ws, gate)
                     .execute(input, ctx)
                     .await
             }
             "exec" => {
-                ExecuteCommandTool::new(self.workspace_root_for(agent_id), 30)
+                ExecuteCommandTool::new(ws, 30, gate)
                     .execute(input, ctx)
                     .await
             }
@@ -359,12 +396,6 @@ impl Orchestrator {
             state.workspace.ensure_dirs().await?;
         }
         Ok(())
-    }
-
-    pub fn with_react_config(mut self, react: super::WeakReActConfig) -> Self {
-        self.react_max_steps = react.max_steps;
-        self.react_repeat_guard = react.repeat_guard;
-        self
     }
 
     /// Get a reference to the hook registry for registering hooks.
@@ -955,50 +986,6 @@ impl Orchestrator {
             .chat_with_tools(primary, fallbacks, final_req)
             .await?;
         Ok((resp, messages))
-    }
-
-    #[allow(dead_code)]
-    async fn weak_react_loop(
-        &self,
-        primary: &str,
-        fallbacks: &[String],
-        system: Option<String>,
-        initial_messages: Vec<LlmMessage>,
-    ) -> Result<String> {
-        let mut messages = initial_messages;
-        let mut repeated = 0usize;
-        let mut last_reply = String::new();
-
-        for _step in 0..self.react_max_steps {
-            let resp = self
-                .router
-                .chat(primary, fallbacks, system.clone(), messages.clone(), 2048)
-                .await?;
-            let reply = resp.text;
-
-            if reply == last_reply {
-                repeated += 1;
-                if repeated >= self.react_repeat_guard {
-                    return Ok(format!("{reply}\n[weak-react: stopped, repeated]"));
-                }
-            } else {
-                repeated = 0;
-            }
-
-            if reply.contains("[finish]") {
-                return Ok(reply.replace("[finish]", "").trim().to_string());
-            }
-
-            let has_continuation = reply.contains("[think]") || reply.contains("[action]");
-            if !has_continuation {
-                return Ok(reply);
-            }
-
-            last_reply = reply.clone();
-            messages.push(LlmMessage::assistant(reply));
-        }
-
-        Ok(last_reply)
     }
 
     /// Handle the flow after a /reset or /new command.

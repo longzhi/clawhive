@@ -101,6 +101,11 @@ impl Workspace {
         self.prompts_dir().join("BOOTSTRAP.md")
     }
 
+    /// Path to the access policy file (`access_policy.json`).
+    pub fn access_policy_path(&self) -> PathBuf {
+        self.root.join("access_policy.json")
+    }
+
     /// Create required directories if they don't exist.
     pub async fn ensure_dirs(&self) -> Result<()> {
         tokio::fs::create_dir_all(&self.root).await?;

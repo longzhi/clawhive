@@ -1,3 +1,4 @@
+pub mod access_gate;
 pub mod audit;
 pub mod config;
 pub mod consolidation;
@@ -28,6 +29,7 @@ pub mod web_fetch_tool;
 pub mod web_search_tool;
 pub mod workspace;
 
+pub use access_gate::*;
 pub use audit::*;
 pub use config::*;
 pub use consolidation::*;
@@ -72,17 +74,3 @@ pub struct AgentConfig {
     pub model_policy: ModelPolicy,
 }
 
-#[derive(Debug, Clone)]
-pub struct WeakReActConfig {
-    pub max_steps: usize,
-    pub repeat_guard: usize,
-}
-
-impl Default for WeakReActConfig {
-    fn default() -> Self {
-        Self {
-            max_steps: 4,
-            repeat_guard: 2,
-        }
-    }
-}

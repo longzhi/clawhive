@@ -10,8 +10,8 @@ use corral_core::{
     start_broker, BrokerConfig, Permissions, PolicyEngine, Sandbox, SandboxConfig, ServiceHandler,
     ServicePermission,
 };
-use tokio::sync::OnceCell;
 
+use super::access_gate::{AccessGate, AccessLevel};
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -19,15 +19,15 @@ const MAX_OUTPUT_BYTES: usize = 50_000;
 pub struct ExecuteCommandTool {
     workspace: PathBuf,
     default_timeout: u64,
-    default_sandbox: OnceCell<Sandbox>,
+    gate: Arc<AccessGate>,
 }
 
 impl ExecuteCommandTool {
-    pub fn new(workspace: PathBuf, default_timeout: u64) -> Self {
+    pub fn new(workspace: PathBuf, default_timeout: u64, gate: Arc<AccessGate>) -> Self {
         Self {
             workspace,
             default_timeout,
-            default_sandbox: OnceCell::new(),
+            gate,
         }
     }
 }
@@ -222,20 +222,37 @@ fn collect_env_vars() -> HashMap<String, String> {
     env_vars
 }
 
-fn base_permissions(workspace: &Path) -> Permissions {
+fn base_permissions(
+    workspace: &Path,
+    extra_dirs: &[(PathBuf, AccessLevel)],
+) -> Permissions {
     let workspace_pattern = format!("{}/**", workspace.display());
+    let mut read_patterns = vec![workspace_pattern.clone()];
+    let mut write_patterns = vec![workspace_pattern];
+
+    for (dir, level) in extra_dirs {
+        let pattern = format!("{}/**", dir.display());
+        read_patterns.push(pattern.clone());
+        if *level == AccessLevel::Rw {
+            write_patterns.push(pattern);
+        }
+    }
+
     Permissions::builder()
-        .fs_read([workspace_pattern.clone()])
-        .fs_write([workspace_pattern])
+        .fs_read(read_patterns)
+        .fs_write(write_patterns)
         .exec_allow(["sh"])
         .network_deny()
         .env_allow(["PATH", "HOME", "TMPDIR"])
         .build()
 }
 
-fn default_sandbox(workspace: &Path) -> Result<Sandbox> {
+fn make_sandbox(
+    workspace: &Path,
+    extra_dirs: &[(PathBuf, AccessLevel)],
+) -> Result<Sandbox> {
     let config = SandboxConfig {
-        permissions: base_permissions(workspace),
+        permissions: base_permissions(workspace, extra_dirs),
         work_dir: workspace.to_path_buf(),
         data_dir: None,
         timeout: Duration::from_secs(30),
@@ -250,8 +267,9 @@ async fn sandbox_with_broker(
     workspace: &Path,
     timeout_secs: u64,
     reminders_lists: &[String],
+    extra_dirs: &[(PathBuf, AccessLevel)],
 ) -> Result<Sandbox> {
-    let mut permissions = base_permissions(workspace);
+    let mut permissions = base_permissions(workspace, extra_dirs);
 
     let mut scope = HashMap::new();
     if !reminders_lists.is_empty() {
@@ -369,16 +387,15 @@ impl ToolExecutor for ExecuteCommandTool {
         let timeout = Duration::from_secs(timeout_secs.max(1));
         let start = Instant::now();
 
+        // Build sandbox dynamically to include current allowlist
+        let extra_dirs = self.gate.allowed_dirs().await;
         let result = if enable_reminders_service {
             let sandbox =
-                sandbox_with_broker(&self.workspace, timeout_secs, &reminders_lists).await?;
+                sandbox_with_broker(&self.workspace, timeout_secs, &reminders_lists, &extra_dirs)
+                    .await?;
             sandbox.execute_with_timeout(command, timeout).await
         } else {
-            // Use default sandbox for all executions now that policy is checked above
-            let sandbox = self
-                .default_sandbox
-                .get_or_try_init(|| async { default_sandbox(&self.workspace) })
-                .await?;
+            let sandbox = make_sandbox(&self.workspace, &extra_dirs)?;
             sandbox.execute_with_timeout(command, timeout).await
         };
 
@@ -462,10 +479,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn make_gate(workspace: &Path) -> Arc<AccessGate> {
+        Arc::new(AccessGate::in_memory(workspace.to_path_buf()))
+    }
+
     #[tokio::test]
     async fn echo_command() {
         let tmp = TempDir::new().unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}), &ctx)
@@ -478,7 +500,8 @@ mod tests {
     #[tokio::test]
     async fn failing_command() {
         let tmp = TempDir::new().unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "exit 1"}), &ctx)
@@ -491,7 +514,8 @@ mod tests {
     #[tokio::test]
     async fn timeout_command() {
         let tmp = TempDir::new().unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 1);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 1, gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -508,7 +532,8 @@ mod tests {
     async fn runs_in_workspace_dir() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("marker.txt"), "found").unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "cat marker.txt"}), &ctx)
@@ -523,7 +548,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("data.txt"), "hello").unwrap();
 
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
 
         // External context with cat allowed
         let perms = corral_core::Permissions {
@@ -549,7 +575,8 @@ mod tests {
     #[tokio::test]
     async fn external_context_denies_unlisted_command() {
         let tmp = TempDir::new().unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
 
         // External context with only echo allowed
         let perms = corral_core::Permissions {
@@ -573,7 +600,8 @@ mod tests {
     #[tokio::test]
     async fn hard_baseline_blocks_dangerous_command() {
         let tmp = TempDir::new().unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
 
         // Even builtin context should block dangerous commands
         let ctx = ToolContext::builtin();
@@ -589,7 +617,8 @@ mod tests {
     #[tokio::test]
     async fn denies_network_by_default_on_linux() {
         let tmp = TempDir::new().unwrap();
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10);
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
