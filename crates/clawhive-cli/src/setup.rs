@@ -84,10 +84,10 @@ impl ProviderId {
 
     fn default_model(self) -> &'static str {
         match self {
-            Self::Anthropic => "claude-sonnet-4-5",
+            Self::Anthropic => "claude-opus-4-6",
             Self::OpenAi => "gpt-5.3-codex",
             Self::AzureOpenAi => "gpt-5.3-codex",
-            Self::Gemini => "gemini-2.0-flash",
+            Self::Gemini => "gemini-2.5-pro",
             Self::DeepSeek => "deepseek-chat",
             Self::Groq => "llama-3.3-70b-versatile",
             Self::Ollama => "llama3.2",
@@ -1022,13 +1022,28 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
     let prefix = provider.as_str();
     match provider {
         ProviderId::Anthropic => vec![
+            format!("{prefix}/claude-opus-4-6"),
             format!("{prefix}/claude-sonnet-4-5"),
-            format!("{prefix}/claude-3-haiku-20240307"),
+            format!("{prefix}/claude-haiku-4-5"),
         ],
-        ProviderId::OpenAi => vec![format!("{prefix}/gpt-5.3-codex"), format!("{prefix}/gpt-4o")],
+        ProviderId::OpenAi => vec![
+            format!("{prefix}/gpt-5.3-codex"),
+            format!("{prefix}/o3"),
+            format!("{prefix}/o4-mini"),
+            format!("{prefix}/gpt-4.1"),
+            format!("{prefix}/gpt-4o"),
+        ],
+        ProviderId::AzureOpenAi => vec![
+            format!("{prefix}/gpt-5.3-codex"),
+            format!("{prefix}/o3"),
+            format!("{prefix}/o4-mini"),
+            format!("{prefix}/gpt-4.1"),
+            format!("{prefix}/gpt-4o"),
+        ],
         ProviderId::Gemini => vec![
+            format!("{prefix}/gemini-2.5-pro"),
+            format!("{prefix}/gemini-2.5-flash"),
             format!("{prefix}/gemini-2.0-flash"),
-            format!("{prefix}/gemini-2.0-pro"),
         ],
         ProviderId::DeepSeek => vec![
             format!("{prefix}/deepseek-chat"),
@@ -1036,24 +1051,26 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
         ],
         ProviderId::Groq => vec![
             format!("{prefix}/llama-3.3-70b-versatile"),
-            format!("{prefix}/mixtral-8x7b-32768"),
+            format!("{prefix}/llama-3.1-8b-instant"),
         ],
-        ProviderId::Ollama => vec![format!("{prefix}/llama3.2"), format!("{prefix}/mistral")],
+        ProviderId::Ollama => vec![
+            format!("{prefix}/llama3.2"),
+            format!("{prefix}/qwen2.5-coder"),
+            format!("{prefix}/mistral"),
+        ],
         ProviderId::OpenRouter => vec![
-            format!("{prefix}/anthropic/claude-sonnet-4-5"),
-            format!("{prefix}/openai/gpt-4o"),
+            format!("{prefix}/anthropic/claude-opus-4-6"),
+            format!("{prefix}/openai/gpt-5.3-codex"),
+            format!("{prefix}/google/gemini-2.5-pro"),
         ],
         ProviderId::Together => vec![
             format!("{prefix}/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
-            format!("{prefix}/mistralai/Mixtral-8x7B-Instruct-v0.1"),
+            format!("{prefix}/meta-llama/Llama-4-Scout-17B-16E-Instruct"),
         ],
         ProviderId::Fireworks => vec![
             format!("{prefix}/accounts/fireworks/models/llama-v3p3-70b-instruct"),
-            format!("{prefix}/accounts/fireworks/models/mixtral-8x7b-instruct"),
+            format!("{prefix}/accounts/fireworks/models/llama4-scout-instruct-basic"),
         ],
-        ProviderId::AzureOpenAi => {
-            vec![format!("{prefix}/gpt-5.3-codex"), format!("{prefix}/gpt-4o")]
-        }
     }
 }
 
