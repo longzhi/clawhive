@@ -222,7 +222,10 @@ async fn handle_add_provider(
     state: &ConfigState,
     force: bool,
 ) -> Result<()> {
-    let provider = prompt_provider(theme)?;
+    let provider = match prompt_provider(theme)? {
+        Some(p) => p,
+        None => return Ok(()),
+    };
 
     let already_configured = state
         .providers
@@ -253,7 +256,10 @@ async fn handle_add_provider(
         None
     };
 
-    let auth = prompt_auth_choice(theme, provider).await?;
+    let auth = match prompt_auth_choice(theme, provider).await? {
+        Some(a) => a,
+        None => return Ok(()),
+    };
     let path = write_provider_config_unchecked(
         config_root,
         provider,
@@ -342,7 +348,7 @@ fn handle_add_channel(
     state: &ConfigState,
     _force: bool,
 ) -> Result<()> {
-    let channel_types = ["Telegram", "Discord"];
+    let channel_types = ["Telegram", "Discord", "← Back"];
     let selected = Select::with_theme(theme)
         .with_prompt("Channel type")
         .items(&channel_types)
@@ -350,7 +356,8 @@ fn handle_add_channel(
         .interact()?;
     let channel_type = match selected {
         0 => "telegram",
-        _ => "discord",
+        1 => "discord",
+        _ => return Ok(()),
     };
     let default_id = match channel_type {
         "telegram" => "tg-main",
@@ -723,30 +730,36 @@ fn validate_generated_config(config_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prompt_provider(theme: &ColorfulTheme) -> Result<ProviderId> {
-    let options: Vec<&str> = ALL_PROVIDERS.iter().map(|p| p.display_name()).collect();
+fn prompt_provider(theme: &ColorfulTheme) -> Result<Option<ProviderId>> {
+    let mut options: Vec<&str> = ALL_PROVIDERS.iter().map(|p| p.display_name()).collect();
+    options.push("← Back");
     let selected = Select::with_theme(theme)
         .with_prompt("Choose your LLM provider")
         .items(&options)
         .default(0)
         .interact()?;
 
-    ALL_PROVIDERS
-        .get(selected)
-        .copied()
-        .ok_or_else(|| anyhow!("invalid provider selection index: {selected}"))
+    if selected >= ALL_PROVIDERS.len() {
+        return Ok(None);
+    }
+    Ok(Some(ALL_PROVIDERS[selected]))
 }
 
-async fn prompt_auth_choice(theme: &ColorfulTheme, provider: ProviderId) -> Result<AuthChoice> {
+async fn prompt_auth_choice(
+    theme: &ColorfulTheme,
+    provider: ProviderId,
+) -> Result<Option<AuthChoice>> {
     if provider.supports_oauth() {
         let methods: Vec<&str> = match provider {
             ProviderId::Anthropic => vec![
                 "Setup Token (run `claude setup-token` in terminal)",
                 "API Key (from console.anthropic.com/settings/keys)",
+                "← Back",
             ],
             ProviderId::OpenAi => vec![
                 "OAuth Login (use your ChatGPT subscription)",
                 "API Key (from platform.openai.com/api-keys)",
+                "← Back",
             ],
             _ => unreachable!(),
         };
@@ -757,17 +770,17 @@ async fn prompt_auth_choice(theme: &ColorfulTheme, provider: ProviderId) -> Resu
             .interact()?;
 
         match method {
-            0 => run_oauth_auth(provider).await,
-            1 => prompt_api_key(theme, provider),
-            _ => Err(anyhow!("invalid auth method index: {method}")),
+            0 => run_oauth_auth(provider).await.map(Some),
+            1 => prompt_api_key(theme, provider).map(Some),
+            _ => Ok(None),
         }
     } else if provider == ProviderId::Ollama {
         // Ollama runs locally, no auth needed
-        Ok(AuthChoice::ApiKey {
+        Ok(Some(AuthChoice::ApiKey {
             api_key: String::new(),
-        })
+        }))
     } else {
-        prompt_api_key(theme, provider)
+        prompt_api_key(theme, provider).map(Some)
     }
 }
 
