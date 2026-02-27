@@ -19,6 +19,7 @@ enum SetupAction {
     AddProvider,
     AddAgent,
     AddChannel,
+    ConfigureTools,
     Modify,
     Remove,
     Done,
@@ -166,6 +167,9 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
             SetupAction::AddChannel => {
                 handle_add_channel(config_root, &theme, &state, force)?;
             }
+            SetupAction::ConfigureTools => {
+                handle_configure_tools(config_root, &theme)?;
+            }
             SetupAction::Modify => {
                 handle_modify(config_root, &theme, &state, force).await?;
             }
@@ -205,6 +209,18 @@ fn build_action_labels(state: &ConfigState) -> Vec<(SetupAction, String)> {
         (
             SetupAction::AddChannel,
             format!("{} Add Channel ({})", ARROW, state.channels.len()),
+        ),
+        (
+            SetupAction::ConfigureTools,
+            format!(
+                "{} Configure Tools (web_search: {})",
+                ARROW,
+                if state.tools.web_search_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
         ),
         (
             SetupAction::Modify,
@@ -399,6 +415,59 @@ fn handle_add_channel(
     print_done(
         &Term::stdout(),
         &format!("Channel {connector_id} ({channel_type}) configured."),
+    );
+    Ok(())
+}
+
+fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<()> {
+    let main_path = config_root.join("config/main.yaml");
+
+    let enable_ws = Confirm::with_theme(theme)
+        .with_prompt("Enable web search?")
+        .default(true)
+        .interact()?;
+
+    let (provider, api_key) = if enable_ws {
+        let provider: String = Input::with_theme(theme)
+            .with_prompt("Web search provider (e.g. tavily, serper, brave)")
+            .default("tavily".into())
+            .interact_text()?;
+        let key: String = Input::with_theme(theme)
+            .with_prompt("API key for web search")
+            .interact_text()?;
+        (Some(provider), Some(key))
+    } else {
+        (None, None)
+    };
+
+    if !main_path.exists() {
+        let yaml = generate_main_yaml("clawhive", None, None);
+        fs::write(&main_path, yaml)?;
+    }
+
+    let content = fs::read_to_string(&main_path)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
+
+    let mut ws_map = serde_yaml::Mapping::new();
+    ws_map.insert("enabled".into(), serde_yaml::Value::Bool(enable_ws));
+    if let Some(p) = &provider {
+        ws_map.insert("provider".into(), serde_yaml::Value::String(p.clone()));
+    }
+    if let Some(k) = &api_key {
+        ws_map.insert("api_key".into(), serde_yaml::Value::String(k.clone()));
+    }
+
+    let mut tools_map = serde_yaml::Mapping::new();
+    tools_map.insert("web_search".into(), serde_yaml::Value::Mapping(ws_map));
+    doc["tools"] = serde_yaml::Value::Mapping(tools_map);
+
+    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+    print_done(
+        &Term::stdout(),
+        &format!(
+            "Tools configured. web_search: {}",
+            if enable_ws { "on" } else { "off" }
+        ),
     );
     Ok(())
 }
@@ -959,7 +1028,7 @@ fn generate_main_yaml(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "app:\n  name: {app_name}\n  env: dev\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n"
+        "app:\n  name: {app_name}\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n"
     ));
 
     match telegram {
@@ -989,7 +1058,7 @@ fn generate_main_yaml(
     }
 
     out.push_str(
-        "\nembedding:\n  enabled: false\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+        "\nembedding:\n  enabled: true\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
     );
 
     out
@@ -1341,15 +1410,20 @@ mod tests {
             agents: vec![],
             channels: vec![],
             default_agent: None,
+            tools: crate::setup_scan::ToolsState {
+                web_search_enabled: false,
+                web_search_provider: None,
+            },
         });
 
-        assert_eq!(labels.len(), 6);
+        assert_eq!(labels.len(), 7);
         assert!(matches!(labels[0].0, SetupAction::AddProvider));
         assert!(matches!(labels[1].0, SetupAction::AddAgent));
         assert!(matches!(labels[2].0, SetupAction::AddChannel));
-        assert!(matches!(labels[3].0, SetupAction::Modify));
-        assert!(matches!(labels[4].0, SetupAction::Remove));
-        assert!(matches!(labels[5].0, SetupAction::Done));
+        assert!(matches!(labels[3].0, SetupAction::ConfigureTools));
+        assert!(matches!(labels[4].0, SetupAction::Modify));
+        assert!(matches!(labels[5].0, SetupAction::Remove));
+        assert!(matches!(labels[6].0, SetupAction::Done));
     }
 
     #[test]

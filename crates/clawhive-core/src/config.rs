@@ -8,7 +8,6 @@ use super::ModelPolicy;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub name: String,
-    pub env: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,7 +332,6 @@ where
 
 fn resolve_main_env(main: &mut MainConfig) {
     main.app.name = resolve_env_var(&main.app.name);
-    main.app.env = resolve_env_var(&main.app.env);
 
     if let Some(telegram) = &mut main.channels.telegram {
         for connector in &mut telegram.connectors {
@@ -511,7 +509,6 @@ mod tests {
             main: MainConfig {
                 app: AppConfig {
                     name: "test".into(),
-                    env: "test".into(),
                 },
                 runtime: RuntimeConfig { max_concurrent: 4 },
                 features: FeaturesConfig {

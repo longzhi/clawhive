@@ -30,11 +30,18 @@ pub struct ChannelInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct ToolsState {
+    pub web_search_enabled: bool,
+    pub web_search_provider: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConfigState {
     pub providers: Vec<ProviderInfo>,
     pub agents: Vec<AgentInfo>,
     pub channels: Vec<ChannelInfo>,
     pub default_agent: Option<String>,
+    pub tools: ToolsState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,13 +57,14 @@ pub fn scan_config(root: &Path) -> ConfigState {
     let config_dir = root.join("config");
     let providers = scan_providers(&config_dir);
     let agents = scan_agents(&config_dir);
-    let (channels, default_agent) = scan_main_and_routing(&config_dir);
+    let (channels, default_agent, tools) = scan_main_and_routing(&config_dir);
 
     ConfigState {
         providers,
         agents,
         channels,
         default_agent,
+        tools,
     }
 }
 
@@ -134,8 +142,12 @@ fn scan_agents(config_dir: &Path) -> Vec<AgentInfo> {
     agents
 }
 
-fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>) {
+fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>, ToolsState) {
     let mut channels = Vec::new();
+    let mut tools = ToolsState {
+        web_search_enabled: false,
+        web_search_provider: None,
+    };
 
     let main_path = config_dir.join("main.yaml");
     if let Ok(raw) = fs::read_to_string(main_path) {
@@ -157,6 +169,11 @@ fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>
                     });
                 }
             }
+
+            if let Some(ws) = &main.tools.web_search {
+                tools.web_search_enabled = ws.enabled;
+                tools.web_search_provider = ws.provider.clone();
+            }
         }
     }
 
@@ -172,7 +189,7 @@ fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>
         .and_then(|raw| serde_yaml::from_str::<clawhive_core::RoutingConfig>(&raw).ok())
         .map(|routing| routing.default_agent_id);
 
-    (channels, default_agent)
+    (channels, default_agent, tools)
 }
 
 #[cfg(test)]
@@ -188,7 +205,7 @@ mod tests {
 
     fn base_main_yaml(channels_yaml: &str) -> String {
         format!(
-            "app:\n  name: clawhive\n  env: dev\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\nchannels:\n{channels_yaml}\nembedding:\n  enabled: false\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\ntools: {{}}\n"
+            "app:\n  name: clawhive\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\nchannels:\n{channels_yaml}\nembedding:\n  enabled: true\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\ntools: {{}}\n"
         )
     }
 

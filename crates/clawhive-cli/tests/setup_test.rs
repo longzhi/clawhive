@@ -19,7 +19,6 @@ fn test_standard_config_generation() -> Result<()> {
         root.join("config/main.yaml"),
         r#"app:
   name: clawhive
-  env: dev
 
 runtime:
   max_concurrent: 4
@@ -43,7 +42,7 @@ channels:
         token: "discord-raw-token"
 
 embedding:
-  enabled: false
+  enabled: true
   provider: stub
   api_key: ""
   model: text-embedding-3-small

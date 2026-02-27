@@ -88,6 +88,23 @@ pub fn render_dashboard(term: &Term, state: &ConfigState) {
         }
     }
 
+    let tools_marker = if state.tools.web_search_enabled {
+        CHECKMARK
+    } else {
+        CIRCLE
+    };
+    let _ = term.write_line(&format!("\n{} {}", tools_marker, style("Tools").bold()));
+    if state.tools.web_search_enabled {
+        let provider = state
+            .tools
+            .web_search_provider
+            .as_deref()
+            .unwrap_or("unknown");
+        let _ = term.write_line(&format!("   web_search: on ({provider})"));
+    } else {
+        let _ = term.write_line("   web_search: off");
+    }
+
     let routing_marker = if state.default_agent.is_some() {
         CHECKMARK
     } else {
