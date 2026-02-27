@@ -516,10 +516,11 @@ pub(crate) enum ResponsesInputItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResponsesInputContent {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ResponsesInputContent {
+    InputText { text: String },
+    OutputText { text: String },
+    InputImage { image_url: String },
 }
 
 /// Tool definition for Responses API (flat structure, different from Chat Completions API)
@@ -642,27 +643,30 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
             }
         };
 
-        let mut text_contents = Vec::new();
+        let mut contents = Vec::new();
 
         for block in message.content {
             match block {
                 ContentBlock::Text { text } => {
                     if !text.is_empty() {
-                        text_contents.push(ResponsesInputContent {
-                            content_type: content_type.to_string(),
-                            text,
-                        });
+                        let item = match content_type {
+                            "output_text" => ResponsesInputContent::OutputText { text },
+                            _ => ResponsesInputContent::InputText { text },
+                        };
+                        contents.push(item);
                     }
                 }
-                ContentBlock::Image { .. } => {
-                    // Image blocks not yet supported in ChatGPT Responses API adapter
+                ContentBlock::Image { data, media_type } => {
+                    contents.push(ResponsesInputContent::InputImage {
+                        image_url: format!("data:{media_type};base64,{data}"),
+                    });
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     // First, flush any accumulated text content
-                    if !text_contents.is_empty() {
+                    if !contents.is_empty() {
                         result.push(ResponsesInputItem::Message {
                             role: message.role.clone(),
-                            content: std::mem::take(&mut text_contents),
+                            content: std::mem::take(&mut contents),
                         });
                     }
 
@@ -682,10 +686,10 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
                     is_error,
                 } => {
                     // First, flush any accumulated text content
-                    if !text_contents.is_empty() {
+                    if !contents.is_empty() {
                         result.push(ResponsesInputItem::Message {
                             role: message.role.clone(),
-                            content: std::mem::take(&mut text_contents),
+                            content: std::mem::take(&mut contents),
                         });
                     }
 
@@ -704,10 +708,10 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
         }
 
         // Add any remaining text content
-        if !text_contents.is_empty() {
+        if !contents.is_empty() {
             result.push(ResponsesInputItem::Message {
                 role: message.role,
-                content: text_contents,
+                content: contents,
             });
         }
     }

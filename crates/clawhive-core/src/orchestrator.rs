@@ -413,7 +413,7 @@ impl Orchestrator {
                         conversation_scope: inbound.conversation_scope,
                         text: format!(
                             "Model: **{}**\nSession: **{}**",
-                            agent.model_policy.primary, agent_id
+                            agent.model_policy.primary, session_key.0
                         ),
                         at: chrono::Utc::now(),
                         reply_to: None,
