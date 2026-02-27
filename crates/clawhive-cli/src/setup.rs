@@ -85,8 +85,8 @@ impl ProviderId {
     fn default_model(self) -> &'static str {
         match self {
             Self::Anthropic => "claude-sonnet-4-5",
-            Self::OpenAi => "gpt-4o-mini",
-            Self::AzureOpenAi => "gpt-4o-mini",
+            Self::OpenAi => "gpt-5.3-codex",
+            Self::AzureOpenAi => "gpt-5.3-codex",
             Self::Gemini => "gemini-2.0-flash",
             Self::DeepSeek => "deepseek-chat",
             Self::Groq => "llama-3.3-70b-versatile",
@@ -1025,7 +1025,7 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
             format!("{prefix}/claude-sonnet-4-5"),
             format!("{prefix}/claude-3-haiku-20240307"),
         ],
-        ProviderId::OpenAi => vec![format!("{prefix}/gpt-4o-mini"), format!("{prefix}/gpt-4o")],
+        ProviderId::OpenAi => vec![format!("{prefix}/gpt-5.3-codex"), format!("{prefix}/gpt-4o")],
         ProviderId::Gemini => vec![
             format!("{prefix}/gemini-2.0-flash"),
             format!("{prefix}/gemini-2.0-pro"),
@@ -1052,7 +1052,7 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
             format!("{prefix}/accounts/fireworks/models/mixtral-8x7b-instruct"),
         ],
         ProviderId::AzureOpenAi => {
-            vec![format!("{prefix}/gpt-4o-mini"), format!("{prefix}/gpt-4o")]
+            vec![format!("{prefix}/gpt-5.3-codex"), format!("{prefix}/gpt-4o")]
         }
     }
 }
