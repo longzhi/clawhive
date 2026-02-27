@@ -5,13 +5,13 @@
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/longzhi/clawhive?include_prereleases)](https://github.com/longzhi/clawhive/releases)
 
-A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and Telegram-first deployment.
+A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and multi-channel deployment.
 
 ## Overview
 
 clawhive is a Rust-native multi-agent framework built with **security as a first-class concern**. Unlike platforms that bolt on safety as an afterthought, clawhive enforces a two-layer security model from day one: a non-bypassable hard baseline blocks dangerous operations system-wide, while external skills must explicitly declare permissions.
 
-Built in Rust for **minimal resource footprint** and **rock-solid stability** — no garbage collection pauses, predictable memory usage, and a single static binary with zero runtime dependencies. The framework focuses on Telegram + Discord + CLI workflows, with a smaller operational footprint than broad "everything connector" platforms. Agents can spawn sub-agents with explicit depth and timeout bounds, and a ReAct loop provides iterative reasoning with repeat guards.
+Built in Rust for **minimal resource footprint** and **rock-solid stability** — no garbage collection pauses, predictable memory usage, and a single static binary with zero runtime dependencies. The framework supports Telegram, Discord, Slack, WhatsApp, iMessage, and CLI channels, with a smaller operational footprint than broad "everything connector" platforms. Agents can spawn sub-agents with explicit depth and timeout bounds, and a ReAct loop provides iterative reasoning with repeat guards.
 
 ## 🔐 Security First
 
@@ -81,7 +81,7 @@ permissions:
 | **Security Model** | Two-layer policy (hard baseline + origin trust) | Tool allowlist |
 | **Permission System** | Declarative SKILL.md permissions | Runtime policy |
 | **Memory** | Markdown-native (MEMORY.md canonical) | Markdown-native (MEMORY.md + memory/*.md) |
-| **Integration Surface** | Multi-channel (Telegram + Discord + CLI) | Broad connectors |
+| **Integration Surface** | Multi-channel (Telegram, Discord, Slack, WhatsApp, iMessage, CLI) | Broad connectors |
 | **Dependency** | Single binary, no runtime deps | Node.js + npm |
 
 ### Key Architectural Choices
@@ -97,13 +97,12 @@ permissions:
 - Three-layer memory system: Session JSONL (working memory) → Daily files (short-term) → MEMORY.md (long-term)
 - Hybrid search: sqlite-vec vector similarity (70%) + FTS5 BM25 (30%) over memory chunks
 - Hippocampus consolidation: periodic LLM-driven synthesis of daily observations into long-term memory
-- Telegram + Discord channel adapters (multi-bot, multi-connector)
-- More channel adapters in progress (Slack, WhatsApp, etc.)
+- Channel adapters: Telegram, Discord, Slack, WhatsApp, iMessage (multi-bot, multi-connector)
 - ReAct reasoning loop with repeat guard
 - Sub-agent spawning with depth limits and timeout
 - Skill system (SKILL.md with frontmatter + prompt injection)
 - Token-bucket rate limiting per user
-- LLM provider abstraction with retry + exponential backoff (Anthropic Claude supported)
+- LLM provider abstraction with retry + exponential backoff (Anthropic, OpenAI, Gemini, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint)
 - Real-time TUI dashboard (sessions, events, agent status)
 - YAML-driven configuration (agents, providers, routing)
 
@@ -112,12 +111,12 @@ permissions:
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              CHANNEL ADAPTERS                               │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
-│  │ Telegram │  │ Discord  │  │  Slack   │  │ WhatsApp │  │   CLI    │      │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘      │
-└───────┼─────────────┼─────────────┼─────────────┼─────────────┼────────────┘
-        │             │             │             │             │
-        └─────────────┴──────┬──────┴─────────────┴─────────────┘
+│  ┌──────────┐ ┌─────────┐ ┌────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │
+│  │ Telegram │ │ Discord │ │ Slack  │ │ WhatsApp │ │ iMessage │ │  CLI   │  │
+│  └────┬─────┘ └────┬────┘ └───┬────┘ └────┬─────┘ └────┬─────┘ └───┬────┘  │
+└───────┼────────────┼──────────┼────────────┼────────────┼───────────┼───────┘
+        │            │          │            │            │           │
+        └────────────┴──────────┴─────┬──────┴────────────┴───────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                               GATEWAY                                       │
@@ -140,10 +139,10 @@ permissions:
 │ LLM PROVIDERS │  │     MEMORY     │  │              SANDBOX                   │
 │ ┌───────────┐ │  │ ┌────────────┐ │  │  ┌──────────────────────────────────┐ │
 │ │ Anthropic │ │  │ │ MEMORY.md  │ │  │  │         HARD BASELINE            │ │
-│ │  Claude   │ │  │ │ (long-term)│ │  │  │  (SSRF, path, cmd protection)    │ │
-│ ├───────────┤ │  │ ├────────────┤ │  │  └──────────────────────────────────┘ │
-│ │  OpenAI   │ │  │ │ daily/*.md │ │  │  ┌───────────────┐ ┌───────────────┐  │
-│ │  (soon)   │ │  │ │ (short)    │ │  │  │ Builtin Tools │ │External Skills│  │
+│ ├───────────┤ │  │ │ (long-term)│ │  │  │  (SSRF, path, cmd protection)    │ │
+│ │  OpenAI   │ │  │ ├────────────┤ │  │  └──────────────────────────────────┘ │
+│ ├───────────┤ │  │ │ daily/*.md │ │  │  ┌───────────────┐ ┌───────────────┐  │
+│ │ Gemini ..│ │  │ │ (short)    │ │  │  │ Builtin Tools │ │External Skills│  │
 │ └───────────┘ │  │ ├────────────┤ │  │  │  (trusted)    │ │ (sandboxed)   │  │
 └───────────────┘  │ │Session JSONL│ │  │  │               │ │ SKILL.md +    │  │
                    │ │ (working)  │ │  │  │  read/write   │ │ permissions   │  │
@@ -160,25 +159,31 @@ permissions:
 
 ```
 crates/
-├── clawhive-cli/               # CLI binary (clap) — start, chat, validate, consolidate, agent/skill/session/task
-├── clawhive-core/              # Orchestrator, session mgmt, config, persona, skill system, sub-agent, LLM router
-├── clawhive-memory/            # Memory system — file store (MEMORY.md + daily), session JSONL, SQLite index, chunker, embedding
-├── clawhive-gateway/           # Gateway with agent routing and per-user rate limiting
-├── clawhive-bus/               # Topic-based in-process event bus (pub/sub)
-├── clawhive-provider/          # LLM provider trait + Anthropic Claude adapter (streaming, retry)
-├── clawhive-channels-telegram/ # Telegram adapter via teloxide
-├── clawhive-schema/            # Shared DTOs (InboundMessage, OutboundMessage, BusMessage, SessionKey)
-├── clawhive-runtime/           # Task executor abstraction
-└── clawhive-tui/               # Real-time terminal dashboard (ratatui)
+├── clawhive-cli/        # CLI binary (clap) — start, setup, chat, validate, agent/skill/session/schedule
+├── clawhive-core/       # Orchestrator, session mgmt, config, persona, skill system, sub-agent, LLM router
+├── clawhive-memory/     # Memory system — file store (MEMORY.md + daily), session JSONL, SQLite index, chunker, embedding
+├── clawhive-gateway/    # Gateway with agent routing and per-user rate limiting
+├── clawhive-bus/        # Topic-based in-process event bus (pub/sub)
+├── clawhive-provider/   # LLM provider trait + multi-provider adapters (streaming, retry)
+├── clawhive-channels/   # Channel adapters (Telegram, Discord, Slack, WhatsApp, iMessage)
+├── clawhive-auth/       # OAuth and API key authentication
+├── clawhive-scheduler/  # Cron-based task scheduling
+├── clawhive-server/     # HTTP API server
+├── clawhive-schema/     # Shared DTOs (InboundMessage, OutboundMessage, BusMessage, SessionKey)
+├── clawhive-runtime/    # Task executor abstraction
+└── clawhive-tui/        # Real-time terminal dashboard (ratatui)
 
-config/
-├── main.yaml                   # App settings, channel configuration
-├── agents.d/*.yaml             # Per-agent config (model policy, tools, memory, identity)
-├── providers.d/*.yaml          # LLM provider settings (API keys, models)
-└── routing.yaml                # Channel → agent routing bindings
-
-prompts/<agent_id>/             # Per-agent persona prompts (system.md, style.md, safety.md)
-skills/                         # Skill definitions (SKILL.md with frontmatter)
+~/.clawhive/             # Created by install + setup
+├── bin/                 # Binary
+├── skills/              # Skill definitions (SKILL.md with frontmatter)
+├── config/              # Generated by `clawhive setup`
+│   ├── main.yaml        # App settings, channel configuration
+│   ├── agents.d/*.yaml  # Per-agent config (model policy, tools, memory, identity)
+│   ├── providers.d/*.yaml # LLM provider settings
+│   └── routing.yaml     # Channel → agent routing bindings
+├── workspaces/          # Per-agent workspace (memory, sessions, prompts)
+├── data/                # SQLite databases
+└── logs/                # Log files
 ```
 
 ## Installation
@@ -187,9 +192,17 @@ skills/                         # Skill definitions (SKILL.md with frontmatter)
 curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | bash
 ```
 
-Auto-detects OS/architecture, downloads latest release, installs to `~/.clawhive/bin` and adds to PATH.
+Auto-detects OS/architecture, downloads latest release, installs binary and skills to `~/.clawhive/`.
 
 Or download manually from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
+
+### Setup
+
+After installation, run the interactive setup wizard to configure providers, agents, and channels:
+
+```bash
+clawhive setup
+```
 
 ### Run
 
@@ -198,16 +211,16 @@ Or download manually from [GitHub Releases](https://github.com/longzhi/clawhive/
 clawhive validate
 
 # Chat mode (local REPL)
-export ANTHROPIC_API_KEY=your-key
-clawhive chat --agent clawhive-main
+clawhive chat
 
-# Start Telegram bot
-export TELEGRAM_BOT_TOKEN=your-token
-export ANTHROPIC_API_KEY=your-key
+# Start all configured channel bots
 clawhive start
 
 # Start with TUI dashboard
 clawhive start --tui
+
+# Start as background daemon
+clawhive start --daemon
 ```
 
 ## Quick Start (Developers)
@@ -215,23 +228,18 @@ clawhive start --tui
 Prerequisites: Rust 1.75+
 
 ```bash
-# Clone
+# Clone and build
 git clone https://github.com/longzhi/clawhive.git
 cd clawhive
-
-# Build
 cargo build --workspace
 
-# Validate configuration
-cargo run -- validate
+# Interactive setup (configure providers, agents, channels)
+cargo run -- setup
 
-# Chat mode (local REPL, no Telegram needed)
-export ANTHROPIC_API_KEY=your-key
-cargo run -- chat --agent clawhive-main
+# Chat mode (local REPL)
+cargo run -- chat
 
-# Start Telegram bot
-export TELEGRAM_BOT_TOKEN=your-token
-export ANTHROPIC_API_KEY=your-key
+# Start all configured channel bots
 cargo run -- start
 
 # Start with TUI dashboard
@@ -240,12 +248,14 @@ cargo run -- start --tui
 
 ## Configuration
 
-- `config/main.yaml` — app name, runtime settings, feature flags, channel config (Telegram connectors with `${ENV_VAR}` token resolution)
-- `config/agents.d/<agent_id>.yaml` — agent identity (name, emoji), model policy (primary + fallbacks), tool policy, memory policy, sub-agent settings
-- `config/providers.d/<provider>.yaml` — provider ID, API base URL, API key env var name, available models
-- `config/routing.yaml` — default agent ID, channel-to-agent bindings (match by kind: dm/mention/group, optional pattern)
+Configuration is managed through `clawhive setup`, which interactively generates YAML files under `~/.clawhive/config/`:
 
-Model aliases: `sonnet` → `claude-sonnet-4-5`, `haiku` → `claude-3-5-haiku-latest`, `opus` → `claude-opus-4-6`
+- `main.yaml` — app name, runtime settings, feature flags, channel config
+- `agents.d/<agent_id>.yaml` — agent identity (name, emoji), model policy (primary + fallbacks), tool policy, memory policy
+- `providers.d/<provider>.yaml` — provider type, API base URL, authentication (API key or OAuth)
+- `routing.yaml` — default agent ID, channel-to-agent routing bindings
+
+Supported providers: Anthropic, OpenAI, Gemini, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint.
 
 ## Memory System
 
@@ -262,18 +272,20 @@ Note: JSONL files are NOT indexed (too noisy). Only Markdown memory files partic
 
 | Command | Description |
 |---------|-------------|
-| `start [--tui]` | Start the Telegram bot (optionally with TUI dashboard) |
-| `chat --agent <id>` | Local REPL for testing |
+| `setup` | Interactive configuration wizard |
+| `start [--tui] [--daemon]` | Start all configured channel bots and HTTP API server |
+| `stop` | Stop a running clawhive process |
+| `restart` | Restart clawhive (stop + start) |
+| `chat [--agent <id>]` | Local REPL for testing |
 | `validate` | Validate YAML configuration |
 | `consolidate` | Run memory consolidation manually |
-| `agent list` | List configured agents |
-| `agent show <id>` | Show agent details |
-| `agent enable <id>` | Enable an agent |
-| `agent disable <id>` | Disable an agent |
-| `skill list` | List available skills |
-| `skill show <name>` | Show skill details |
+| `agent list\|show\|enable\|disable` | Agent management |
+| `skill list\|show\|analyze\|install` | Skill management |
 | `session reset <key>` | Reset a session |
+| `schedule list\|run\|enable\|disable\|history` | Scheduled task management |
+| `wait list` | List background wait tasks |
 | `task trigger <agent> <task>` | Send a one-off task to an agent |
+| `auth login\|status` | OAuth authentication management |
 
 ## Development
 
@@ -293,14 +305,14 @@ cargo fmt --all
 | Component | Technology |
 |-----------|-----------|
 | Language | Rust (2021 edition) |
-| LLM | Anthropic Claude (Sonnet / Haiku / Opus) |
-| Database | SQLite (rusqlite 0.32, bundled) |
-| Vector Search | sqlite-vec 0.1.6 |
+| LLM Providers | Anthropic, OpenAI, Gemini, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks |
+| Channels | Telegram, Discord, Slack, WhatsApp, iMessage, CLI |
+| Database | SQLite (rusqlite, bundled) |
+| Vector Search | sqlite-vec |
 | Full-Text Search | FTS5 |
-| Telegram | teloxide 0.13 |
-| HTTP | reqwest 0.12 |
+| HTTP | reqwest |
 | Async | tokio |
-| TUI | ratatui 0.29 + crossterm 0.28 |
+| TUI | ratatui + crossterm |
 | CLI | clap 4 |
 
 ## License
