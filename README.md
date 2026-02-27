@@ -222,13 +222,9 @@ clawhive chat
 
 # Service lifecycle
 clawhive start
-clawhive start --daemon
-clawhive start -d
-clawhive start --tui
+clawhive start --daemon  # alias: -d
 clawhive restart
-clawhive restart --daemon
-clawhive restart -d
-clawhive restart --tui
+clawhive restart --daemon  # alias: -d
 clawhive stop
 
 # Dashboard mode (observability TUI)
@@ -274,17 +270,11 @@ cargo run -- chat
 cargo run -- start
 
 # Start as background daemon
-cargo run -- start --daemon
-cargo run -- start -d
-
-# Start with TUI dashboard
-cargo run -- start --tui
+cargo run -- start --daemon  # alias: -d
 
 # Restart / stop
 cargo run -- restart
 cargo run -- restart --daemon
-cargo run -- restart -d
-cargo run -- restart --tui
 cargo run -- stop
 
 # Dashboard mode (observability TUI)
