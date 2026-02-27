@@ -638,6 +638,16 @@ impl Orchestrator {
         // Check for NO_REPLY suppression
         let reply_text = filter_no_reply(&reply_text);
 
+        if reply_text.is_empty() {
+            tracing::warn!(
+                raw_text_len = resp.text.len(),
+                raw_text_preview = &resp.text[..resp.text.len().min(200)],
+                stop_reason = ?resp.stop_reason,
+                content_blocks = resp.content.len(),
+                "handle_inbound: final reply is empty"
+            );
+        }
+
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
             channel_type: inbound.channel_type.clone(),
@@ -937,6 +947,15 @@ impl Orchestrator {
             };
 
             let resp = self.router.chat_with_tools(primary, fallbacks, req).await?;
+
+            tracing::debug!(
+                text_len = resp.text.len(),
+                content_blocks = resp.content.len(),
+                stop_reason = ?resp.stop_reason,
+                input_tokens = ?resp.input_tokens,
+                output_tokens = ?resp.output_tokens,
+                "tool_use_loop: LLM response"
+            );
 
             let tool_uses: Vec<_> = resp
                 .content
