@@ -624,10 +624,6 @@ fn ensure_required_dirs(config_root: &Path) -> Result<()> {
     for rel in [
         "config/agents.d",
         "config/providers.d",
-        "prompts",
-        "skills",
-        "data",
-        "logs",
     ] {
         let dir = config_root.join(rel);
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -1124,10 +1120,6 @@ mod tests {
         for rel in [
             "config/agents.d",
             "config/providers.d",
-            "prompts",
-            "skills",
-            "data",
-            "logs",
         ] {
             assert!(temp.path().join(rel).exists(), "missing {rel}");
         }

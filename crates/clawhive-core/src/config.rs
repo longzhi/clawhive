@@ -413,22 +413,45 @@ mod tests {
 
     use super::*;
 
-    fn fixture_config_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config")
+    /// Create a temporary config directory with minimal valid files for testing.
+    fn make_temp_config() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("agents.d")).unwrap();
+        std::fs::create_dir_all(root.join("providers.d")).unwrap();
+        std::fs::write(
+            root.join("main.yaml"),
+            "app:\n  name: clawhive\n  env: test\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: false\n  tui: false\n  cli: true\nchannels:\n  telegram: null\n  discord: null\n",
+        ).unwrap();
+        std::fs::write(
+            root.join("routing.yaml"),
+            "default_agent_id: main-agent\nbindings:\n  - channel_type: telegram\n    connector_id: tg\n    match:\n      kind: dm\n    agent_id: main-agent\n",
+        ).unwrap();
+        std::fs::write(
+            root.join("providers.d/openai.yaml"),
+            "provider_id: openai\nenabled: true\napi_base: https://api.openai.com/v1\napi_key: sk-test\nmodels:\n  - gpt-4o\n",
+        ).unwrap();
+        std::fs::write(
+            root.join("agents.d/main-agent.yaml"),
+            "agent_id: main-agent\nenabled: true\nmodel_policy:\n  primary: gpt-4o\n  fallbacks: []\n",
+        ).unwrap();
+        (tmp, root)
     }
 
     #[test]
-    fn load_config_from_workspace_fixtures() {
-        let config = load_config(&fixture_config_root()).unwrap();
+    fn load_config_from_temp_fixtures() {
+        let (_tmp, root) = make_temp_config();
+        let config = load_config(&root).unwrap();
         assert_eq!(config.main.app.name, "clawhive");
-        assert_eq!(config.routing.default_agent_id, "clawhive-main");
-        assert_eq!(config.providers.len(), 2);
-        assert_eq!(config.agents.len(), 2);
+        assert_eq!(config.routing.default_agent_id, "main-agent");
+        assert_eq!(config.providers.len(), 1);
+        assert_eq!(config.agents.len(), 1);
     }
 
     #[test]
     fn validate_config_detects_unknown_agent_id_in_routing() {
-        let mut config = load_config(&fixture_config_root()).unwrap();
+        let (_tmp, root) = make_temp_config();
+        let mut config = load_config(&root).unwrap();
         config.routing.bindings[0].agent_id = "agent-does-not-exist".to_string();
 
         let err = validate_config(&config).unwrap_err();
@@ -437,7 +460,8 @@ mod tests {
 
     #[test]
     fn validate_config_detects_duplicate_agent_id() {
-        let mut config = load_config(&fixture_config_root()).unwrap();
+        let (_tmp, root) = make_temp_config();
+        let mut config = load_config(&root).unwrap();
         let duplicate = config.agents[0].clone();
         config.agents.push(duplicate);
 

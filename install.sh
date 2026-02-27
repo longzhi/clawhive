@@ -30,14 +30,24 @@ mkdir -p "$INSTALL_DIR"
 # Download and extract
 TARBALL="clawhive-${VERSION}-${TARGET}.tar.gz"
 curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/${TARBALL}" -o "/tmp/${TARBALL}"
-tar -xzf "/tmp/${TARBALL}" -C /tmp
+TMPDIR=$(mktemp -d)
+tar -xzf "/tmp/${TARBALL}" -C "$TMPDIR"
 
-# Install
-mv /tmp/clawhive "$INSTALL_DIR/clawhive"
+# Install binary
+mv "$TMPDIR/clawhive" "$INSTALL_DIR/clawhive"
 chmod +x "$INSTALL_DIR/clawhive"
 
+# Install skills (skip if already exists to preserve customizations)
+CLAWHIVE_HOME="$HOME/.clawhive"
+if [ ! -d "$CLAWHIVE_HOME/skills" ]; then
+    cp -r "$TMPDIR/skills" "$CLAWHIVE_HOME/skills"
+    echo "Installed skills to $CLAWHIVE_HOME/skills"
+else
+    echo "Skills already exists, skipping (use --force to overwrite)"
+fi
+
 # Cleanup
-rm -f "/tmp/${TARBALL}"
+rm -rf "$TMPDIR" "/tmp/${TARBALL}"
 
 # Add to PATH if not already present
 add_to_path() {
@@ -71,3 +81,5 @@ fi
 
 echo "clawhive ${VERSION} installed to ${INSTALL_DIR}/clawhive"
 clawhive --version 2>/dev/null || true
+echo ""
+echo "Run 'clawhive setup' to configure providers, agents, and channels."

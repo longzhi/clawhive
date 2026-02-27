@@ -55,7 +55,8 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} dist/${{ env.BINARY_NAME }}
           chmod +x dist/${{ env.BINARY_NAME }}
-          tar -C dist -czf ${BINARY_NAME}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${BINARY_NAME}
+          cp -r skills dist/skills
+          tar -C dist -czf ${BINARY_NAME}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${BINARY_NAME} skills
           if command -v shasum &>/dev/null; then
             shasum -a 256 ${BINARY_NAME}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > ${BINARY_NAME}-${{ github.ref_name }}-${{ matrix.target }}.sha256
           else

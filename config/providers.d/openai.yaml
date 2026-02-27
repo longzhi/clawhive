@@ -1,7 +1,0 @@
-provider_id: openai
-enabled: true
-api_base: https://api.openai.com/v1
-api_key_env: OPENAI_API_KEY
-models:
-  - gpt-4o
-  - gpt-4o-mini
