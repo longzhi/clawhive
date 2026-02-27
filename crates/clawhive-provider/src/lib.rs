@@ -49,6 +49,8 @@ pub trait LlmProvider: Send + Sync {
 pub enum ProviderType {
     Anthropic,
     OpenAI,
+    #[serde(rename = "azure-openai")]
+    AzureOpenAI,
     Gemini,
     DeepSeek,
     Groq,
@@ -120,6 +122,17 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> 
                 .base_url
                 .as_deref()
                 .unwrap_or("https://api.openai.com/v1");
+            Arc::new(OpenAiProvider::new(key.clone(), base_url))
+        }
+        ProviderType::AzureOpenAI => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("azure-openai requires api_key"))?;
+            let base_url = config
+                .base_url
+                .as_ref()
+                .ok_or_else(|| anyhow!("azure-openai requires base_url"))?;
             Arc::new(OpenAiProvider::new(key.clone(), base_url))
         }
         ProviderType::Gemini => {

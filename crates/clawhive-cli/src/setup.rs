@@ -28,13 +28,57 @@ enum SetupAction {
 enum ProviderId {
     Anthropic,
     OpenAi,
+    AzureOpenAi,
+    Gemini,
+    DeepSeek,
+    Groq,
+    Ollama,
+    OpenRouter,
+    Together,
+    Fireworks,
 }
+
+const ALL_PROVIDERS: &[ProviderId] = &[
+    ProviderId::Anthropic,
+    ProviderId::OpenAi,
+    ProviderId::AzureOpenAi,
+    ProviderId::Gemini,
+    ProviderId::DeepSeek,
+    ProviderId::Groq,
+    ProviderId::Ollama,
+    ProviderId::OpenRouter,
+    ProviderId::Together,
+    ProviderId::Fireworks,
+];
 
 impl ProviderId {
     fn as_str(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
+            Self::AzureOpenAi => "azure-openai",
+            Self::Gemini => "gemini",
+            Self::DeepSeek => "deepseek",
+            Self::Groq => "groq",
+            Self::Ollama => "ollama",
+            Self::OpenRouter => "openrouter",
+            Self::Together => "together",
+            Self::Fireworks => "fireworks",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAi => "OpenAI",
+            Self::AzureOpenAi => "Azure OpenAI",
+            Self::Gemini => "Google Gemini",
+            Self::DeepSeek => "DeepSeek",
+            Self::Groq => "Groq",
+            Self::Ollama => "Ollama (local)",
+            Self::OpenRouter => "OpenRouter",
+            Self::Together => "Together AI",
+            Self::Fireworks => "Fireworks AI",
         }
     }
 
@@ -42,6 +86,14 @@ impl ProviderId {
         match self {
             Self::Anthropic => "claude-sonnet-4-5",
             Self::OpenAi => "gpt-4o-mini",
+            Self::AzureOpenAi => "gpt-4o-mini",
+            Self::Gemini => "gemini-2.0-flash",
+            Self::DeepSeek => "deepseek-chat",
+            Self::Groq => "llama-3.3-70b-versatile",
+            Self::Ollama => "llama3.2",
+            Self::OpenRouter => "anthropic/claude-sonnet-4-5",
+            Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            Self::Fireworks => "accounts/fireworks/models/llama-v3p3-70b-instruct",
         }
     }
 
@@ -49,7 +101,27 @@ impl ProviderId {
         match self {
             Self::Anthropic => "https://api.anthropic.com/v1",
             Self::OpenAi => "https://api.openai.com/v1",
+            Self::AzureOpenAi => "https://<your-resource>.openai.azure.com/openai",
+            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+            Self::DeepSeek => "https://api.deepseek.com/v1",
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::Ollama => "http://localhost:11434/v1",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::Together => "https://api.together.xyz/v1",
+            Self::Fireworks => "https://api.fireworks.ai/inference/v1",
         }
+    }
+
+    fn supports_oauth(self) -> bool {
+        matches!(self, Self::Anthropic | Self::OpenAi)
+    }
+
+    fn needs_custom_base_url(self) -> bool {
+        matches!(self, Self::AzureOpenAi)
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        ALL_PROVIDERS.iter().find(|p| p.as_str() == s).copied()
     }
 }
 
@@ -170,8 +242,24 @@ async fn handle_add_provider(
         }
     }
 
+    let api_base_override = if provider.needs_custom_base_url() {
+        let base: String = Input::with_theme(theme)
+            .with_prompt(
+                "Azure OpenAI endpoint URL (e.g. https://myresource.openai.azure.com/openai)",
+            )
+            .interact_text()?;
+        Some(base)
+    } else {
+        None
+    };
+
     let auth = prompt_auth_choice(theme, provider).await?;
-    let path = write_provider_config_unchecked(config_root, provider, &auth)?;
+    let path = write_provider_config_unchecked(
+        config_root,
+        provider,
+        &auth,
+        api_base_override.as_deref(),
+    )?;
     print_done(
         term,
         &format!(
@@ -636,53 +724,64 @@ fn validate_generated_config(config_root: &Path) -> Result<()> {
 }
 
 fn prompt_provider(theme: &ColorfulTheme) -> Result<ProviderId> {
-    let options = ["Anthropic", "OpenAI"];
+    let options: Vec<&str> = ALL_PROVIDERS.iter().map(|p| p.display_name()).collect();
     let selected = Select::with_theme(theme)
         .with_prompt("Choose your LLM provider")
         .items(&options)
         .default(0)
         .interact()?;
 
-    match selected {
-        0 => Ok(ProviderId::Anthropic),
-        1 => Ok(ProviderId::OpenAi),
-        _ => Err(anyhow!("invalid provider selection index: {selected}")),
-    }
+    ALL_PROVIDERS
+        .get(selected)
+        .copied()
+        .ok_or_else(|| anyhow!("invalid provider selection index: {selected}"))
 }
 
 async fn prompt_auth_choice(theme: &ColorfulTheme, provider: ProviderId) -> Result<AuthChoice> {
-    let methods: Vec<&str> = match provider {
-        ProviderId::Anthropic => vec![
-            "Setup Token (run `claude setup-token` in terminal)",
-            "API Key (from console.anthropic.com/settings/keys)",
-        ],
-        ProviderId::OpenAi => vec![
-            "OAuth Login (use your ChatGPT subscription)",
-            "API Key (from platform.openai.com/api-keys)",
-        ],
-    };
-    let method = Select::with_theme(theme)
-        .with_prompt("Authentication method")
-        .items(&methods)
-        .default(0)
-        .interact()?;
+    if provider.supports_oauth() {
+        let methods: Vec<&str> = match provider {
+            ProviderId::Anthropic => vec![
+                "Setup Token (run `claude setup-token` in terminal)",
+                "API Key (from console.anthropic.com/settings/keys)",
+            ],
+            ProviderId::OpenAi => vec![
+                "OAuth Login (use your ChatGPT subscription)",
+                "API Key (from platform.openai.com/api-keys)",
+            ],
+            _ => unreachable!(),
+        };
+        let method = Select::with_theme(theme)
+            .with_prompt("Authentication method")
+            .items(&methods)
+            .default(0)
+            .interact()?;
 
-    match method {
-        0 => run_oauth_auth(provider).await,
-        1 => {
-            let api_key = Password::with_theme(theme)
-                .with_prompt(format!("Paste {} API key", provider.as_str()))
-                .allow_empty_password(false)
-                .interact()?;
-            if api_key.trim().is_empty() {
-                anyhow::bail!("API key cannot be empty");
-            }
-            Ok(AuthChoice::ApiKey {
-                api_key: api_key.trim().to_string(),
-            })
+        match method {
+            0 => run_oauth_auth(provider).await,
+            1 => prompt_api_key(theme, provider),
+            _ => Err(anyhow!("invalid auth method index: {method}")),
         }
-        _ => Err(anyhow!("invalid auth method index: {method}")),
+    } else if provider == ProviderId::Ollama {
+        // Ollama runs locally, no auth needed
+        Ok(AuthChoice::ApiKey {
+            api_key: String::new(),
+        })
+    } else {
+        prompt_api_key(theme, provider)
     }
+}
+
+fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<AuthChoice> {
+    let api_key = Password::with_theme(theme)
+        .with_prompt(format!("Paste {} API key", provider.display_name()))
+        .allow_empty_password(false)
+        .interact()?;
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API key cannot be empty");
+    }
+    Ok(AuthChoice::ApiKey {
+        api_key: api_key.trim().to_string(),
+    })
 }
 
 async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
@@ -691,6 +790,12 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
 
     match provider {
         ProviderId::OpenAi => {
+            let term = Term::stdout();
+            let _ = term.write_line("");
+            let _ = term.write_line("  Opening browser for OpenAI OAuth login...");
+            let _ = term.write_line("  Complete the login in your browser.");
+            let _ = term.write_line("  Waiting for callback (timeout: 5 minutes)...");
+            let _ = term.write_line("");
             let client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
             let config = OpenAiOAuthConfig::default_with_client(client_id);
             let http = reqwest::Client::new();
@@ -735,6 +840,9 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
             }
             manager.save_profile(&profile_name, profile_from_setup_token(token))?;
         }
+        _ => {
+            anyhow::bail!("OAuth is not supported for {}", provider.display_name());
+        }
     }
 
     Ok(AuthChoice::OAuth { profile_name })
@@ -744,13 +852,14 @@ fn write_provider_config_unchecked(
     config_root: &Path,
     provider: ProviderId,
     auth: &AuthChoice,
+    api_base_override: Option<&str>,
 ) -> Result<PathBuf> {
     let providers_dir = config_root.join("config/providers.d");
     fs::create_dir_all(&providers_dir)
         .with_context(|| format!("failed to create {}", providers_dir.display()))?;
 
     let target = providers_dir.join(format!("{}.yaml", provider.as_str()));
-    let yaml = generate_provider_yaml(provider, auth);
+    let yaml = generate_provider_yaml(provider, auth, api_base_override);
     fs::write(&target, yaml).with_context(|| format!("failed to write {}", target.display()))?;
     Ok(target)
 }
@@ -776,12 +885,17 @@ fn write_agent_files_unchecked(
     Ok(())
 }
 
-fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
+fn generate_provider_yaml(
+    provider: ProviderId,
+    auth: &AuthChoice,
+    api_base_override: Option<&str>,
+) -> String {
+    let base_url = api_base_override.unwrap_or(provider.api_base());
     match auth {
         AuthChoice::OAuth { profile_name } => {
             let base = match provider {
                 ProviderId::OpenAi => "https://chatgpt.com/backend-api/codex",
-                _ => provider.api_base(),
+                _ => base_url,
             };
             format!(
                 "provider_id: {provider}\nenabled: true\napi_base: {base}\nauth_profile: \"{profile}\"\nmodels:\n  - {model}\n",
@@ -791,13 +905,25 @@ fn generate_provider_yaml(provider: ProviderId, auth: &AuthChoice) -> String {
                 model = provider.default_model(),
             )
         }
-        AuthChoice::ApiKey { api_key } => format!(
-            "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key: \"{key}\"\nmodels:\n  - {model}\n",
-            provider = provider.as_str(),
-            base = provider.api_base(),
-            key = api_key,
-            model = provider.default_model(),
-        ),
+        AuthChoice::ApiKey { api_key } => {
+            if api_key.is_empty() {
+                // Ollama or other local providers without auth
+                format!(
+                    "provider_id: {provider}\nenabled: true\napi_base: {base}\nmodels:\n  - {model}\n",
+                    provider = provider.as_str(),
+                    base = base_url,
+                    model = provider.default_model(),
+                )
+            } else {
+                format!(
+                    "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key: \"{key}\"\nmodels:\n  - {model}\n",
+                    provider = provider.as_str(),
+                    base = base_url,
+                    key = api_key,
+                    model = provider.default_model(),
+                )
+            }
+        }
     }
 }
 
@@ -880,23 +1006,48 @@ fn generate_routing_yaml(
 }
 
 fn provider_models(provider: ProviderId) -> Vec<String> {
+    let prefix = provider.as_str();
     match provider {
         ProviderId::Anthropic => vec![
-            "anthropic/claude-sonnet-4-5".to_string(),
-            "anthropic/claude-3-haiku-20240307".to_string(),
+            format!("{prefix}/claude-sonnet-4-5"),
+            format!("{prefix}/claude-3-haiku-20240307"),
         ],
-        ProviderId::OpenAi => vec![
-            "openai/gpt-4o-mini".to_string(),
-            "openai/gpt-4o".to_string(),
+        ProviderId::OpenAi => vec![format!("{prefix}/gpt-4o-mini"), format!("{prefix}/gpt-4o")],
+        ProviderId::Gemini => vec![
+            format!("{prefix}/gemini-2.0-flash"),
+            format!("{prefix}/gemini-2.0-pro"),
         ],
+        ProviderId::DeepSeek => vec![
+            format!("{prefix}/deepseek-chat"),
+            format!("{prefix}/deepseek-reasoner"),
+        ],
+        ProviderId::Groq => vec![
+            format!("{prefix}/llama-3.3-70b-versatile"),
+            format!("{prefix}/mixtral-8x7b-32768"),
+        ],
+        ProviderId::Ollama => vec![format!("{prefix}/llama3.2"), format!("{prefix}/mistral")],
+        ProviderId::OpenRouter => vec![
+            format!("{prefix}/anthropic/claude-sonnet-4-5"),
+            format!("{prefix}/openai/gpt-4o"),
+        ],
+        ProviderId::Together => vec![
+            format!("{prefix}/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+            format!("{prefix}/mistralai/Mixtral-8x7B-Instruct-v0.1"),
+        ],
+        ProviderId::Fireworks => vec![
+            format!("{prefix}/accounts/fireworks/models/llama-v3p3-70b-instruct"),
+            format!("{prefix}/accounts/fireworks/models/mixtral-8x7b-instruct"),
+        ],
+        ProviderId::AzureOpenAi => {
+            vec![format!("{prefix}/gpt-4o-mini"), format!("{prefix}/gpt-4o")]
+        }
     }
 }
 
 fn provider_models_for_id(provider_id: &str) -> Vec<String> {
-    match provider_id {
-        "anthropic" => provider_models(ProviderId::Anthropic),
-        "openai" => provider_models(ProviderId::OpenAi),
-        _ => vec![],
+    match ProviderId::from_str(provider_id) {
+        Some(p) => provider_models(p),
+        None => vec![],
     }
 }
 
@@ -915,6 +1066,7 @@ mod tests {
         provider_models, provider_models_for_id, remove_channel_from_config,
         remove_routing_binding, validate_generated_config, write_agent_files_unchecked,
         write_provider_config_unchecked, AuthChoice, ChannelConfig, ProviderId, SetupAction,
+        ALL_PROVIDERS,
     };
     use crate::setup_scan::ConfigState;
 
@@ -925,6 +1077,7 @@ mod tests {
             &AuthChoice::OAuth {
                 profile_name: "openai-oauth".to_string(),
             },
+            None,
         );
 
         assert!(yaml.contains("provider_id: openai"));
@@ -940,6 +1093,7 @@ mod tests {
             &AuthChoice::ApiKey {
                 api_key: "sk-test-key".to_string(),
             },
+            None,
         );
 
         assert!(yaml.contains("provider_id: anthropic"));
@@ -966,33 +1120,28 @@ mod tests {
 
     #[test]
     fn provider_model_aliases_are_fully_qualified() {
-        let anthropic_models = provider_models(ProviderId::Anthropic);
-        let openai_models = provider_models(ProviderId::OpenAi);
-
-        assert!(anthropic_models.iter().all(|m| m.starts_with("anthropic/")));
-        assert!(openai_models.iter().all(|m| m.starts_with("openai/")));
+        for provider in ALL_PROVIDERS {
+            let models = provider_models(*provider);
+            let prefix = provider.as_str();
+            assert!(
+                models.iter().all(|m| m.starts_with(&format!("{prefix}/"))),
+                "all models for {} should start with {prefix}/",
+                provider.display_name()
+            );
+        }
     }
 
     #[test]
     fn provider_models_for_id_returns_known_provider_models() {
-        let anthropic = provider_models_for_id("anthropic");
-        let openai = provider_models_for_id("openai");
-        let unknown = provider_models_for_id("other");
-
-        assert_eq!(
-            anthropic,
-            vec![
-                "anthropic/claude-sonnet-4-5".to_string(),
-                "anthropic/claude-3-haiku-20240307".to_string(),
-            ]
-        );
-        assert_eq!(
-            openai,
-            vec![
-                "openai/gpt-4o-mini".to_string(),
-                "openai/gpt-4o".to_string()
-            ]
-        );
+        for provider in ALL_PROVIDERS {
+            let models = provider_models_for_id(provider.as_str());
+            assert!(
+                !models.is_empty(),
+                "provider_models_for_id({}) should return models",
+                provider.as_str()
+            );
+        }
+        let unknown = provider_models_for_id("nonexistent");
         assert!(unknown.is_empty());
     }
 
@@ -1141,6 +1290,7 @@ mod tests {
                 &AuthChoice::ApiKey {
                     api_key: "sk-test".to_string(),
                 },
+                None,
             ),
         )
         .expect("write provider yaml");
@@ -1185,6 +1335,7 @@ mod tests {
             &AuthChoice::ApiKey {
                 api_key: "sk-test".to_string(),
             },
+            None,
         )
         .expect("write provider config");
 
