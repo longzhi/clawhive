@@ -9,7 +9,7 @@ use clawhive_auth::oauth::{
 };
 use clawhive_auth::{AuthProfile, TokenManager};
 use console::{style, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 use crate::setup_scan::{scan_config, ConfigState};
 use crate::setup_ui::{print_done, print_logo, render_dashboard, ARROW, CRAB};
@@ -268,6 +268,16 @@ async fn handle_add_provider(
             )
             .interact_text()?;
         Some(base)
+    } else if provider == ProviderId::Ollama {
+        let base: String = Input::with_theme(theme)
+            .with_prompt("Ollama API URL")
+            .default(provider.api_base().to_string())
+            .interact_text()?;
+        if base == provider.api_base() {
+            None
+        } else {
+            Some(base)
+        }
     } else {
         None
     };
@@ -385,10 +395,15 @@ fn handle_add_channel(
         .default(default_id.to_string())
         .interact_text()?;
 
-    let token = Password::with_theme(theme)
+    let token: String = Input::with_theme(theme)
         .with_prompt("Bot token")
-        .allow_empty_password(false)
-        .interact()?;
+        .interact_text()?;
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!("Bot token cannot be empty");
+    }
+    let masked = mask_secret(&token);
+    println!("  {ARROW} Token saved: {masked}");
 
     if !state.agents.is_empty() {
         let agent_labels: Vec<&str> = state.agents.iter().map(|a| a.agent_id.as_str()).collect();
@@ -863,16 +878,24 @@ async fn prompt_auth_choice(
 }
 
 fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<AuthChoice> {
-    let api_key = Password::with_theme(theme)
+    let api_key: String = Input::with_theme(theme)
         .with_prompt(format!("Paste {} API key", provider.display_name()))
-        .allow_empty_password(false)
-        .interact()?;
-    if api_key.trim().is_empty() {
+        .interact_text()?;
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
         anyhow::bail!("API key cannot be empty");
     }
-    Ok(AuthChoice::ApiKey {
-        api_key: api_key.trim().to_string(),
-    })
+    let masked = mask_secret(&api_key);
+    println!("  {ARROW} Key saved: {masked}");
+    Ok(AuthChoice::ApiKey { api_key })
+}
+
+/// Show first 8 and last 4 characters, mask the middle with asterisks.
+fn mask_secret(s: &str) -> String {
+    if s.len() <= 16 {
+        return "*".repeat(s.len());
+    }
+    format!("{}****{}", &s[..8], &s[s.len() - 4..])
 }
 
 async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {

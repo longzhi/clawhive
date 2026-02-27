@@ -23,6 +23,22 @@ pub struct TestResult {
 }
 
 #[derive(Deserialize)]
+pub struct CreateProviderRequest {
+    pub provider_id: String,
+    pub api_base: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct CreateProviderResponse {
+    pub provider_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
 pub struct SetKeyRequest {
     pub api_key: String,
 }
@@ -35,7 +51,7 @@ pub struct SetKeyResult {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", get(list_providers))
+        .route("/", get(list_providers).post(create_provider))
         .route("/{id}", get(get_provider).put(update_provider))
         .route("/{id}/key", post(set_api_key))
         .route("/{id}/test", post(test_provider))
@@ -79,6 +95,47 @@ async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderSumma
     }
 
     Json(providers)
+}
+
+async fn create_provider(
+    State(state): State<AppState>,
+    Json(body): Json<CreateProviderRequest>,
+) -> Result<Json<CreateProviderResponse>, axum::http::StatusCode> {
+    if body.provider_id.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let providers_dir = state.root.join("config/providers.d");
+    std::fs::create_dir_all(&providers_dir)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let path = providers_dir.join(format!("{}.yaml", body.provider_id));
+    if path.exists() {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
+    let mut yaml = format!(
+        "provider_id: {}\nenabled: true\napi_base: {}\n",
+        body.provider_id, body.api_base
+    );
+
+    if let Some(key) = &body.api_key {
+        if !key.is_empty() {
+            yaml.push_str(&format!("api_key: \"{}\"\n", key));
+        }
+    }
+
+    yaml.push_str("models:\n");
+    for model in &body.models {
+        yaml.push_str(&format!("  - {}\n", model));
+    }
+
+    std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(CreateProviderResponse {
+        provider_id: body.provider_id,
+        enabled: true,
+    }))
 }
 
 async fn get_provider(

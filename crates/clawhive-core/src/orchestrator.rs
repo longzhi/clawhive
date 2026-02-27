@@ -312,7 +312,7 @@ impl Orchestrator {
     ) -> String {
         let workspace_root = self.workspace_root_for(agent_id);
         format!(
-            "{base_prompt}\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
+            "{base_prompt}\n\n## Execution Policy\nWhen you have the tools to complete a task, execute them directly without asking for confirmation. Do not announce your intent — act. If a tool call is denied due to access restrictions, use the grant_access tool immediately and retry. Only ask the user when you genuinely need information you cannot obtain yourself.\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
             workspace_root.display()
         )
     }
@@ -330,11 +330,14 @@ impl Orchestrator {
             "read" => ReadFileTool::new(ws, gate).execute(input, ctx).await,
             "write" => WriteFileTool::new(ws, gate).execute(input, ctx).await,
             "edit" => EditFileTool::new(ws, gate).execute(input, ctx).await,
-            "exec" => {
+            "exec" | "execute_command" => {
                 ExecuteCommandTool::new(ws, 30, gate)
                     .execute(input, ctx)
                     .await
             }
+            "grant_access" => GrantAccessTool::new(gate).execute(input, ctx).await,
+            "list_access" => ListAccessTool::new(gate).execute(input, ctx).await,
+            "revoke_access" => RevokeAccessTool::new(gate).execute(input, ctx).await,
             _ => self.tool_registry.execute(name, input, ctx).await,
         }
     }
@@ -578,9 +581,35 @@ impl Orchestrator {
                 }],
             });
         }
-        messages.push(LlmMessage::user(
-            self.runtime.preprocess_input(&inbound.text).await?,
-        ));
+        {
+            let preprocessed = self.runtime.preprocess_input(&inbound.text).await?;
+            let image_blocks: Vec<ContentBlock> = inbound
+                .attachments
+                .iter()
+                .filter(|a| a.kind == clawhive_schema::AttachmentKind::Image)
+                .map(|a| {
+                    let media_type = a
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "image/jpeg".to_string());
+                    ContentBlock::Image {
+                        data: a.url.clone(),
+                        media_type,
+                    }
+                })
+                .collect();
+
+            if image_blocks.is_empty() {
+                messages.push(LlmMessage::user(preprocessed));
+            } else {
+                let mut content = vec![ContentBlock::Text { text: preprocessed }];
+                content.extend(image_blocks);
+                messages.push(LlmMessage {
+                    role: "user".into(),
+                    content,
+                });
+            }
+        }
 
         let allowed = Self::forced_allowed_tools(
             forced_skills.as_deref(),
@@ -765,9 +794,35 @@ impl Orchestrator {
                 }],
             });
         }
-        messages.push(LlmMessage::user(
-            self.runtime.preprocess_input(&inbound.text).await?,
-        ));
+        {
+            let preprocessed = self.runtime.preprocess_input(&inbound.text).await?;
+            let image_blocks: Vec<ContentBlock> = inbound
+                .attachments
+                .iter()
+                .filter(|a| a.kind == clawhive_schema::AttachmentKind::Image)
+                .map(|a| {
+                    let media_type = a
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "image/jpeg".to_string());
+                    ContentBlock::Image {
+                        data: a.url.clone(),
+                        media_type,
+                    }
+                })
+                .collect();
+
+            if image_blocks.is_empty() {
+                messages.push(LlmMessage::user(preprocessed));
+            } else {
+                let mut content = vec![ContentBlock::Text { text: preprocessed }];
+                content.extend(image_blocks);
+                messages.push(LlmMessage {
+                    role: "user".into(),
+                    content,
+                });
+            }
+        }
 
         let allowed_stream = Self::forced_allowed_tools(
             forced_skills.as_deref(),

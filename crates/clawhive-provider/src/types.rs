@@ -6,6 +6,12 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        /// base64-encoded image data
+        data: String,
+        /// MIME type (e.g. "image/jpeg", "image/png")
+        media_type: String,
+    },
     ToolUse {
         id: String,
         name: String,

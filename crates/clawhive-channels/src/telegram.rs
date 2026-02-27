@@ -4,9 +4,12 @@ use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
 use clawhive_schema::BusMessage;
-use clawhive_schema::{ActionKind, InboundMessage, OutboundMessage};
+use clawhive_schema::{ActionKind, Attachment, AttachmentKind, InboundMessage, OutboundMessage};
+use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, Message, MessageEntityKind, MessageId, ReactionType};
+use teloxide::types::{
+    BotCommand, ChatAction, Message, MessageEntityKind, MessageId, ReactionType,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -77,6 +80,18 @@ impl TelegramBot {
 
     pub async fn run_impl(self) -> anyhow::Result<()> {
         let bot = Bot::new(&self.token);
+
+        // Register bot commands menu with Telegram
+        let commands = vec![
+            BotCommand::new("new", "Start a fresh session"),
+            BotCommand::new("status", "Show session status"),
+            BotCommand::new("model", "Show current model info"),
+            BotCommand::new("help", "Show available commands"),
+        ];
+        if let Err(e) = bot.set_my_commands(commands).await {
+            tracing::warn!("Failed to register Telegram bot commands: {e}");
+        }
+
         let adapter = Arc::new(TelegramAdapter::new(&self.connector_id));
         let gateway = self.gateway;
         let bus = self.bus;
@@ -105,10 +120,17 @@ impl TelegramBot {
             let gateway = gateway.clone();
 
             async move {
-                let text = match msg.text() {
-                    Some(text) => text.to_string(),
-                    None => return Ok::<(), teloxide::RequestError>(()),
-                };
+                let has_photo = msg.photo().is_some();
+                let text = msg
+                    .text()
+                    .or_else(|| msg.caption())
+                    .unwrap_or("")
+                    .to_string();
+
+                // Skip messages with no text and no photo
+                if text.is_empty() && !has_photo {
+                    return Ok::<(), teloxide::RequestError>(());
+                }
 
                 let chat_id = msg.chat.id;
                 let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(0);
@@ -119,6 +141,27 @@ impl TelegramBot {
                 inbound.is_mention = is_mention;
                 inbound.mention_target = mention_target;
                 inbound.thread_id = msg.thread_id.map(|thread| thread.0.to_string());
+
+                // Download photo if present
+                if let Some(photos) = msg.photo() {
+                    // Pick the largest photo (last in array)
+                    if let Some(photo) = photos.last() {
+                        match download_photo(&bot, &photo.file.id).await {
+                            Ok((base64_data, mime)) => {
+                                inbound.attachments.push(Attachment {
+                                    kind: AttachmentKind::Image,
+                                    url: base64_data,
+                                    mime_type: Some(mime),
+                                    file_name: None,
+                                    size: Some(photo.file.size as u64),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to download photo: {e}");
+                            }
+                        }
+                    }
+                }
 
                 let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
 
@@ -351,6 +394,30 @@ async fn spawn_action_listener(
             }
         }
     }
+}
+
+/// Download a Telegram photo by file_id, returning (base64_data, mime_type).
+async fn download_photo(bot: &Bot, file_id: &str) -> anyhow::Result<(String, String)> {
+    use base64::Engine;
+
+    let file = bot.get_file(file_id).await?;
+    let file_path = &file.path;
+
+    let mut buf = Vec::new();
+    bot.download_file(file_path, &mut buf).await?;
+
+    let mime = if file_path.ends_with(".png") {
+        "image/png"
+    } else if file_path.ends_with(".gif") {
+        "image/gif"
+    } else if file_path.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    };
+
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&buf);
+    Ok((base64_data, mime.to_string()))
 }
 
 /// Parse chat ID from conversation_scope (format: "chat:123" or "chat:-100123")

@@ -106,6 +106,73 @@ export interface ScheduleRunHistoryItem {
   duration_ms: number;
 }
 
+// Setup types
+export interface SetupStatus {
+  needs_setup: boolean;
+  has_providers: boolean;
+  has_active_agents: boolean;
+  has_channels: boolean;
+}
+
+export interface CreateProviderRequest {
+  provider_id: string;
+  api_base: string;
+  api_key?: string;
+  models: string[];
+}
+
+export interface CreateAgentRequest {
+  agent_id: string;
+  name: string;
+  emoji: string;
+  primary_model: string;
+}
+
+// Setup hooks
+export function useSetupStatus() {
+  return useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => apiFetch<SetupStatus>("/api/setup/status"),
+  });
+}
+
+export function useCreateProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CreateProviderRequest) =>
+      apiFetch<{ provider_id: string; enabled: boolean }>("/api/providers", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: ["setup-status"] });
+    },
+  });
+}
+
+export function useCreateAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CreateAgentRequest) =>
+      apiFetch<{ agent_id: string; enabled: boolean }>("/api/agents", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agents"] });
+      qc.invalidateQueries({ queryKey: ["setup-status"] });
+    },
+  });
+}
+
+export function useRestart() {
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<{ ok: boolean }>("/api/setup/restart", { method: "POST" }),
+  });
+}
+
 // Hooks
 export function useAgents() {
   return useQuery({ queryKey: ["agents"], queryFn: () => apiFetch<AgentSummary[]>("/api/agents") });

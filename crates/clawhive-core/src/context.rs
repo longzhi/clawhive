@@ -27,6 +27,10 @@ pub fn estimate_message_tokens(msg: &LlmMessage) -> usize {
             clawhive_provider::ContentBlock::Text { text } => {
                 total += estimate_tokens(text);
             }
+            clawhive_provider::ContentBlock::Image { data, .. } => {
+                // Rough estimate: ~85 tokens per 1KB of base64 image data
+                total += data.len() / 12;
+            }
             clawhive_provider::ContentBlock::ToolUse { input, .. } => {
                 total += estimate_tokens(&input.to_string());
             }

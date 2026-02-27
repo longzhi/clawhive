@@ -190,6 +190,8 @@ mod tests {
                 root: root.to_path_buf(),
                 bus: Arc::new(EventBus::new(16)),
                 gateway: None,
+                daemon_mode: false,
+                port: 3000,
             },
             tmp,
         )

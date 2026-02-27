@@ -57,9 +57,32 @@ pub struct SubAgentPolicy {
     pub allow_spawn: bool,
 }
 
+#[derive(Deserialize)]
+pub struct CreateAgentRequest {
+    pub agent_id: String,
+    #[serde(default = "default_agent_name")]
+    pub name: String,
+    #[serde(default = "default_agent_emoji")]
+    pub emoji: String,
+    pub primary_model: String,
+}
+
+fn default_agent_name() -> String {
+    "Clawhive".to_string()
+}
+fn default_agent_emoji() -> String {
+    "\u{1F41D}".to_string()
+}
+
+#[derive(Serialize)]
+pub struct CreateAgentResponse {
+    pub agent_id: String,
+    pub enabled: bool,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", get(list_agents))
+        .route("/", get(list_agents).post(create_agent))
         .route("/{id}", get(get_agent).put(update_agent))
         .route("/{id}/toggle", post(toggle_agent))
 }
@@ -100,6 +123,58 @@ async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary>> {
     }
 
     Json(agents)
+}
+
+async fn create_agent(
+    State(state): State<AppState>,
+    Json(body): Json<CreateAgentRequest>,
+) -> Result<Json<CreateAgentResponse>, axum::http::StatusCode> {
+    if body.agent_id.trim().is_empty() || body.primary_model.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let agents_dir = state.root.join("config/agents.d");
+    std::fs::create_dir_all(&agents_dir)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let path = agents_dir.join(format!("{}.yaml", body.agent_id));
+
+    // Write agent YAML (overwrite placeholder if it exists)
+    let yaml = format!(
+        "agent_id: {}\nenabled: true\nidentity:\n  name: \"{}\"\n  emoji: \"{}\"\nmodel_policy:\n  primary: \"{}\"\n  fallbacks: []\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n",
+        body.agent_id, body.name, body.emoji, body.primary_model
+    );
+    std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Create default system prompt if it doesn't exist
+    let prompts_dir = state.root.join(format!("prompts/{}", body.agent_id));
+    std::fs::create_dir_all(&prompts_dir)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let system_md = prompts_dir.join("system.md");
+    if !system_md.exists() {
+        let prompt = format!(
+            "You are {}, a helpful AI assistant powered by clawhive.\n\nYou are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.\n",
+            body.name
+        );
+        std::fs::write(&system_md, prompt)
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    // Update routing.yaml default_agent_id
+    let routing_path = state.root.join("config/routing.yaml");
+    if let Ok(content) = std::fs::read_to_string(&routing_path) {
+        if let Ok(mut val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            val["default_agent_id"] = serde_yaml::Value::String(body.agent_id.clone());
+            if let Ok(yaml_out) = serde_yaml::to_string(&val) {
+                let _ = std::fs::write(&routing_path, yaml_out);
+            }
+        }
+    }
+
+    Ok(Json(CreateAgentResponse {
+        agent_id: body.agent_id,
+        enabled: true,
+    }))
 }
 
 async fn get_agent(

@@ -48,6 +48,14 @@ impl GeminiProvider {
                     ContentBlock::Text { text } => {
                         parts.push(GeminiPart::Text { text: text.clone() });
                     }
+                    ContentBlock::Image { data, media_type } => {
+                        parts.push(GeminiPart::InlineData {
+                            inline_data: GeminiInlineData {
+                                mime_type: media_type.clone(),
+                                data: data.clone(),
+                            },
+                        });
+                    }
                     ContentBlock::ToolUse { id, name, input } => {
                         parts.push(GeminiPart::FunctionCall {
                             function_call: GeminiFunctionCall {
@@ -371,6 +379,10 @@ enum GeminiPart {
     Text {
         text: String,
     },
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: GeminiInlineData,
+    },
     FunctionCall {
         #[serde(rename = "functionCall")]
         function_call: GeminiFunctionCall,
@@ -379,6 +391,13 @@ enum GeminiPart {
         #[serde(rename = "functionResponse")]
         function_response: GeminiFunctionResponse,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GeminiInlineData {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

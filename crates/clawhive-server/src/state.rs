@@ -11,4 +11,8 @@ pub struct AppState {
     pub bus: Arc<clawhive_bus::EventBus>,
     /// Optional gateway handle for routes that need to inject inbound messages.
     pub gateway: Option<Arc<Gateway>>,
+    /// Whether the server was started in daemon mode (for restart).
+    pub daemon_mode: bool,
+    /// HTTP port the server is listening on (for restart).
+    pub port: u16,
 }

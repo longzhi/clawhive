@@ -300,6 +300,7 @@ async fn main() -> Result<()> {
             );
         }
         Commands::Start { daemon, tui, port } => {
+            ensure_skeleton_config(&cli.config_root, port)?;
             if daemon {
                 daemonize(&cli.config_root, tui, port)?;
             } else {
@@ -315,6 +316,7 @@ async fn main() -> Result<()> {
                 // Brief pause to let ports release
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
+            ensure_skeleton_config(&cli.config_root, port)?;
             if daemon {
                 daemonize(&cli.config_root, tui, port)?;
             } else {
@@ -1155,6 +1157,60 @@ async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn EmbeddingP
 }
 
 // ---------------------------------------------------------------------------
+// Skeleton config — first-run bootstrap
+// ---------------------------------------------------------------------------
+
+/// If `config/main.yaml` does not exist, create a minimal skeleton so the
+/// server can start and present the Web Setup Wizard.
+fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
+    let config_dir = root.join("config");
+    let main_yaml = config_dir.join("main.yaml");
+
+    if main_yaml.exists() {
+        return Ok(());
+    }
+
+    // Create directory structure
+    std::fs::create_dir_all(config_dir.join("agents.d"))?;
+    std::fs::create_dir_all(config_dir.join("providers.d"))?;
+    std::fs::create_dir_all(config_dir.join("schedules.d"))?;
+    let prompts_dir = root.join("prompts/clawhive-main");
+    std::fs::create_dir_all(&prompts_dir)?;
+
+    // config/main.yaml — channels disabled
+    std::fs::write(
+        &main_yaml,
+        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+    )?;
+
+    // config/routing.yaml
+    std::fs::write(
+        config_dir.join("routing.yaml"),
+        "default_agent_id: clawhive-main\nbindings: []\n",
+    )?;
+
+    // config/agents.d/clawhive-main.yaml — placeholder, disabled
+    std::fs::write(
+        config_dir.join("agents.d/clawhive-main.yaml"),
+        "agent_id: clawhive-main\nenabled: false\nidentity:\n  name: \"Clawhive\"\n  emoji: \"\\U0001F41D\"\nmodel_policy:\n  primary: \"\"\n  fallbacks: []\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n",
+    )?;
+
+    // prompts/clawhive-main/system.md
+    std::fs::write(
+        prompts_dir.join("system.md"),
+        "You are Clawhive, a helpful AI assistant powered by clawhive.\n\nYou are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.\n",
+    )?;
+
+    eprintln!();
+    eprintln!(
+        "  \u{1F41D} First run detected. Open http://localhost:{port}/setup to complete setup."
+    );
+    eprintln!();
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // PID file management
 // ---------------------------------------------------------------------------
 
@@ -1466,6 +1522,8 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
         root: root.to_path_buf(),
         bus: Arc::clone(&bus),
         gateway: Some(gateway.clone()),
+        daemon_mode: false,
+        port,
     };
     let http_addr = format!("0.0.0.0:{port}");
     tokio::spawn(async move {

@@ -96,13 +96,23 @@ impl AnthropicProvider {
                         .iter()
                         .any(|b| !matches!(b, crate::ContentBlock::Text { .. }));
                     if has_non_text {
-                        // Send as array for tool_use/tool_result messages
+                        // Send as array for tool_use/tool_result/image messages
                         let blocks: Vec<serde_json::Value> = m
                             .content
                             .iter()
                             .map(|b| match b {
                                 crate::ContentBlock::Text { text } => {
                                     serde_json::json!({"type": "text", "text": text})
+                                }
+                                crate::ContentBlock::Image { data, media_type } => {
+                                    serde_json::json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": data
+                                        }
+                                    })
                                 }
                                 crate::ContentBlock::ToolUse { id, name, input } => {
                                     serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})

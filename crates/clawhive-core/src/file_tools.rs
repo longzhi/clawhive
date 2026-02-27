@@ -14,7 +14,7 @@ async fn gate_check(
     gate: &AccessGate,
     resolved: &Path,
     level: AccessLevel,
-    path_str: &str,
+    _path_str: &str,
 ) -> Option<ToolOutput> {
     match gate.check(resolved, level).await {
         AccessResult::Allowed => None,
@@ -24,7 +24,7 @@ async fn gate_check(
         }),
         AccessResult::NeedGrant { dir, need } => Some(ToolOutput {
             content: format!(
-                "Access denied: directory {dir} is not authorized. Ask the user to grant {need} access to {path_str}."
+                "Access denied: directory {dir} is not authorized for {need} access. Call the grant_access tool with path=\"{dir}\" and level=\"{need}\" to request access, then retry."
             ),
             is_error: true,
         }),

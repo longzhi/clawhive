@@ -1,12 +1,22 @@
 "use client";
 
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Activity, Users, MessageSquare, Server } from "lucide-react";
-import { useMetrics } from "@/hooks/use-api";
+import { useMetrics, useSetupStatus } from "@/hooks/use-api";
 import { EventStream } from "@/components/dashboard/event-stream";
 
 export default function Dashboard() {
   const { data: metrics } = useMetrics();
+  const { data: setupStatus } = useSetupStatus();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (setupStatus?.needs_setup) {
+      router.replace("/setup");
+    }
+  }, [setupStatus, router]);
 
   return (
     <div className="grid gap-4 md:gap-8">

@@ -40,7 +40,7 @@ export default function RoutingPage() {
           <div className="flex items-center gap-4">
             <span className="text-sm font-medium whitespace-nowrap">Default Agent:</span>
             <Select 
-              value={routing?.default_agent_id} 
+              value={routing?.default_agent_id as string | undefined}
               onValueChange={handleDefaultAgentChange}
               disabled={updateRouting.isPending}
             >
@@ -75,14 +75,14 @@ export default function RoutingPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {routing?.bindings?.length === 0 ? (
+              {(routing?.bindings as any[] | undefined)?.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} className="text-center text-muted-foreground">
                     No routing rules configured
                   </TableCell>
                 </TableRow>
               ) : (
-                routing?.bindings?.map((binding: any, i: number) => (
+                (routing?.bindings as any[] | undefined)?.map((binding: any, i: number) => (
                   <TableRow key={i}>
                     <TableCell className="capitalize">{binding.channel_type}</TableCell>
                     <TableCell className="font-mono text-xs">{binding.connector_id}</TableCell>

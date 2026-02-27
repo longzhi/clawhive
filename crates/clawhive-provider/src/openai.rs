@@ -199,7 +199,7 @@ fn to_api_messages(system: Option<String>, messages: Vec<LlmMessage>) -> Vec<Api
     if let Some(system_text) = system {
         result.push(ApiMessage {
             role: "system".to_string(),
-            content: Some(system_text),
+            content: Some(serde_json::Value::String(system_text)),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -207,6 +207,10 @@ fn to_api_messages(system: Option<String>, messages: Vec<LlmMessage>) -> Vec<Api
 
     for message in messages {
         let text = message.text();
+        let has_images = message
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }));
         let tool_uses: Vec<ApiToolCall> = message
             .content
             .iter()
@@ -223,10 +227,43 @@ fn to_api_messages(system: Option<String>, messages: Vec<LlmMessage>) -> Vec<Api
             })
             .collect();
 
-        if !text.is_empty() || !tool_uses.is_empty() {
+        if has_images {
+            // Build multimodal content array for vision API
+            let mut parts = Vec::new();
+            for block in &message.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        parts.push(serde_json::json!({"type": "text", "text": text}));
+                    }
+                    ContentBlock::Image { data, media_type } => {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{media_type};base64,{data}")
+                            }
+                        }));
+                    }
+                    _ => {}
+                }
+            }
             result.push(ApiMessage {
                 role: message.role.clone(),
-                content: if text.is_empty() { None } else { Some(text) },
+                content: Some(serde_json::Value::Array(parts)),
+                tool_calls: if tool_uses.is_empty() {
+                    None
+                } else {
+                    Some(tool_uses)
+                },
+                tool_call_id: None,
+            });
+        } else if !text.is_empty() || !tool_uses.is_empty() {
+            result.push(ApiMessage {
+                role: message.role.clone(),
+                content: if text.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::String(text))
+                },
                 tool_calls: if tool_uses.is_empty() {
                     None
                 } else {
@@ -245,7 +282,7 @@ fn to_api_messages(system: Option<String>, messages: Vec<LlmMessage>) -> Vec<Api
             {
                 result.push(ApiMessage {
                     role: "tool".to_string(),
-                    content: Some(content),
+                    content: Some(serde_json::Value::String(content)),
                     tool_calls: None,
                     tool_call_id: Some(tool_use_id),
                 });
@@ -465,7 +502,7 @@ pub(crate) struct ApiRequest {
 pub(crate) struct ApiMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ApiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -646,7 +683,10 @@ mod tests {
         let req = LlmRequest::simple("gpt-4o-mini".into(), Some("be concise".into()), "hi".into());
         let api = OpenAiProvider::to_api_request(req, false);
         assert_eq!(api.messages[0].role, "system");
-        assert_eq!(api.messages[0].content.as_deref(), Some("be concise"));
+        assert_eq!(
+            api.messages[0].content,
+            Some(serde_json::Value::String("be concise".into()))
+        );
     }
 
     #[test]

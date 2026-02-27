@@ -203,8 +203,7 @@ impl SkillRegistry {
             lines.push(format!("- **{}**: {}", skill.name, skill.description));
         }
         lines.push(
-            "\nTo use a skill, ask to read the full SKILL.md for detailed instructions."
-                .to_string(),
+            "\nTo use a skill, read the full SKILL.md for detailed instructions.".to_string(),
         );
         lines.join("\n")
     }

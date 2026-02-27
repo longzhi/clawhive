@@ -654,6 +654,9 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
                         });
                     }
                 }
+                ContentBlock::Image { .. } => {
+                    // Image blocks not yet supported in ChatGPT Responses API adapter
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     // First, flush any accumulated text content
                     if !text_contents.is_empty() {

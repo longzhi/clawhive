@@ -329,7 +329,9 @@ impl ToolExecutor for GrantAccessTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "grant_access".into(),
-            description: "Grant the agent read or read-write access to a directory outside the workspace. Requires user approval.".into(),
+            description:
+                "Grant the agent read or read-write access to a directory outside the workspace."
+                    .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
