@@ -26,3 +26,6 @@ web/.env*.local
 # Node
 node_modules/
 package-lock.json
+
+# Local deploy script (not part of the project)
+deploy.sh

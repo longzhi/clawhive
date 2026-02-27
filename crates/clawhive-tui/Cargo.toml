@@ -22,7 +22,3 @@ clawhive-gateway = { path = "../clawhive-gateway" }
 [lib]
 name = "clawhive_tui"
 path = "src/lib.rs"
-
-[[bin]]
-name = "clawhive-tui"
-path = "src/main.rs"

@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-default-members = ["crates/clawhive-cli"]
 members = [
   "crates/clawhive-schema",
   "crates/clawhive-bus",
