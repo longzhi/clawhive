@@ -50,6 +50,9 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build release binary
+        env:
+          # sqlite-vec.c uses BSD u_int*_t types not available in musl
+          CFLAGS: ${{ contains(matrix.target, 'musl') && '-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t' || '' }}
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
             cross build --release --locked --target ${{ matrix.target }} -p clawhive-cli
