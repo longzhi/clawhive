@@ -4,17 +4,171 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MessageCircle, Loader2, Key, Trash2 } from "lucide-react";
-import { type ConnectorConfig, useChannelStatus, useChannels, useRemoveConnector, useUpdateChannels } from "@/hooks/use-api";
+import { MessageCircle, Loader2, Key, Trash2, Plus, ExternalLink } from "lucide-react";
+import { type ConnectorConfig, useChannelStatus, useChannels, useRemoveConnector, useUpdateChannels, useAddConnector } from "@/hooks/use-api";
 import { toast } from "sonner";
 import { AddConnectorDialog } from "@/components/channels/add-connector-dialog";
 import { RestartBanner } from "@/components/restart-banner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
-const CHANNEL_META: Record<string, { label: string; description: string; color: string }> = {
-  telegram: { label: "Telegram", description: "Bot API integration", color: "text-blue-500" },
-  discord: { label: "Discord", description: "Gateway connection", color: "text-indigo-500" },
+const CHANNEL_META: Record<string, { label: string; description: string; color: string; tokenLink: string }> = {
+  telegram: { label: "Telegram", description: "Bot API integration", color: "text-blue-500", tokenLink: "https://t.me/BotFather" },
+  discord: { label: "Discord", description: "Gateway connection", color: "text-indigo-500", tokenLink: "https://discord.com/developers/applications" },
+  slack: { label: "Slack", description: "Workspace bot", color: "text-purple-500", tokenLink: "https://api.slack.com/apps" },
+  whatsapp: { label: "WhatsApp", description: "Business API", color: "text-green-500", tokenLink: "https://developers.facebook.com/apps/" },
+  imessage: { label: "iMessage", description: "Apple Messages", color: "text-sky-500", tokenLink: "" },
 };
 
+// ---------------------------------------------------------------------------
+// Add Channel Dialog — creates the channel kind + first connector in one go
+// ---------------------------------------------------------------------------
+function AddChannelDialog({
+  existingKinds,
+  onDone,
+}: {
+  existingKinds: Set<string>;
+  onDone: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [selectedKind, setSelectedKind] = useState<string | null>(null);
+  const [connectorId, setConnectorId] = useState("");
+  const [token, setToken] = useState("");
+  const updateChannels = useUpdateChannels();
+  const addConnector = useAddConnector();
+  const { data: channels } = useChannels();
+  const [submitting, setSubmitting] = useState(false);
+
+  const reset = () => {
+    setSelectedKind(null);
+    setConnectorId("");
+    setToken("");
+  };
+
+  const handleSubmit = async () => {
+    if (!selectedKind || !connectorId || !token) return;
+    setSubmitting(true);
+    try {
+      // Step 1: Ensure the channel kind exists via PUT /api/channels
+      const current = channels ?? {};
+      if (!current[selectedKind]) {
+        const merged = { ...current, [selectedKind]: { enabled: true, connectors: [] } };
+        await updateChannels.mutateAsync(merged);
+      }
+      // Step 2: Add the connector
+      await addConnector.mutateAsync({ kind: selectedKind, connectorId, token });
+      toast.success(`${CHANNEL_META[selectedKind]?.label ?? selectedKind} channel added`);
+      onDone();
+      reset();
+      setOpen(false);
+    } catch {
+      toast.error("Failed to add channel");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const meta = selectedKind ? CHANNEL_META[selectedKind] : null;
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset(); }}>
+      <DialogTrigger asChild>
+        <Button size="sm" className="gap-1.5">
+          <Plus className="h-4 w-4" />
+          Add Channel
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add Channel</DialogTitle>
+          <DialogDescription>Connect a new messaging platform.</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-3 gap-3">
+          {Object.entries(CHANNEL_META).map(([kind, m]) => {
+            const exists = existingKinds.has(kind);
+            return (
+              <button
+                key={kind}
+                onClick={() => !exists && setSelectedKind(kind)}
+                disabled={exists}
+                className={`rounded-lg border px-4 py-4 text-left transition-all ${
+                  selectedKind === kind
+                    ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                    : exists
+                      ? "border-border opacity-40 cursor-not-allowed"
+                      : "border-border hover:border-primary/40 hover:bg-muted/50 cursor-pointer"
+                }`}
+              >
+                <div className="text-sm font-medium">{m.label}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{m.description}</div>
+                {exists && <span className="text-[10px] text-muted-foreground">configured</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        {selectedKind && meta && (
+          <div className="space-y-3 rounded-lg border p-4">
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Connector ID
+              </label>
+              <Input
+                placeholder={selectedKind === "telegram" ? "tg_main" : "dc_main"}
+                value={connectorId}
+                onChange={(e) => setConnectorId(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Bot Token
+              </label>
+              <Input
+                type="password"
+                placeholder={selectedKind === "telegram" ? "123456:ABC-DEF..." : "Bot token from Developer Portal"}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            {meta.tokenLink && (
+              <a
+                href={meta.tokenLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                Get a bot token <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button
+            onClick={handleSubmit}
+            disabled={!selectedKind || !connectorId || !token || submitting}
+          >
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add Channel"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Page
+// ---------------------------------------------------------------------------
 export default function ChannelsPage() {
   const { data: channels, isLoading } = useChannels();
   const { data: statuses } = useChannelStatus();
@@ -24,6 +178,14 @@ export default function ChannelsPage() {
   const [restartRequired, setRestartRequired] = useState(false);
 
   const statusMap = new Map((statuses ?? []).map((item) => [`${item.kind}:${item.connector_id}`, item.status]));
+
+  // Dynamic channel keys: merge known meta + any keys from backend
+  const channelKeys = Array.from(new Set([
+    ...Object.keys(CHANNEL_META),
+    ...Object.keys(channels ?? {}),
+  ]));
+
+  const existingKinds = new Set(Object.keys(channels ?? {}));
 
   const handleToggle = async (channelKey: string, enabled: boolean) => {
     if (!channels) return;
@@ -78,14 +240,21 @@ export default function ChannelsPage() {
     );
   }
 
-  const channelKeys = Object.keys(CHANNEL_META);
-
   return (
-    <div>
+    <div className="space-y-6">
       <RestartBanner visible={restartRequired} />
+
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Channels</h2>
+          <p className="text-sm text-muted-foreground">Manage messaging platform connections.</p>
+        </div>
+        <AddChannelDialog existingKinds={existingKinds} onDone={() => setRestartRequired(true)} />
+      </div>
+
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         {channelKeys.map((key) => {
-        const meta = CHANNEL_META[key];
+        const meta = CHANNEL_META[key] ?? { label: key, description: "", color: "text-muted-foreground" };
         const channel = channels?.[key];
         const enabled = channel?.enabled ?? false;
         const connectors: ConnectorConfig[] = channel?.connectors ?? [];
