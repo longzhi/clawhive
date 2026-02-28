@@ -114,7 +114,9 @@ impl ProviderId {
     }
 
     fn supports_oauth(self) -> bool {
-        matches!(self, Self::Anthropic | Self::OpenAi)
+        // Anthropic subscription (setup-token) is no longer supported in the wizard.
+        // The code path still exists in run_oauth_auth() for future use.
+        matches!(self, Self::OpenAi)
     }
 
     fn needs_custom_base_url(self) -> bool {
