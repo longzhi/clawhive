@@ -1,0 +1,6 @@
+provider_id: azure-openai
+enabled: false
+api_base: https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1
+api_key: ${AZURE_API_KEY}
+models:
+  - gpt-4o
