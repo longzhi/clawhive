@@ -252,7 +252,7 @@ struct FunctionCallBuilder {
     arguments: Option<String>,
 }
 
-fn parse_sse_stream(
+pub(crate) fn parse_sse_stream(
     byte_stream: impl Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl Stream<Item = Result<StreamChunk>> + Send {
     async_stream::stream! {
@@ -719,7 +719,7 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
     result
 }
 
-fn format_api_error(
+pub(crate) fn format_api_error(
     status: StatusCode,
     raw_text: &str,
     parsed: Option<ResponsesApiErrorEnvelope>,
@@ -742,7 +742,7 @@ fn format_api_error(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResponsesApiErrorEnvelope {
+pub(crate) struct ResponsesApiErrorEnvelope {
     error: ResponsesApiErrorBody,
 }
 
