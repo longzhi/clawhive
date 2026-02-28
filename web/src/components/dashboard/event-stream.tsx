@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,7 +22,7 @@ export function EventStream() {
 
   useEffect(() => {
     const connect = () => {
-      const es = new EventSource("http://localhost:3001/api/events/stream");
+      const es = new EventSource("/api/events/stream");
       eventSourceRef.current = es;
 
       es.onopen = () => setIsConnected(true);

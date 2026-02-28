@@ -1,5 +1,3 @@
-"use client";
-
 import { useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -99,8 +97,8 @@ export default function SessionsPage() {
                         </div>
                         <div className={cn(
                           "text-sm p-3 rounded-md whitespace-pre-wrap",
-                          msg.role === "user" 
-                            ? "bg-primary text-primary-foreground" 
+                          msg.role === "user"
+                            ? "bg-primary text-primary-foreground"
                             : "bg-muted text-foreground"
                         )}>
                           {msg.text}

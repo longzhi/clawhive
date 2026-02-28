@@ -1599,7 +1599,32 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     }
 
     if bots.is_empty() {
-        anyhow::bail!("No channel bots configured or enabled. Check main.yaml channels section.");
+        tracing::warn!("No channel bots configured or enabled. HTTP server is running for setup.");
+        eprintln!(
+            "  No channel bots configured. Waiting for setup via http://localhost:{port}/setup"
+        );
+        // Keep process alive for the HTTP setup wizard — wait for shutdown signal
+        let shutdown_signal = async {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("failed to install SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => tracing::info!("Received SIGINT, shutting down..."),
+                    _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down..."),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                ctrl_c.await.ok();
+                tracing::info!("Received SIGINT, shutting down...");
+            }
+        };
+        shutdown_signal.await;
+        remove_pid_file(root);
+        return Ok(());
     }
 
     tracing::info!("Starting {} channel bot(s)", bots.len());

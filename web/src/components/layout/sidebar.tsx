@@ -1,7 +1,4 @@
-'use client';
-
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Bot, MessageSquare, Radio, Brain, GitBranch, CalendarClock, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
@@ -22,7 +19,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ className, mobile }: SidebarProps) {
-  const pathname = usePathname();
+  const { pathname } = useLocation();
 
   return (
     <aside className={cn(
@@ -45,7 +42,7 @@ export function Sidebar({ className, mobile }: SidebarProps) {
           return (
             <Link
               key={item.href}
-              href={item.href}
+              to={item.href}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors relative group",
                 isActive 
@@ -67,7 +64,7 @@ export function Sidebar({ className, mobile }: SidebarProps) {
         </div>
 
         <Link
-          href="/settings"
+          to="/settings"
           className={cn(
             "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors relative",
             pathname === '/settings'

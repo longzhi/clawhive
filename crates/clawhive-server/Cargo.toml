@@ -25,6 +25,8 @@ clawhive-core = { path = "../clawhive-core" }
 clawhive-gateway = { path = "../clawhive-gateway" }
 clawhive-scheduler = { path = "../clawhive-scheduler" }
 clawhive-auth = { path = "../clawhive-auth" }
+rust-embed.workspace = true
+mime_guess.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

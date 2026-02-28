@@ -10,7 +10,7 @@
 
 # Web frontend
 web/node_modules/
-web/.next/
+web/dist/
 web/.env*.local
 
 # Sisyphus plans

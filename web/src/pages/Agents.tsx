@@ -1,5 +1,3 @@
-"use client";
-
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +17,7 @@ export default function AgentsPage() {
           <Plus className="mr-2 h-4 w-4" /> New Agent
         </Button>
       </div>
-      
+
       <div className="rounded-md border bg-card">
         <Table>
           <TableHeader>

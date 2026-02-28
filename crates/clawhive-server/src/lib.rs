@@ -1,3 +1,4 @@
+pub mod frontend;
 pub mod routes;
 pub mod state;
 
@@ -16,6 +17,7 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .nest("/api", routes::api_router())
+        .fallback(frontend::frontend_handler)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

@@ -1,7 +1,5 @@
-"use client";
-
 import { useState, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -28,6 +26,7 @@ interface ProviderMeta {
 const PROVIDERS: ProviderMeta[] = [
   { id: "anthropic", name: "Anthropic", apiBase: "https://api.anthropic.com/v1", needsKey: true, defaultModels: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
   { id: "openai", name: "OpenAI", apiBase: "https://api.openai.com/v1", needsKey: true, defaultModels: ["gpt-4o", "gpt-4o-mini"] },
+  { id: "azure-openai", name: "Azure OpenAI", apiBase: "https://myresource.openai.azure.com/openai/v1", needsKey: true, defaultModels: ["gpt-4o", "gpt-4o-mini"] },
   { id: "gemini", name: "Google Gemini", apiBase: "https://generativelanguage.googleapis.com/v1beta", needsKey: true, defaultModels: ["gemini-2.5-pro", "gemini-2.5-flash"] },
   { id: "deepseek", name: "DeepSeek", apiBase: "https://api.deepseek.com/v1", needsKey: true, defaultModels: ["deepseek-chat", "deepseek-reasoner"] },
   { id: "groq", name: "Groq", apiBase: "https://api.groq.com/openai/v1", needsKey: true, defaultModels: ["llama-3.3-70b-versatile"] },
@@ -43,7 +42,7 @@ const STEP_LABELS = ["Provider", "Agent", "Channel", "Launch"];
 // Main Setup Wizard
 // ---------------------------------------------------------------------------
 export default function SetupPage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { data: setupStatus, isLoading: statusLoading } = useSetupStatus();
   const [step, setStep] = useState(0);
 
@@ -76,9 +75,9 @@ export default function SetupPage() {
   // If already configured, redirect to dashboard
   useEffect(() => {
     if (setupStatus && !setupStatus.needs_setup) {
-      router.replace("/");
+      navigate("/", { replace: true });
     }
-  }, [setupStatus, router]);
+  }, [setupStatus, navigate]);
 
   // Set defaults when provider is selected
   useEffect(() => {
@@ -154,12 +153,10 @@ export default function SetupPage() {
     // Poll until server comes back
     const poll = setInterval(async () => {
       try {
-        const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/api/setup/status`
-        );
+        const res = await fetch("/api/setup/status");
         if (res.ok) {
           clearInterval(poll);
-          router.replace("/");
+          navigate("/", { replace: true });
         }
       } catch {
         // Server still restarting

@@ -1,5 +1,3 @@
-"use client";
-
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,7 +17,7 @@ export default function ProvidersPage() {
   const handleSaveKey = async (id: string) => {
     const apiKey = keys[id];
     if (!apiKey) return;
-    
+
     try {
       await setProviderKey.mutateAsync({ id, apiKey });
       toast.success("API key saved");
@@ -76,8 +74,8 @@ export default function ProvidersPage() {
           <CardContent className="grid gap-4 pt-4">
             <div className="flex items-center justify-between">
               <span className="text-sm text-muted-foreground">API Key</span>
-              <Badge 
-                variant={provider.key_configured ? "default" : "secondary"} 
+              <Badge
+                variant={provider.key_configured ? "default" : "secondary"}
                 className={provider.key_configured ? "bg-green-500 hover:bg-green-600" : "bg-amber-500 hover:bg-amber-600 text-white"}
               >
                 {provider.key_configured ? "Configured" : "Not Set"}
@@ -115,8 +113,8 @@ export default function ProvidersPage() {
                     onChange={(e) => setKeys(prev => ({ ...prev, [provider.provider_id]: e.target.value }))}
                   />
                 </div>
-                <Button 
-                  size="sm" 
+                <Button
+                  size="sm"
                   className="h-9"
                   onClick={() => handleSaveKey(provider.provider_id)}
                   disabled={setProviderKey.isPending || !keys[provider.provider_id]}
@@ -128,7 +126,7 @@ export default function ProvidersPage() {
                 <span className="text-xs text-muted-foreground">Sets {provider.api_key_env}</span>
               )}
             </div>
-            
+
             <div className="flex flex-col gap-2">
               <span className="text-sm text-muted-foreground">Models</span>
               <div className="flex flex-wrap gap-1">
@@ -140,9 +138,9 @@ export default function ProvidersPage() {
               </div>
             </div>
 
-            <Button 
-              variant="outline" 
-              size="sm" 
+            <Button
+              variant="outline"
+              size="sm"
               className="w-full mt-2"
               onClick={() => handleTest(provider.provider_id)}
               disabled={testProvider.isPending}
@@ -157,7 +155,7 @@ export default function ProvidersPage() {
           </CardContent>
         </Card>
       ))}
-      
+
       {providers?.length === 0 && (
         <div className="col-span-full text-center text-muted-foreground p-8">
           No providers configured

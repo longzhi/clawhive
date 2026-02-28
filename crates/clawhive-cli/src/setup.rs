@@ -102,7 +102,7 @@ impl ProviderId {
         match self {
             Self::Anthropic => "https://api.anthropic.com/v1",
             Self::OpenAi => "https://api.openai.com/v1",
-            Self::AzureOpenAi => "https://<your-resource>.openai.azure.com/openai",
+            Self::AzureOpenAi => "https://<your-resource>.openai.azure.com/openai/v1",
             Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             Self::DeepSeek => "https://api.deepseek.com/v1",
             Self::Groq => "https://api.groq.com/openai/v1",
@@ -266,7 +266,7 @@ async fn handle_add_provider(
     let api_base_override = if provider.needs_custom_base_url() {
         let base: String = Input::with_theme(theme)
             .with_prompt(
-                "Azure OpenAI endpoint URL (e.g. https://myresource.openai.azure.com/openai)",
+                "Azure OpenAI endpoint URL (e.g. https://myresource.openai.azure.com/openai/v1)",
             )
             .interact_text()?;
         Some(base)
