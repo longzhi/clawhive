@@ -32,8 +32,8 @@ use clawhive_memory::embedding::{
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
-    register_builtin_providers, AnthropicProvider, OpenAiChatGptProvider, OpenAiProvider,
-    ProviderRegistry,
+    register_builtin_providers, AnthropicProvider, AzureOpenAiProvider, OpenAiChatGptProvider,
+    OpenAiProvider, ProviderRegistry,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, ScheduleType, SqliteStore, WaitTask, WaitTaskManager};
@@ -945,6 +945,18 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                     );
                 } else {
                     tracing::warn!("OpenAI: no API key and no OAuth profile, skipping");
+                }
+            }
+            "azure-openai" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(AzureOpenAiProvider::new(
+                        api_key,
+                        provider_config.api_base.clone(),
+                    ));
+                    registry.register("azure-openai", provider);
+                } else {
+                    tracing::warn!("Azure OpenAI: no API key set, skipping");
                 }
             }
             _ => {
