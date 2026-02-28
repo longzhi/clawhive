@@ -63,8 +63,11 @@ pub struct MemoryStore {
 fn init_sqlite_vec() {
     use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
 
-    type Sqlite3AutoExtFn =
-        unsafe extern "C" fn(*mut sqlite3, *mut *mut i8, *const sqlite3_api_routines) -> i32;
+    type Sqlite3AutoExtFn = unsafe extern "C" fn(
+        *mut sqlite3,
+        *mut *mut std::ffi::c_char,
+        *const sqlite3_api_routines,
+    ) -> i32;
 
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute::<*const (), Sqlite3AutoExtFn>(
