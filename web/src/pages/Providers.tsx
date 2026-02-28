@@ -48,28 +48,48 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const [selected, setSelected] = useState<ProviderMeta | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [apiBase, setApiBase] = useState("");
-  const [models, setModels] = useState("");
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
+  const [customModels, setCustomModels] = useState<string[]>([]);
+  const [customInput, setCustomInput] = useState("");
   const createProvider = useCreateProvider();
 
   const reset = () => {
     setSelected(null);
     setApiKey("");
     setApiBase("");
-    setModels("");
+    setSelectedModels(new Set());
+    setCustomModels([]);
+    setCustomInput("");
   };
 
   const handleSelect = (p: ProviderMeta) => {
     setSelected(p);
     setApiBase(p.apiBase);
-    setModels(p.defaultModels.join(", "));
+    setSelectedModels(new Set(p.defaultModels));
+    setCustomModels([]);
+    setCustomInput("");
+  };
+
+  const toggleModel = (model: string) => {
+    setSelectedModels((prev) => {
+      const next = new Set(prev);
+      if (next.has(model)) next.delete(model);
+      else next.add(model);
+      return next;
+    });
+  };
+
+  const addCustomModel = () => {
+    const model = customInput.trim();
+    if (!model || selectedModels.has(model) || customModels.includes(model)) return;
+    setCustomModels((prev) => [...prev, model]);
+    setSelectedModels((prev) => new Set([...prev, model]));
+    setCustomInput("");
   };
 
   const handleSubmit = async () => {
     if (!selected) return;
-    const modelList = models
-      .split(",")
-      .map((m) => m.trim())
-      .filter(Boolean);
+    const modelList = Array.from(selectedModels);
     try {
       await createProvider.mutateAsync({
         provider_id: selected.id,
@@ -157,12 +177,55 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                 Models
               </label>
-              <Input
-                value={models}
-                onChange={(e) => setModels(e.target.value)}
-                placeholder="comma-separated model IDs"
-                className="mt-1"
-              />
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {selected.defaultModels.map((model) => (
+                  <button
+                    key={model}
+                    type="button"
+                    onClick={() => toggleModel(model)}
+                    className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-all ${
+                      selectedModels.has(model)
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:border-primary/40"
+                    }`}
+                  >
+                    {model}
+                  </button>
+                ))}
+                {customModels.map((model) => (
+                  <button
+                    key={model}
+                    type="button"
+                    onClick={() => {
+                      setCustomModels((prev) => prev.filter((m) => m !== model));
+                      setSelectedModels((prev) => { const next = new Set(prev); next.delete(model); return next; });
+                    }}
+                    className="rounded-md border border-primary bg-primary/10 text-primary px-2.5 py-1 text-xs font-medium transition-all hover:bg-destructive/10 hover:text-destructive hover:border-destructive"
+                    title="Click to remove"
+                  >
+                    {model} &times;
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 flex gap-1.5">
+                <Input
+                  placeholder="Add custom model..."
+                  value={customInput}
+                  onChange={(e) => setCustomInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustomModel(); } }}
+                  className="h-8 text-xs"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                  onClick={addCustomModel}
+                  disabled={!customInput.trim()}
+                >
+                  Add
+                </Button>
+              </div>
             </div>
           </div>
         )}
