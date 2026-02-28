@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod azure_openai;
 pub mod gemini;
 pub mod openai;
 pub mod openai_chatgpt;
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
+pub use azure_openai::AzureOpenAiProvider;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use openai_chatgpt::OpenAiChatGptProvider;
@@ -133,7 +135,7 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> 
                 .base_url
                 .as_ref()
                 .ok_or_else(|| anyhow!("azure-openai requires base_url"))?;
-            Arc::new(OpenAiProvider::new(key.clone(), base_url))
+            Arc::new(AzureOpenAiProvider::new(key.clone(), base_url.clone()))
         }
         ProviderType::Gemini => {
             let key = config
