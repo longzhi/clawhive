@@ -1127,6 +1127,7 @@ fn provider_models(provider: ProviderId) -> Vec<String> {
         ProviderId::Anthropic => vec![
             format!("{prefix}/claude-opus-4-6"),
             format!("{prefix}/claude-sonnet-4-6"),
+            format!("{prefix}/claude-opus-4-5"),
             format!("{prefix}/claude-sonnet-4-5"),
             format!("{prefix}/claude-haiku-4-5"),
         ],
