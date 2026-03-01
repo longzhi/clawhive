@@ -955,6 +955,7 @@ impl Orchestrator {
             None => self.tool_registry.tool_defs(),
         };
         let max_iterations = 10;
+        let mut continuation_injected = false;
 
         for _iteration in 0..max_iterations {
             // Check if we need to compact context
@@ -1003,6 +1004,27 @@ impl Orchestrator {
                 .collect();
 
             if tool_uses.is_empty() || resp.stop_reason.as_deref() != Some("tool_use") {
+                // Continuation detection: if the LLM just acknowledged the user's
+                // confirmation without calling any tools, nudge it to continue.
+                // This prevents the "收到" + stop pattern.
+                if !continuation_injected
+                    && tool_uses.is_empty()
+                    && Self::should_inject_continuation(&messages, &resp.text)
+                {
+                    continuation_injected = true;
+                    tracing::info!(
+                        text_len = resp.text.len(),
+                        "detected acknowledgment-without-action, injecting continuation"
+                    );
+                    messages.push(LlmMessage {
+                        role: "assistant".into(),
+                        content: resp.content.clone(),
+                    });
+                    messages.push(LlmMessage::user(
+                        "[System] You acknowledged but did not act. Continue executing the original task now. Use your tools.",
+                    ));
+                    continue;
+                }
                 return Ok((resp, messages));
             }
 
@@ -1075,6 +1097,91 @@ impl Orchestrator {
             .chat_with_tools(primary, fallbacks, final_req)
             .await?;
         Ok((resp, messages))
+    }
+
+    /// Detect if the LLM just acknowledged the user's response without acting.
+    /// Returns true when:
+    /// 1. The current response is short (< 200 chars) — a real answer is longer
+    /// 2. The previous assistant message was asking/confirming something
+    /// 3. There's a recent user message (the confirmation) right before this response
+    fn should_inject_continuation(messages: &[LlmMessage], response_text: &str) -> bool {
+        // Short response only — anything substantial is likely a real final answer
+        if response_text.chars().count() > 200 {
+            return false;
+        }
+
+        // Need at least 2 messages: [..., assistant (question), user (confirmation)]
+        if messages.len() < 2 {
+            return false;
+        }
+
+        // Find the last assistant message
+        let last_assistant = messages.iter().rev().find(|m| m.role == "assistant");
+        let Some(assistant_msg) = last_assistant else {
+            return false;
+        };
+
+        // Extract assistant text
+        let assistant_text: String = assistant_msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        // Was the assistant asking a question or requesting confirmation?
+        let question_signals = [
+            '?', '\u{ff1f}', // ? and ？
+        ];
+        let confirmation_keywords = [
+            "确认",
+            "选择",
+            "请",
+            "建议",
+            "哪",
+            "还是",
+            "choose",
+            "confirm",
+            "select",
+            "which",
+            "option",
+            "prefer",
+            "should",
+            "want me to",
+            "would you",
+        ];
+
+        let has_question_mark = question_signals.iter().any(|&c| assistant_text.contains(c));
+        let has_confirmation_keyword = confirmation_keywords
+            .iter()
+            .any(|kw| assistant_text.to_lowercase().contains(kw));
+
+        if !has_question_mark && !has_confirmation_keyword {
+            return false;
+        }
+
+        // Check the response looks like an acknowledgment (short, no real content)
+        let ack_patterns = [
+            "收到",
+            "好的",
+            "明白",
+            "了解",
+            "OK",
+            "ok",
+            "Got it",
+            "已",
+            "没问题",
+            "可以",
+            "Understood",
+            "Sure",
+        ];
+        let looks_like_ack = ack_patterns.iter().any(|p| response_text.contains(p))
+            || response_text.chars().count() < 80;
+
+        looks_like_ack
     }
 
     /// Handle the flow after a /reset or /new command.

@@ -65,6 +65,13 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - Install dependencies, build, test, run scripts
 - Create, edit, delete files in the workspace
 - Grant yourself access to directories you need
+- **Never present A/B choices for things you can decide.** If you need directory access, grant it. If you need to choose an approach, pick the best one and execute.
+
+**After receiving user confirmation or direction:**
+
+- IMMEDIATELY continue executing the original task with tool calls
+- Never just acknowledge ("收到"/"好的") and stop — that leaves the task incomplete
+- The user's response is your green light to ACT, not a conversation endpoint
 
 **Ask first (these leave the machine):**
 
