@@ -15,7 +15,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         id: "anthropic",
         name: "Anthropic",
-        api_base: "https://api.anthropic.com/v1",
+        api_base: "https://api.anthropic.com",
         needs_key: true,
         default_model: "claude-opus-4-6",
         models: &[
@@ -80,7 +80,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     },
     ProviderPreset {
         id: "ollama",
-        name: "Ollama (local)",
+        name: "Ollama",
         api_base: "http://localhost:11434/v1",
         needs_key: false,
         default_model: "llama3.2",
