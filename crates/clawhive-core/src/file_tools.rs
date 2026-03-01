@@ -39,9 +39,7 @@ async fn gate_check(
                     None
                 }
                 Err(e) => Some(ToolOutput {
-                    content: format!(
-                        "Access denied: cannot grant access to {dir}: {e}"
-                    ),
+                    content: format!("Access denied: cannot grant access to {dir}: {e}"),
                     is_error: true,
                 }),
             }
@@ -521,7 +519,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.is_error, "expected auto-grant to succeed: {}", result.content);
+        assert!(
+            !result.is_error,
+            "expected auto-grant to succeed: {}",
+            result.content
+        );
         assert!(result.content.contains("external"));
     }
 

@@ -1135,12 +1135,23 @@ impl Orchestrator {
             '?', '\u{ff1f}', // ? and ？
         ];
         let confirmation_keywords = [
+            // Chinese
             "确认",
             "选择",
             "请",
             "建议",
             "哪",
             "还是",
+            "同意",
+            "如果你",
+            "是否",
+            "要不要",
+            "可以吗",
+            "你觉得",
+            "你看",
+            "要我",
+            "需要你",
+            // English
             "choose",
             "confirm",
             "select",
@@ -1150,6 +1161,10 @@ impl Orchestrator {
             "should",
             "want me to",
             "would you",
+            "if you",
+            "do you",
+            "shall i",
+            "let me know",
         ];
 
         let has_question_mark = question_signals.iter().any(|&c| assistant_text.contains(c));
