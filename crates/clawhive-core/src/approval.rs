@@ -126,8 +126,7 @@ fn pattern_matches(pattern: &str, command: &str) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or(first_token);
 
-    if pattern.ends_with(" *") {
-        let prefix = &pattern[..pattern.len() - 2];
+    if let Some(prefix) = pattern.strip_suffix(" *") {
         basename == prefix || first_token == prefix
     } else {
         command.eq_ignore_ascii_case(pattern) || basename == pattern

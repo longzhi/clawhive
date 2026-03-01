@@ -32,6 +32,7 @@ pub struct ExecuteCommandTool {
 }
 
 impl ExecuteCommandTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         workspace: PathBuf,
         default_timeout: u64,

@@ -1020,9 +1020,7 @@ impl Orchestrator {
                         role: "assistant".into(),
                         content: resp.content.clone(),
                     });
-                    messages.push(LlmMessage::user(
-                        "[System] You acknowledged but did not act. Continue executing the original task now. Use your tools.",
-                    ));
+                    messages.push(LlmMessage::user("好的，继续吧。请直接执行下一步。"));
                     continue;
                 }
                 return Ok((resp, messages));
