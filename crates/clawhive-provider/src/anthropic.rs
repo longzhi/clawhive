@@ -148,7 +148,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
-        let url = format!("{}/v1/messages", self.api_base);
+        let url = format!("{}/messages", self.api_base);
         let payload = Self::to_api_request(request);
 
         let mut req = self
@@ -230,7 +230,7 @@ impl LlmProvider for AnthropicProvider {
         &self,
         request: LlmRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
-        let url = format!("{}/v1/messages", self.api_base);
+        let url = format!("{}/messages", self.api_base);
         let mut payload = Self::to_api_request(request);
         payload.stream = true;
 

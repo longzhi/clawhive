@@ -15,7 +15,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         id: "anthropic",
         name: "Anthropic",
-        api_base: "https://api.anthropic.com",
+        api_base: "https://api.anthropic.com/v1",
         needs_key: true,
         default_model: "claude-opus-4-6",
         models: &[
