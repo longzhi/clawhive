@@ -1020,7 +1020,9 @@ impl Orchestrator {
                         role: "assistant".into(),
                         content: resp.content.clone(),
                     });
-                    messages.push(LlmMessage::user("好的，继续吧。请直接执行下一步。"));
+                    messages.push(LlmMessage::user(
+                        "OK, go ahead. Proceed with the next step.",
+                    ));
                     continue;
                 }
                 return Ok((resp, messages));
