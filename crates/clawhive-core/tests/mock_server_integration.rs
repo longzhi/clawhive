@@ -124,7 +124,7 @@ fn make_orchestrator_with_provider(
 
 async fn mount_success(server: &MockServer, text: &str) {
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mock_anthropic_response(text)))
         .mount(server)
         .await;
@@ -135,7 +135,7 @@ async fn mock_server_e2e_chat() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .and(header("x-api-key", "test-key"))
         .and(header("anthropic-version", "2023-06-01"))
         .respond_with(
@@ -225,7 +225,7 @@ async fn mock_server_publishes_bus_events() {
 async fn mock_server_handles_api_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(mock_anthropic_error(500, "upstream failure"))
         .mount(&server)
         .await;
@@ -249,14 +249,14 @@ async fn mock_server_handles_rate_limit() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(mock_anthropic_error(429, "rate limited"))
         .up_to_n_times(1)
         .mount(&server)
         .await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(mock_anthropic_response("retry success")),
         )
@@ -294,13 +294,13 @@ async fn mock_server_fallback_on_failure() {
     let fallback = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(mock_anthropic_error(500, "primary failed"))
         .mount(&primary)
         .await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(mock_anthropic_response("fallback success")),
         )
@@ -337,7 +337,7 @@ async fn mock_server_validates_request_headers() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .and(header("x-api-key", "test-key"))
         .and(header("anthropic-version", "2023-06-01"))
         .and(header("content-type", "application/json"))
@@ -387,7 +387,7 @@ async fn mock_server_multi_turn_session() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(mock_anthropic_response("multi turn")),
         )
@@ -415,7 +415,7 @@ async fn mock_server_includes_session_history() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(mock_anthropic_response("reply with history")),
         )
@@ -468,14 +468,14 @@ async fn mock_server_tool_use_loop() {
     let final_response = mock_anthropic_response("Here is what I found in memory.");
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(tool_use_response))
         .up_to_n_times(1)
         .mount(&server)
         .await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/messages"))
+        .and(path("/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(final_response))
         .mount(&server)
         .await;
