@@ -823,7 +823,9 @@ async fn bootstrap(
 
     let bus = Arc::new(EventBus::new(256));
     let publisher = bus.publisher();
-    let approval_registry = Arc::new(ApprovalRegistry::new());
+    let approval_registry = Arc::new(ApprovalRegistry::with_persistence(
+        root.join("data/exec_allowlist.json"),
+    ));
     let schedule_manager = Arc::new(ScheduleManager::new(
         &root.join("config/schedules.d"),
         &root.join("data/schedules"),
@@ -1241,9 +1243,13 @@ fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
     )?;
 
     eprintln!();
-    eprintln!(
-        "  \u{1F41D} First run detected. Open http://localhost:{port}/setup to complete setup."
-    );
+    eprintln!("  \u{1F41D} First run detected — setup required.");
+    eprintln!();
+    eprintln!("     Open the Web Setup Wizard to get started:");
+    eprintln!();
+    eprintln!("       → http://localhost:{port}/setup");
+    eprintln!();
+    eprintln!("     Or use the CLI wizard: clawhive setup");
     eprintln!();
 
     Ok(())
@@ -1632,9 +1638,9 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 
     if bots.is_empty() {
         tracing::warn!("No channel bots configured or enabled. HTTP server is running for setup.");
-        eprintln!(
-            "  No channel bots configured. Waiting for setup via http://localhost:{port}/setup"
-        );
+        eprintln!("  No channel bots configured yet.");
+        eprintln!();
+        eprintln!("     Complete setup at → http://localhost:{port}/setup");
         // Keep process alive for the HTTP setup wizard — wait for shutdown signal
         let shutdown_signal = async {
             let ctrl_c = tokio::signal::ctrl_c();

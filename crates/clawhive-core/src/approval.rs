@@ -2,6 +2,7 @@
 //! tool executors (requesters) and UI (responders).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clawhive_schema::ApprovalDecision;
@@ -18,13 +19,28 @@ pub struct PendingApproval {
     sender: oneshot::Sender<ApprovalDecision>,
 }
 
+/// Persisted runtime allowlist — survives process restarts.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedAllowlist {
+    /// agent_id → list of allowed command patterns
+    agents: HashMap<String, Vec<String>>,
+}
+
 /// Registry for managing pending approval requests.
 /// Tool executors register requests, UI resolves them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ApprovalRegistry {
     pending: Arc<Mutex<HashMap<Uuid, PendingApproval>>>,
     short_id_map: Arc<Mutex<HashMap<String, Uuid>>>,
     runtime_allowlist: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Path to persist runtime allowlist (None = in-memory only, for tests)
+    persist_path: Option<PathBuf>,
+}
+
+impl Default for ApprovalRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ApprovalRegistry {
@@ -33,6 +49,31 @@ impl ApprovalRegistry {
             pending: Arc::new(Mutex::new(HashMap::new())),
             short_id_map: Arc::new(Mutex::new(HashMap::new())),
             runtime_allowlist: Arc::new(Mutex::new(HashMap::new())),
+            persist_path: None,
+        }
+    }
+
+    /// Create a registry that persists the runtime allowlist to disk.
+    pub fn with_persistence(path: PathBuf) -> Self {
+        // Load existing allowlist from disk
+        let loaded = if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(data) => {
+                    serde_json::from_str::<PersistedAllowlist>(&data)
+                        .unwrap_or_default()
+                        .agents
+                }
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            short_id_map: Arc::new(Mutex::new(HashMap::new())),
+            runtime_allowlist: Arc::new(Mutex::new(loaded)),
+            persist_path: Some(path),
         }
     }
 
@@ -105,6 +146,18 @@ impl ApprovalRegistry {
         let entry = map.entry(agent_id.to_string()).or_default();
         if !entry.iter().any(|p| p == &pattern) {
             entry.push(pattern);
+        }
+        // Persist to disk
+        if let Some(ref path) = self.persist_path {
+            let persisted = PersistedAllowlist {
+                agents: map.clone(),
+            };
+            if let Ok(data) = serde_json::to_string_pretty(&persisted) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, data);
+            }
         }
     }
 
