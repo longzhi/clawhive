@@ -286,13 +286,29 @@ pub fn resolve_path(workspace: &Path, requested: &str) -> Result<PathBuf> {
         return Err(anyhow!("path must not be empty"));
     }
 
-    let candidate = if Path::new(requested).is_absolute() {
-        PathBuf::from(requested)
+    // Expand ~ to home directory
+    let expanded = if requested == "~" || requested.starts_with("~/") {
+        match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            Ok(home) => {
+                if requested == "~" {
+                    home
+                } else {
+                    format!("{}{}", home, &requested[1..])
+                }
+            }
+            Err(_) => requested.to_string(),
+        }
+    } else {
+        requested.to_string()
+    };
+
+    let candidate = if Path::new(&expanded).is_absolute() {
+        PathBuf::from(&expanded)
     } else {
         let ws_canon = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
-        ws_canon.join(requested)
+        ws_canon.join(&expanded)
     };
 
     // If the file already exists, canonicalize to resolve symlinks
@@ -766,5 +782,27 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("Revoked"));
         assert!(gate.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_path_tilde_expands_to_home() {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap();
+        let resolved = resolve_path(Path::new("/tmp"), "~/.zshrc").unwrap();
+        assert!(resolved.is_absolute());
+        assert!(resolved.to_string_lossy().starts_with(&home));
+        assert!(resolved.to_string_lossy().ends_with(".zshrc"));
+        // Must NOT contain the workspace path
+        assert!(!resolved.to_string_lossy().contains("/tmp/~"));
+    }
+
+    #[tokio::test]
+    async fn resolve_path_tilde_alone() {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap();
+        let resolved = resolve_path(Path::new("/tmp"), "~").unwrap();
+        assert_eq!(resolved.to_string_lossy().as_ref(), &home);
     }
 }
