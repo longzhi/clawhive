@@ -69,48 +69,21 @@ impl ProviderId {
     }
 
     fn display_name(self) -> &'static str {
-        match self {
-            Self::Anthropic => "Anthropic",
-            Self::OpenAi => "OpenAI",
-            Self::AzureOpenAi => "Azure OpenAI",
-            Self::Gemini => "Google Gemini",
-            Self::DeepSeek => "DeepSeek",
-            Self::Groq => "Groq",
-            Self::Ollama => "Ollama (local)",
-            Self::OpenRouter => "OpenRouter",
-            Self::Together => "Together AI",
-            Self::Fireworks => "Fireworks AI",
-        }
+        clawhive_schema::provider_presets::preset_by_id(self.as_str())
+            .map(|p| p.name)
+            .unwrap_or(self.as_str())
     }
 
     fn default_model(self) -> &'static str {
-        match self {
-            Self::Anthropic => "claude-opus-4-6",
-            Self::OpenAi => "gpt-5.3-codex",
-            Self::AzureOpenAi => "gpt-5.3-codex",
-            Self::Gemini => "gemini-2.5-pro",
-            Self::DeepSeek => "deepseek-chat",
-            Self::Groq => "llama-3.3-70b-versatile",
-            Self::Ollama => "llama3.2",
-            Self::OpenRouter => "anthropic/claude-sonnet-4-6",
-            Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            Self::Fireworks => "accounts/fireworks/models/llama-v3p3-70b-instruct",
-        }
+        clawhive_schema::provider_presets::preset_by_id(self.as_str())
+            .map(|p| p.default_model)
+            .unwrap_or("unknown")
     }
 
     fn api_base(self) -> &'static str {
-        match self {
-            Self::Anthropic => "https://api.anthropic.com/v1",
-            Self::OpenAi => "https://api.openai.com/v1",
-            Self::AzureOpenAi => "https://<your-resource>.openai.azure.com/openai/v1",
-            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
-            Self::DeepSeek => "https://api.deepseek.com/v1",
-            Self::Groq => "https://api.groq.com/openai/v1",
-            Self::Ollama => "http://localhost:11434/v1",
-            Self::OpenRouter => "https://openrouter.ai/api/v1",
-            Self::Together => "https://api.together.xyz/v1",
-            Self::Fireworks => "https://api.fireworks.ai/inference/v1",
-        }
+        clawhive_schema::provider_presets::preset_by_id(self.as_str())
+            .map(|p| p.api_base)
+            .unwrap_or("")
     }
 
     fn supports_oauth(self) -> bool {
@@ -121,10 +94,6 @@ impl ProviderId {
 
     fn needs_custom_base_url(self) -> bool {
         matches!(self, Self::AzureOpenAi)
-    }
-
-    fn from_str(s: &str) -> Option<Self> {
-        ALL_PROVIDERS.iter().find(|p| p.as_str() == s).copied()
     }
 }
 
@@ -388,12 +357,12 @@ fn handle_add_channel(
         _ => return Ok(()),
     };
     let default_id = match channel_type {
-        "telegram" => "tg-main",
-        _ => "dc-main",
+        "telegram" => "my_telegram_bot",
+        _ => "my_discord_bot",
     };
 
     let connector_id: String = Input::with_theme(theme)
-        .with_prompt("Connector ID")
+        .with_prompt("Bot name (a unique name to identify this bot)")
         .default(default_id.to_string())
         .interact_text()?;
 
@@ -1121,70 +1090,8 @@ fn generate_routing_yaml(
     out
 }
 
-fn provider_models(provider: ProviderId) -> Vec<String> {
-    let prefix = provider.as_str();
-    match provider {
-        ProviderId::Anthropic => vec![
-            format!("{prefix}/claude-opus-4-6"),
-            format!("{prefix}/claude-sonnet-4-6"),
-            format!("{prefix}/claude-opus-4-5"),
-            format!("{prefix}/claude-sonnet-4-5"),
-            format!("{prefix}/claude-haiku-4-5"),
-        ],
-        ProviderId::OpenAi => vec![
-            format!("{prefix}/gpt-5.3-codex"),
-            format!("{prefix}/gpt-5.2"),
-            format!("{prefix}/gpt-5.2-codex"),
-            format!("{prefix}/gpt-5.1-codex-max"),
-            format!("{prefix}/o3-pro"),
-        ],
-        ProviderId::AzureOpenAi => vec![
-            format!("{prefix}/gpt-5.3-codex"),
-            format!("{prefix}/gpt-5.2"),
-            format!("{prefix}/gpt-5.2-codex"),
-            format!("{prefix}/gpt-5.1-codex-max"),
-            format!("{prefix}/o3-pro"),
-        ],
-        ProviderId::Gemini => vec![
-            format!("{prefix}/gemini-2.5-pro"),
-            format!("{prefix}/gemini-2.5-flash"),
-            format!("{prefix}/gemini-2.0-flash"),
-        ],
-        ProviderId::DeepSeek => vec![
-            format!("{prefix}/deepseek-chat"),
-            format!("{prefix}/deepseek-reasoner"),
-        ],
-        ProviderId::Groq => vec![
-            format!("{prefix}/llama-3.3-70b-versatile"),
-            format!("{prefix}/llama-3.1-8b-instant"),
-        ],
-        ProviderId::Ollama => vec![
-            format!("{prefix}/llama3.2"),
-            format!("{prefix}/qwen2.5-coder"),
-            format!("{prefix}/mistral"),
-        ],
-        ProviderId::OpenRouter => vec![
-            format!("{prefix}/openai/gpt-5.3-codex"),
-            format!("{prefix}/anthropic/claude-opus-4-6"),
-            format!("{prefix}/google/gemini-2.5-pro"),
-            format!("{prefix}/openai/gpt-5.2"),
-        ],
-        ProviderId::Together => vec![
-            format!("{prefix}/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
-            format!("{prefix}/meta-llama/Llama-4-Scout-17B-16E-Instruct"),
-        ],
-        ProviderId::Fireworks => vec![
-            format!("{prefix}/accounts/fireworks/models/llama-v3p3-70b-instruct"),
-            format!("{prefix}/accounts/fireworks/models/llama4-scout-instruct-basic"),
-        ],
-    }
-}
-
 fn provider_models_for_id(provider_id: &str) -> Vec<String> {
-    match ProviderId::from_str(provider_id) {
-        Some(p) => provider_models(p),
-        None => vec![],
-    }
+    clawhive_schema::provider_presets::provider_models_for_id(provider_id)
 }
 
 fn unix_timestamp() -> Result<i64> {
@@ -1199,10 +1106,9 @@ mod tests {
     use super::{
         add_channel_to_config, build_action_labels, default_system_prompt, ensure_required_dirs,
         generate_agent_yaml, generate_main_yaml, generate_provider_yaml, generate_routing_yaml,
-        provider_models, provider_models_for_id, remove_channel_from_config,
-        remove_routing_binding, validate_generated_config, write_agent_files_unchecked,
-        write_provider_config_unchecked, AuthChoice, ChannelConfig, ProviderId, SetupAction,
-        ALL_PROVIDERS,
+        provider_models_for_id, remove_channel_from_config, remove_routing_binding,
+        validate_generated_config, write_agent_files_unchecked, write_provider_config_unchecked,
+        AuthChoice, ChannelConfig, ProviderId, SetupAction, ALL_PROVIDERS,
     };
     use crate::setup_scan::ConfigState;
 
@@ -1257,10 +1163,12 @@ mod tests {
     #[test]
     fn provider_model_aliases_are_fully_qualified() {
         for provider in ALL_PROVIDERS {
-            let models = provider_models(*provider);
+            let models = provider_models_for_id(provider.as_str());
             let prefix = provider.as_str();
             assert!(
-                models.iter().all(|m| m.starts_with(&format!("{prefix}/"))),
+                models
+                    .iter()
+                    .all(|m: &String| m.starts_with(&format!("{prefix}/"))),
                 "all models for {} should start with {prefix}/",
                 provider.display_name()
             );

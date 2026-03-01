@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clawhive_bus::{BusPublisher, EventBus, Topic};
-use clawhive_core::{Orchestrator, RoutingConfig};
+use clawhive_core::{ApprovalRegistry, Orchestrator, RoutingConfig};
 use clawhive_schema::*;
 use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
@@ -81,6 +81,7 @@ pub struct Gateway {
     routing: RoutingConfig,
     bus: BusPublisher,
     rate_limiter: RateLimiter,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
     /// Tracks the last active channel per agent for heartbeat delivery.
     last_active_channels: Arc<TokioMutex<StdHashMap<String, ChannelTarget>>>,
 }
@@ -99,13 +100,62 @@ impl Gateway {
         routing: RoutingConfig,
         bus: BusPublisher,
         rate_limiter: RateLimiter,
+        approval_registry: Option<Arc<ApprovalRegistry>>,
     ) -> Self {
         Self {
             orchestrator,
             routing,
             bus,
             rate_limiter,
+            approval_registry,
             last_active_channels: Arc::new(TokioMutex::new(StdHashMap::new())),
+        }
+    }
+
+    async fn try_handle_approve(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
+        let text = inbound.text.trim();
+        if !text.starts_with("/approve") {
+            return None;
+        }
+
+        let registry = self.approval_registry.as_ref()?;
+        let make_reply = |text: String| OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type.clone(),
+            connector_id: inbound.connector_id.clone(),
+            conversation_scope: inbound.conversation_scope.clone(),
+            text,
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        };
+
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        if parts.len() < 3 {
+            return Some(make_reply(
+                "Usage: /approve <id> allow|always|deny".to_string(),
+            ));
+        }
+
+        let short_id = parts[1];
+        let decision = match parts[2].to_ascii_lowercase().as_str() {
+            "allow" | "once" | "allow-once" => ApprovalDecision::AllowOnce,
+            "always" | "allow-always" | "always-allow" => ApprovalDecision::AlwaysAllow,
+            "deny" | "reject" | "block" => ApprovalDecision::Deny,
+            _ => {
+                return Some(make_reply(format!(
+                    "Unknown decision '{}'. Use: allow, always, or deny",
+                    parts[2]
+                )));
+            }
+        };
+
+        match registry
+            .resolve_by_short_id(short_id, decision.clone())
+            .await
+        {
+            Ok(()) => Some(make_reply(format!("✅ Approval resolved: {:?}", decision))),
+            Err(e) => Some(make_reply(format!("❌ {e}"))),
         }
     }
 
@@ -136,6 +186,10 @@ impl Gateway {
     }
 
     pub async fn handle_inbound(&self, inbound: InboundMessage) -> Result<OutboundMessage> {
+        if let Some(approval_response) = self.try_handle_approve(&inbound).await {
+            return Ok(approval_response);
+        }
+
         if !self.rate_limiter.check(&inbound.user_scope).await {
             return Err(anyhow::anyhow!("rate limited: too many requests"));
         }
@@ -340,6 +394,49 @@ pub fn spawn_scheduled_task_listener(
     })
 }
 
+pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let publisher = bus.publisher();
+        let mut rx = bus.subscribe(Topic::NeedHumanApproval).await;
+        while let Some(msg) = rx.recv().await {
+            let BusMessage::NeedHumanApproval {
+                trace_id,
+                reason: _,
+                agent_id,
+                command,
+                source_channel_type,
+                source_connector_id,
+                source_conversation_scope,
+            } = msg
+            else {
+                continue;
+            };
+
+            let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
+                source_channel_type,
+                source_connector_id,
+                source_conversation_scope,
+            ) else {
+                continue;
+            };
+
+            let short_id = &trace_id.to_string()[..8];
+            let text = format!(
+                "⚠️ *Command Approval Required*\nAgent: `{agent_id}`\nCommand: `{command}`\n\nReply with:\n`/approve {short_id} allow` - Allow once\n`/approve {short_id} always` - Always allow\n`/approve {short_id} deny` - Deny"
+            );
+
+            let _ = publisher
+                .publish(BusMessage::DeliverAnnounce {
+                    channel_type: ch_type,
+                    connector_id: conn_id,
+                    conversation_scope: conv_scope,
+                    text,
+                })
+                .await;
+        }
+    })
+}
+
 /// Spawns a listener that handles WaitTask completion events.
 /// When a wait task completes, the result is delivered to the originating session.
 pub fn spawn_wait_task_listener(
@@ -418,7 +515,7 @@ mod tests {
     use clawhive_provider::{register_builtin_providers, ProviderRegistry};
     use clawhive_runtime::NativeExecutor;
     use clawhive_scheduler::ScheduleManager;
-    use clawhive_schema::{BusMessage, InboundMessage};
+    use clawhive_schema::{ApprovalDecision, BusMessage, InboundMessage};
 
     use super::*;
 
@@ -462,6 +559,8 @@ mod tests {
             sub_agent: None,
             workspace: None,
             heartbeat: None,
+            exec_security: None,
+            sandbox: None,
         }];
         let orch = Arc::new(Orchestrator::new(
             router,
@@ -471,6 +570,7 @@ mod tests {
             SkillRegistry::new(),
             memory,
             publisher.clone(),
+            None,
             Arc::new(NativeExecutor),
             file_store,
             session_writer,
@@ -487,7 +587,10 @@ mod tests {
             bindings: vec![],
         };
         let rate_limiter = RateLimiter::new(RateLimitConfig::default());
-        (Gateway::new(orch, routing, publisher, rate_limiter), tmp)
+        (
+            Gateway::new(orch, routing, publisher, rate_limiter, None),
+            tmp,
+        )
     }
 
     async fn make_gateway_with_receivers() -> (
@@ -537,6 +640,8 @@ mod tests {
             sub_agent: None,
             workspace: None,
             heartbeat: None,
+            exec_security: None,
+            sandbox: None,
         }];
         let orch = Arc::new(Orchestrator::new(
             router,
@@ -546,6 +651,7 @@ mod tests {
             SkillRegistry::new(),
             memory,
             publisher.clone(),
+            None,
             Arc::new(NativeExecutor),
             file_store,
             session_writer,
@@ -563,7 +669,7 @@ mod tests {
         };
         let rate_limiter = RateLimiter::new(RateLimitConfig::default());
         (
-            Gateway::new(orch, routing, publisher, rate_limiter),
+            Gateway::new(orch, routing, publisher, rate_limiter, None),
             handle_incoming_rx,
             message_accepted_rx,
             tmp,
@@ -849,6 +955,65 @@ mod tests {
             accepted,
             BusMessage::MessageAccepted { trace_id } if trace_id == expected_trace
         ));
+    }
+
+    #[tokio::test]
+    async fn approve_command_resolves_pending_by_short_id() {
+        let (mut gw, _tmp) = make_gateway();
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+        gw.approval_registry = Some(approval_registry.clone());
+
+        let trace_id = uuid::Uuid::new_v4();
+        let short_id = trace_id.to_string()[..8].to_string();
+        let rx = approval_registry
+            .request(trace_id, "echo ok".to_string(), "agent-x".to_string())
+            .await;
+
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:approve".into(),
+            user_scope: "user:approve".into(),
+            text: format!("/approve {short_id} allow"),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
+        };
+
+        let out = gw.handle_inbound(inbound).await.unwrap();
+        assert!(out.text.contains("Approval resolved"));
+        let decision = rx.await.unwrap();
+        assert_eq!(decision, ApprovalDecision::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn approve_command_with_invalid_args_returns_usage() {
+        let (mut gw, _tmp) = make_gateway();
+        gw.approval_registry = Some(Arc::new(ApprovalRegistry::new()));
+
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:approve".into(),
+            user_scope: "user:approve".into(),
+            text: "/approve".into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+            message_id: None,
+            attachments: vec![],
+            group_context: None,
+        };
+
+        let out = gw.handle_inbound(inbound).await.unwrap();
+        assert!(out.text.contains("Usage: /approve"));
     }
 
     #[test]

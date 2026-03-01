@@ -119,14 +119,15 @@ function AddChannelDialog({
           <div className="space-y-3 rounded-lg border p-4">
             <div>
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Connector ID
+                Bot Name
               </label>
               <Input
-                placeholder={selectedKind === "telegram" ? "tg_main" : "dc_main"}
+                placeholder={selectedKind === "telegram" ? "my_telegram_bot" : selectedKind === "discord" ? "my_discord_bot" : `my_${selectedKind}_bot`}
                 value={connectorId}
                 onChange={(e) => setConnectorId(e.target.value)}
                 className="mt-1"
               />
+              <p className="text-xs text-muted-foreground mt-1">A unique name to identify this bot, no spaces (e.g. support_bot, main_bot)</p>
             </div>
             <div>
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -185,7 +186,12 @@ export default function ChannelsPage() {
     ...Object.keys(channels ?? {}),
   ]));
 
-  const existingKinds = new Set(Object.keys(channels ?? {}));
+  // Only consider a channel kind as "existing" if it has at least one connector
+  const existingKinds = new Set(
+    Object.entries(channels ?? {})
+      .filter(([, ch]) => ch.connectors && ch.connectors.length > 0)
+      .map(([kind]) => kind)
+  );
 
   const handleToggle = async (channelKey: string, enabled: boolean) => {
     if (!channels) return;

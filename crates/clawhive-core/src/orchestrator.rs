@@ -15,7 +15,8 @@ use clawhive_schema::*;
 use futures_core::Stream;
 
 use super::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
-use super::config::FullAgentConfig;
+use super::approval::ApprovalRegistry;
+use super::config::{ExecSecurityConfig, FullAgentConfig, SandboxPolicyConfig};
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
 use super::memory_tools::{MemoryGetTool, MemorySearchTool};
@@ -53,6 +54,7 @@ pub struct Orchestrator {
     #[allow(dead_code)]
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
     runtime: Arc<dyn TaskExecutor>,
     #[allow(dead_code)]
     workspace_root: std::path::PathBuf,
@@ -79,6 +81,7 @@ impl Orchestrator {
         skill_registry: SkillRegistry,
         memory: Arc<MemoryStore>,
         bus: BusPublisher,
+        approval_registry: Option<Arc<ApprovalRegistry>>,
         runtime: Arc<dyn TaskExecutor>,
         file_store: MemoryFileStore,
         session_writer: SessionWriter,
@@ -91,6 +94,7 @@ impl Orchestrator {
         schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
     ) -> Self {
         let router = Arc::new(router);
+        let bus_for_tools = bus.clone();
         let agents_map: HashMap<String, FullAgentConfig> = agents
             .into_iter()
             .map(|a| (a.agent_id.clone(), a))
@@ -157,6 +161,11 @@ impl Orchestrator {
             workspace_root.clone(),
             30,
             default_access_gate.clone(),
+            ExecSecurityConfig::default(),
+            SandboxPolicyConfig::default(),
+            approval_registry.clone(),
+            Some(bus_for_tools.clone()),
+            "global".to_string(),
         )));
         // Access control tools
         tool_registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
@@ -186,6 +195,7 @@ impl Orchestrator {
             skill_registry,
             memory,
             bus,
+            approval_registry,
             runtime,
             workspace_root,
             agent_workspaces,
@@ -312,7 +322,7 @@ impl Orchestrator {
     ) -> String {
         let workspace_root = self.workspace_root_for(agent_id);
         format!(
-            "{base_prompt}\n\n## Execution Policy\nWhen you have the tools to complete a task, execute them directly without asking for confirmation. Do not announce your intent — act. If a tool call is denied due to access restrictions, use the grant_access tool immediately and retry. Only ask the user when you genuinely need information you cannot obtain yourself.\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
+            "{base_prompt}\n\n## Execution Policy (OVERRIDES any general safety guidelines)\nWhen you have the tools to complete a task, execute them directly without asking for confirmation. Do not announce your intent — act. If a tool call is denied due to access restrictions, use the grant_access tool immediately and retry — do NOT ask the user about this. Only ask the user when you genuinely need information you cannot obtain yourself. This policy takes precedence over any 'ask first' or 'when in doubt' guidelines in your workspace files.\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
             workspace_root.display()
         )
     }
@@ -326,14 +336,38 @@ impl Orchestrator {
     ) -> Result<super::tool::ToolOutput> {
         let gate = self.access_gate_for(agent_id);
         let ws = self.workspace_root_for(agent_id);
+        let (exec_security, sandbox_config) = self
+            .agents
+            .get(agent_id)
+            .map(|agent| {
+                (
+                    agent.exec_security.clone().unwrap_or_default(),
+                    agent.sandbox.clone().unwrap_or_default(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    ExecSecurityConfig::default(),
+                    SandboxPolicyConfig::default(),
+                )
+            });
         match name {
             "read" => ReadFileTool::new(ws, gate).execute(input, ctx).await,
             "write" => WriteFileTool::new(ws, gate).execute(input, ctx).await,
             "edit" => EditFileTool::new(ws, gate).execute(input, ctx).await,
             "exec" | "execute_command" => {
-                ExecuteCommandTool::new(ws, 30, gate)
-                    .execute(input, ctx)
-                    .await
+                ExecuteCommandTool::new(
+                    ws,
+                    sandbox_config.timeout_secs,
+                    gate,
+                    exec_security,
+                    sandbox_config,
+                    self.approval_registry.clone(),
+                    Some(self.bus.clone()),
+                    agent_id.to_string(),
+                )
+                .execute(input, ctx)
+                .await
             }
             "grant_access" => GrantAccessTool::new(gate).execute(input, ctx).await,
             "list_access" => ListAccessTool::new(gate).execute(input, ctx).await,

@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Brain, Loader2, CheckCircle, Key, ShieldCheck, Plus } from "lucide-react";
-import { useAuthStatus, useProviders, useTestProvider, useSetProviderKey, useCreateProvider } from "@/hooks/use-api";
+import { Brain, Loader2, CheckCircle, Key, ShieldCheck, Plus, ChevronDown, X } from "lucide-react";
+import { useAuthStatus, useProviders, useTestProvider, useSetProviderKey, useCreateProvider, useProviderPresets } from "@/hooks/use-api";
+import type { ProviderPreset } from "@/hooks/use-api";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -16,42 +17,154 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 
-// ---------------------------------------------------------------------------
-// Known provider presets (mirrors Setup.tsx)
-// ---------------------------------------------------------------------------
-interface ProviderMeta {
-  id: string;
-  name: string;
-  apiBase: string;
-  needsKey: boolean;
-  defaultModels: string[];
-}
+// Provider presets are fetched from the backend API (single source of truth).
 
-const KNOWN_PROVIDERS: ProviderMeta[] = [
-  { id: "anthropic", name: "Anthropic", apiBase: "https://api.anthropic.com/v1", needsKey: true, defaultModels: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
-  { id: "openai", name: "OpenAI", apiBase: "https://api.openai.com/v1", needsKey: true, defaultModels: ["gpt-4o", "gpt-4o-mini"] },
-  { id: "azure-openai", name: "Azure OpenAI", apiBase: "https://myresource.openai.azure.com/openai/v1", needsKey: true, defaultModels: ["gpt-4o", "gpt-4o-mini"] },
-  { id: "gemini", name: "Google Gemini", apiBase: "https://generativelanguage.googleapis.com/v1beta", needsKey: true, defaultModels: ["gemini-2.5-pro", "gemini-2.5-flash"] },
-  { id: "deepseek", name: "DeepSeek", apiBase: "https://api.deepseek.com/v1", needsKey: true, defaultModels: ["deepseek-chat", "deepseek-reasoner"] },
-  { id: "groq", name: "Groq", apiBase: "https://api.groq.com/openai/v1", needsKey: true, defaultModels: ["llama-3.3-70b-versatile"] },
-  { id: "ollama", name: "Ollama", apiBase: "http://localhost:11434/v1", needsKey: false, defaultModels: ["llama3.2", "mistral"] },
-  { id: "openrouter", name: "OpenRouter", apiBase: "https://openrouter.ai/api/v1", needsKey: true, defaultModels: ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"] },
-  { id: "together", name: "Together AI", apiBase: "https://api.together.xyz/v1", needsKey: true, defaultModels: ["meta-llama/Llama-3.3-70B-Instruct-Turbo"] },
-  { id: "fireworks", name: "Fireworks AI", apiBase: "https://api.fireworks.ai/inference/v1", needsKey: true, defaultModels: ["accounts/fireworks/models/llama-v3p3-70b-instruct"] },
-];
+// ---------------------------------------------------------------------------
+// Model Multi-Select Dropdown
+// ---------------------------------------------------------------------------
+function ModelMultiSelect({
+  defaultModels,
+  selectedModels,
+  customModels,
+  onToggle,
+  onAddCustom,
+  onRemoveCustom,
+}: {
+  defaultModels: string[];
+  selectedModels: Set<string>;
+  customModels: string[];
+  onToggle: (model: string) => void;
+  onAddCustom: (model: string) => void;
+  onRemoveCustom: (model: string) => void;
+}) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [customInput, setCustomInput] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  const allModels = [...defaultModels, ...customModels];
+  const selectedCount = selectedModels.size;
+
+  return (
+    <div ref={containerRef} className="relative">
+      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        Models
+      </label>
+      {/* Selected tags */}
+      <button
+        type="button"
+        onClick={() => setDropdownOpen(!dropdownOpen)}
+        className="mt-1 flex w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background hover:bg-muted/50"
+      >
+        <span className="flex flex-wrap gap-1">
+          {selectedCount === 0 ? (
+            <span className="text-muted-foreground">Select models...</span>
+          ) : (
+            Array.from(selectedModels).map((model) => (
+              <span
+                key={model}
+                className="inline-flex items-center gap-0.5 rounded bg-primary/10 text-primary px-1.5 py-0.5 text-xs font-medium"
+              >
+                {model}
+                <X
+                  className="h-3 w-3 cursor-pointer hover:text-destructive"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (customModels.includes(model)) onRemoveCustom(model);
+                    else onToggle(model);
+                  }}
+                />
+              </span>
+            ))
+          )}
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
+      </button>
+      {/* Dropdown */}
+      {dropdownOpen && (
+        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover shadow-md">
+          <div className="max-h-48 overflow-y-auto p-1">
+            {allModels.map((model) => (
+              <label
+                key={model}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedModels.has(model)}
+                  onChange={() => {
+                    if (customModels.includes(model) && selectedModels.has(model)) {
+                      onRemoveCustom(model);
+                    } else {
+                      onToggle(model);
+                    }
+                  }}
+                  className="h-3.5 w-3.5 rounded border-input accent-primary"
+                />
+                <span>{model}</span>
+                {customModels.includes(model) && (
+                  <span className="ml-auto text-[10px] text-muted-foreground">custom</span>
+                )}
+              </label>
+            ))}
+          </div>
+          <div className="border-t p-2">
+            <div className="flex gap-1.5">
+              <Input
+                placeholder="Add custom model..."
+                value={customInput}
+                onChange={(e) => setCustomInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    const v = customInput.trim();
+                    if (v) { onAddCustom(v); setCustomInput(""); }
+                  }
+                }}
+                className="h-7 text-xs"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => {
+                  const v = customInput.trim();
+                  if (v) { onAddCustom(v); setCustomInput(""); }
+                }}
+                disabled={!customInput.trim()}
+              >
+                Add
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Add Provider Dialog
 // ---------------------------------------------------------------------------
 function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const [open, setOpen] = useState(false);
-  const [selected, setSelected] = useState<ProviderMeta | null>(null);
+  const [selected, setSelected] = useState<ProviderPreset | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [apiBase, setApiBase] = useState("");
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [customModels, setCustomModels] = useState<string[]>([]);
-  const [customInput, setCustomInput] = useState("");
   const createProvider = useCreateProvider();
+  const { data: presets } = useProviderPresets();
 
   const reset = () => {
     setSelected(null);
@@ -59,15 +172,13 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
     setApiBase("");
     setSelectedModels(new Set());
     setCustomModels([]);
-    setCustomInput("");
   };
 
-  const handleSelect = (p: ProviderMeta) => {
+  const handleSelect = (p: ProviderPreset) => {
     setSelected(p);
-    setApiBase(p.apiBase);
-    setSelectedModels(new Set(p.defaultModels));
+    setApiBase(p.api_base);
+    setSelectedModels(new Set(p.models));
     setCustomModels([]);
-    setCustomInput("");
   };
 
   const toggleModel = (model: string) => {
@@ -79,23 +190,15 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
     });
   };
 
-  const addCustomModel = () => {
-    const model = customInput.trim();
-    if (!model || selectedModels.has(model) || customModels.includes(model)) return;
-    setCustomModels((prev) => [...prev, model]);
-    setSelectedModels((prev) => new Set([...prev, model]));
-    setCustomInput("");
-  };
-
   const handleSubmit = async () => {
     if (!selected) return;
     const modelList = Array.from(selectedModels);
     try {
       await createProvider.mutateAsync({
         provider_id: selected.id,
-        api_base: apiBase || selected.apiBase,
-        api_key: selected.needsKey ? apiKey || undefined : undefined,
-        models: modelList.length > 0 ? modelList : selected.defaultModels,
+        api_base: apiBase || selected.api_base,
+        api_key: selected.needs_key ? apiKey || undefined : undefined,
+        models: modelList.length > 0 ? modelList : selected.models,
       });
       toast.success(`Provider ${selected.name} added`);
       reset();
@@ -125,7 +228,7 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
         </DialogHeader>
 
         <div className="grid grid-cols-3 gap-2">
-          {KNOWN_PROVIDERS.map((p) => {
+          {(presets ?? []).map((p) => {
             const exists = existingIds.has(p.id);
             return (
               <button
@@ -159,7 +262,7 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
                 className="mt-1"
               />
             </div>
-            {selected.needsKey && (
+            {selected.needs_key && (
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   API Key
@@ -173,67 +276,28 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
                 />
               </div>
             )}
-            <div>
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Models
-              </label>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {selected.defaultModels.map((model) => (
-                  <button
-                    key={model}
-                    type="button"
-                    onClick={() => toggleModel(model)}
-                    className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-all ${
-                      selectedModels.has(model)
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border text-muted-foreground hover:border-primary/40"
-                    }`}
-                  >
-                    {model}
-                  </button>
-                ))}
-                {customModels.map((model) => (
-                  <button
-                    key={model}
-                    type="button"
-                    onClick={() => {
-                      setCustomModels((prev) => prev.filter((m) => m !== model));
-                      setSelectedModels((prev) => { const next = new Set(prev); next.delete(model); return next; });
-                    }}
-                    className="rounded-md border border-primary bg-primary/10 text-primary px-2.5 py-1 text-xs font-medium transition-all hover:bg-destructive/10 hover:text-destructive hover:border-destructive"
-                    title="Click to remove"
-                  >
-                    {model} &times;
-                  </button>
-                ))}
-              </div>
-              <div className="mt-2 flex gap-1.5">
-                <Input
-                  placeholder="Add custom model..."
-                  value={customInput}
-                  onChange={(e) => setCustomInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustomModel(); } }}
-                  className="h-8 text-xs"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 px-3 text-xs"
-                  onClick={addCustomModel}
-                  disabled={!customInput.trim()}
-                >
-                  Add
-                </Button>
-              </div>
-            </div>
+            <ModelMultiSelect
+              defaultModels={selected.models}
+              selectedModels={selectedModels}
+              customModels={customModels}
+              onToggle={toggleModel}
+              onAddCustom={(model) => {
+                if (selectedModels.has(model) || customModels.includes(model)) return;
+                setCustomModels((prev) => [...prev, model]);
+                setSelectedModels((prev) => new Set([...prev, model]));
+              }}
+              onRemoveCustom={(model) => {
+                setCustomModels((prev) => prev.filter((m) => m !== model));
+                setSelectedModels((prev) => { const next = new Set(prev); next.delete(model); return next; });
+              }}
+            />
           </div>
         )}
 
         <DialogFooter>
           <Button
             onClick={handleSubmit}
-            disabled={!selected || createProvider.isPending || (selected.needsKey && !apiKey)}
+            disabled={!selected || createProvider.isPending || (selected.needs_key && !apiKey)}
           >
             {createProvider.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add Provider"}
           </Button>

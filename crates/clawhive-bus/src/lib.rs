@@ -296,6 +296,11 @@ mod tests {
                 BusMessage::NeedHumanApproval {
                     trace_id,
                     reason: "r".into(),
+                    agent_id: "a".into(),
+                    command: "cmd".into(),
+                    source_channel_type: Some("telegram".into()),
+                    source_connector_id: Some("tg_main".into()),
+                    source_conversation_scope: Some("chat:1".into()),
                 },
                 Topic::NeedHumanApproval,
             ),

@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clawhive_bus::{EventBus, Topic};
+use clawhive_core::approval::ApprovalRegistry;
 use clawhive_gateway::Gateway;
-use clawhive_schema::{BusMessage, InboundMessage};
+use clawhive_schema::{ApprovalDecision, BusMessage, InboundMessage};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -16,10 +17,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 const MAX_ITEMS: usize = 200;
 
@@ -53,6 +55,9 @@ struct App {
     trace_filter: Option<String>,
     filter_input: String,
     filter_mode: bool,
+    pending_approvals: Vec<(Uuid, String, String)>,
+    approval_overlay: bool,
+    approval_selected: usize,
 }
 
 impl App {
@@ -71,10 +76,62 @@ impl App {
             trace_filter: None,
             filter_input: String::new(),
             filter_mode: false,
+            pending_approvals: vec![],
+            approval_overlay: false,
+            approval_selected: 0,
         }
     }
 
-    fn on_key(&mut self, key: KeyCode) {
+    fn on_key(&mut self, key: KeyCode) -> Option<(Uuid, ApprovalDecision)> {
+        if self.approval_overlay && !self.pending_approvals.is_empty() {
+            match key {
+                KeyCode::Char('a') => {
+                    let (trace_id, _, _) = self.pending_approvals.remove(self.approval_selected);
+                    if self.pending_approvals.is_empty() {
+                        self.approval_overlay = false;
+                    }
+                    self.approval_selected = self
+                        .approval_selected
+                        .min(self.pending_approvals.len().saturating_sub(1));
+                    return Some((trace_id, ApprovalDecision::AllowOnce));
+                }
+                KeyCode::Char('A') => {
+                    let (trace_id, _, _) = self.pending_approvals.remove(self.approval_selected);
+                    if self.pending_approvals.is_empty() {
+                        self.approval_overlay = false;
+                    }
+                    self.approval_selected = self
+                        .approval_selected
+                        .min(self.pending_approvals.len().saturating_sub(1));
+                    return Some((trace_id, ApprovalDecision::AlwaysAllow));
+                }
+                KeyCode::Char('d') => {
+                    let (trace_id, _, _) = self.pending_approvals.remove(self.approval_selected);
+                    if self.pending_approvals.is_empty() {
+                        self.approval_overlay = false;
+                    }
+                    self.approval_selected = self
+                        .approval_selected
+                        .min(self.pending_approvals.len().saturating_sub(1));
+                    return Some((trace_id, ApprovalDecision::Deny));
+                }
+                KeyCode::Up => {
+                    self.approval_selected = self.approval_selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    if !self.pending_approvals.is_empty() {
+                        self.approval_selected =
+                            (self.approval_selected + 1).min(self.pending_approvals.len() - 1);
+                    }
+                }
+                KeyCode::Esc => {
+                    self.approval_overlay = false;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         if self.filter_mode {
             match key {
                 KeyCode::Enter => {
@@ -97,7 +154,7 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return None;
         }
 
         match key {
@@ -129,6 +186,8 @@ impl App {
             }
             _ => {}
         }
+
+        None
     }
 
     fn filtered_events(&self) -> Vec<&String> {
@@ -256,12 +315,17 @@ impl App {
             BusMessage::NeedHumanApproval {
                 trace_id,
                 ref reason,
+                ..
             } => {
                 self.push_event(format!(
                     "[{ts}] NeedHumanApproval trace={}",
                     &trace_id.to_string()[..8]
                 ));
                 self.push_log(format!("[{ts}] APPROVAL: {reason}"));
+                self.pending_approvals
+                    .push((trace_id, reason.clone(), String::new()));
+                self.approval_overlay = true;
+                self.approval_selected = self.pending_approvals.len().saturating_sub(1);
             }
             BusMessage::MemoryReadRequested {
                 ref session_key,
@@ -428,9 +492,12 @@ pub async fn subscribe_all(bus: &EventBus) -> BusReceivers {
     }
 }
 
-pub async fn run_tui(bus: &EventBus) -> Result<()> {
+pub async fn run_tui(
+    bus: &EventBus,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+) -> Result<()> {
     let receivers = subscribe_all(bus).await;
-    run_tui_from_receivers(receivers).await
+    run_tui_from_receivers(receivers, approval_registry).await
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -458,6 +525,9 @@ struct CodeApp {
     log_scroll: usize,
     focus: CodePane,
     should_quit: bool,
+    pending_approvals: Vec<(Uuid, String, String)>,
+    approval_overlay: bool,
+    approval_selected: usize,
 }
 
 impl CodeApp {
@@ -470,6 +540,9 @@ impl CodeApp {
             log_scroll: 0,
             focus: CodePane::Input,
             should_quit: false,
+            pending_approvals: vec![],
+            approval_overlay: false,
+            approval_selected: 0,
         }
     }
 
@@ -489,9 +562,60 @@ impl CodeApp {
             self.logs.remove(0);
         }
     }
+
+    async fn handle_approval_key(&mut self, key: KeyCode, registry: &Arc<ApprovalRegistry>) {
+        if self.pending_approvals.is_empty() {
+            self.approval_overlay = false;
+            self.approval_selected = 0;
+            return;
+        }
+
+        match key {
+            KeyCode::Up => {
+                self.approval_selected = self.approval_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.approval_selected = (self.approval_selected + 1)
+                    .min(self.pending_approvals.len().saturating_sub(1));
+            }
+            KeyCode::Esc => {
+                self.approval_overlay = false;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('d') => {
+                let idx = self
+                    .approval_selected
+                    .min(self.pending_approvals.len().saturating_sub(1));
+                let (trace_id, command, _) = self.pending_approvals.remove(idx);
+                let decision = match key {
+                    KeyCode::Char('a') => ApprovalDecision::AllowOnce,
+                    KeyCode::Char('A') => ApprovalDecision::AlwaysAllow,
+                    _ => ApprovalDecision::Deny,
+                };
+                let _ = registry.resolve(trace_id, decision).await;
+                self.push_log(format!(
+                    "[{}] Approval decision for {}: {}",
+                    chrono::Local::now().format("%H:%M:%S"),
+                    &trace_id.to_string()[..8],
+                    command
+                ));
+                if self.pending_approvals.is_empty() {
+                    self.approval_overlay = false;
+                    self.approval_selected = 0;
+                } else {
+                    self.approval_selected =
+                        idx.min(self.pending_approvals.len().saturating_sub(1));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
-pub async fn run_code_tui(bus: &EventBus, gateway: Arc<Gateway>) -> Result<()> {
+pub async fn run_code_tui(
+    bus: &EventBus,
+    gateway: Arc<Gateway>,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+) -> Result<()> {
     let mut rx_reply = bus.subscribe(Topic::ReplyReady).await;
     let mut rx_accept = bus.subscribe(Topic::MessageAccepted).await;
     let mut rx_fail = bus.subscribe(Topic::TaskFailed).await;
@@ -597,11 +721,40 @@ pub async fn run_code_tui(bus: &EventBus, gateway: Arc<Gateway>) -> Result<()> {
                 }
             }
 
+            if let Some(ref reg) = approval_registry {
+                let pending = tokio::runtime::Handle::current().block_on(reg.pending_list());
+                if pending != app.pending_approvals {
+                    app.pending_approvals = pending;
+                    if app.pending_approvals.is_empty() {
+                        app.approval_overlay = false;
+                        app.approval_selected = 0;
+                    } else {
+                        app.approval_selected = app
+                            .approval_selected
+                            .min(app.pending_approvals.len().saturating_sub(1));
+                    }
+                }
+                if !app.pending_approvals.is_empty() && !app.approval_overlay {
+                    app.approval_overlay = true;
+                    app.approval_selected =
+                        app.approval_selected.min(app.pending_approvals.len() - 1);
+                }
+            }
+
             terminal.draw(|f| code_ui(f, &app))?;
 
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
+                        if app.approval_overlay {
+                            if let Some(ref reg) = approval_registry {
+                                tokio::runtime::Handle::current()
+                                    .block_on(app.handle_approval_key(key.code, reg));
+                            } else if key.code == KeyCode::Esc {
+                                app.approval_overlay = false;
+                            }
+                            continue;
+                        }
                         match key.code {
                             KeyCode::Char('q') => app.should_quit = true,
                             KeyCode::Tab => app.focus = app.focus.next(),
@@ -669,7 +822,10 @@ pub async fn run_code_tui(bus: &EventBus, gateway: Arc<Gateway>) -> Result<()> {
     run_result
 }
 
-pub async fn run_tui_from_receivers(receivers: BusReceivers) -> Result<()> {
+pub async fn run_tui_from_receivers(
+    receivers: BusReceivers,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -677,7 +833,7 @@ pub async fn run_tui_from_receivers(receivers: BusReceivers) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    let run_result = run_app(&mut terminal, &mut app, receivers);
+    let run_result = run_app(&mut terminal, &mut app, receivers, approval_registry);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -690,16 +846,45 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     mut receivers: BusReceivers,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
 ) -> Result<()> {
     loop {
         receivers.drain_all(app);
+
+        if let Some(ref registry) = approval_registry {
+            let pending = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(registry.pending_list())
+            });
+            if !pending.is_empty() {
+                app.pending_approvals = pending;
+                if !app.approval_overlay {
+                    app.approval_overlay = true;
+                    app.approval_selected = 0;
+                } else {
+                    app.approval_selected = app
+                        .approval_selected
+                        .min(app.pending_approvals.len().saturating_sub(1));
+                }
+            } else {
+                app.pending_approvals.clear();
+                app.approval_overlay = false;
+            }
+        }
 
         terminal.draw(|frame| ui(frame, app))?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    app.on_key(key.code);
+                    if let Some((trace_id, decision)) = app.on_key(key.code) {
+                        if let Some(ref registry) = approval_registry {
+                            tokio::task::block_in_place(|| {
+                                tokio::runtime::Handle::current()
+                                    .block_on(registry.resolve(trace_id, decision))
+                            })
+                            .ok();
+                        }
+                    }
                 }
             }
         }
@@ -824,6 +1009,15 @@ fn ui(frame: &mut Frame, app: &App) {
 
     let status = Paragraph::new(Line::from(spans));
     frame.render_widget(status, main_layout[1]);
+
+    if app.approval_overlay && !app.pending_approvals.is_empty() {
+        render_approval_overlay(
+            frame,
+            &app.pending_approvals,
+            app.approval_selected,
+            " ⚠ Exec Approval Required ",
+        );
+    }
 }
 
 fn render_list_panel(
@@ -934,11 +1128,107 @@ fn code_ui(frame: &mut Frame, app: &CodeApp) {
         Span::styled(" send ", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(status, main[3]);
+
+    if app.approval_overlay && !app.pending_approvals.is_empty() {
+        render_approval_overlay(
+            frame,
+            &app.pending_approvals,
+            app.approval_selected,
+            " ⚠ Exec Approval Required ",
+        );
+    }
+}
+
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn render_approval_overlay(
+    frame: &mut Frame,
+    pending_approvals: &[(Uuid, String, String)],
+    selected: usize,
+    title: &str,
+) {
+    let area = centered_rect(70, 30, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let idx = selected.min(pending_approvals.len().saturating_sub(1));
+    let (_, command, agent_id) = &pending_approvals[idx];
+    let cmd_display: String = command.chars().take(60).collect();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  Command: {cmd_display}"),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!("  Agent:   {agent_id}"),
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(Span::styled(
+            format!("  ({}/{} pending)", idx + 1, pending_approvals.len()),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[a]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Allow Once  ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[A]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Always Allow  ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[d]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Deny", Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
 mod tests {
     use clawhive_schema::{BusMessage, InboundMessage, OutboundMessage};
+    use crossterm::event::KeyCode;
 
     use super::App;
 
@@ -1004,5 +1294,56 @@ mod tests {
         });
 
         assert_ne!(app.sessions, vec!["No active sessions".to_string()]);
+    }
+
+    #[test]
+    fn need_human_approval_adds_pending_and_shows_overlay() {
+        let mut app = App::new();
+        let trace_id = uuid::Uuid::new_v4();
+
+        app.handle_bus_message(BusMessage::NeedHumanApproval {
+            trace_id,
+            reason: "python --version".to_string(),
+            agent_id: "test-agent".to_string(),
+            command: "python --version".to_string(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
+        });
+
+        assert!(app.approval_overlay);
+        assert_eq!(app.pending_approvals.len(), 1);
+        let (pending_trace, command, _agent_id) = &app.pending_approvals[0];
+        assert_eq!(*pending_trace, trace_id);
+        assert_eq!(command, "python --version");
+    }
+
+    #[test]
+    fn approval_overlay_resolves_on_key() {
+        let mut app = App::new();
+        let trace_id = uuid::Uuid::new_v4();
+        app.pending_approvals = vec![(trace_id, "pip install pandas".into(), "main".into())];
+        app.approval_overlay = true;
+
+        let decision = app.on_key(KeyCode::Char('a'));
+        assert!(decision.is_some());
+        let (tid, dec) = decision.unwrap();
+        assert_eq!(tid, trace_id);
+        assert_eq!(dec, clawhive_schema::ApprovalDecision::AllowOnce);
+        assert!(app.pending_approvals.is_empty());
+        assert!(!app.approval_overlay);
+    }
+
+    #[test]
+    fn approval_overlay_deny_key() {
+        let mut app = App::new();
+        let trace_id = uuid::Uuid::new_v4();
+        app.pending_approvals = vec![(trace_id, "rm -rf build".into(), "dev".into())];
+        app.approval_overlay = true;
+
+        let decision = app.on_key(KeyCode::Char('d'));
+        assert!(decision.is_some());
+        let (_, dec) = decision.unwrap();
+        assert_eq!(dec, clawhive_schema::ApprovalDecision::Deny);
     }
 }

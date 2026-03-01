@@ -5,13 +5,17 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use clawhive_bus::BusPublisher;
 use clawhive_provider::ToolDef;
+use clawhive_schema::{ApprovalDecision, BusMessage};
 use corral_core::{
     start_broker, BrokerConfig, Permissions, PolicyEngine, Sandbox, SandboxConfig, ServiceHandler,
     ServicePermission,
 };
 
 use super::access_gate::{AccessGate, AccessLevel};
+use super::approval::ApprovalRegistry;
+use super::config::{ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxPolicyConfig};
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -20,15 +24,107 @@ pub struct ExecuteCommandTool {
     workspace: PathBuf,
     default_timeout: u64,
     gate: Arc<AccessGate>,
+    exec_security: ExecSecurityConfig,
+    sandbox_config: SandboxPolicyConfig,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+    bus: Option<BusPublisher>,
+    agent_id: String,
 }
 
 impl ExecuteCommandTool {
-    pub fn new(workspace: PathBuf, default_timeout: u64, gate: Arc<AccessGate>) -> Self {
+    pub fn new(
+        workspace: PathBuf,
+        default_timeout: u64,
+        gate: Arc<AccessGate>,
+        exec_security: ExecSecurityConfig,
+        sandbox_config: SandboxPolicyConfig,
+        approval_registry: Option<Arc<ApprovalRegistry>>,
+        bus: Option<BusPublisher>,
+        agent_id: String,
+    ) -> Self {
         Self {
             workspace,
             default_timeout,
             gate,
+            exec_security,
+            sandbox_config,
+            approval_registry,
+            bus,
+            agent_id,
         }
+    }
+
+    async fn wait_for_approval(
+        &self,
+        command: &str,
+        source_info: Option<(&str, &str, &str)>,
+    ) -> Result<Option<String>> {
+        let Some(registry) = self.approval_registry.as_ref() else {
+            return Ok(Some(
+                "Command not in allowlist and no approval UI available".to_string(),
+            ));
+        };
+
+        let trace_id = uuid::Uuid::new_v4();
+        tracing::info!(command, %trace_id, "requesting exec approval");
+
+        let rx = registry
+            .request(trace_id, command.to_string(), self.agent_id.clone())
+            .await;
+
+        if let (Some(bus), Some((ch_type, conn_id, conv_scope))) = (self.bus.as_ref(), source_info)
+        {
+            let _ = bus
+                .publish(BusMessage::NeedHumanApproval {
+                    trace_id,
+                    reason: format!("Command requires approval: {command}"),
+                    agent_id: self.agent_id.clone(),
+                    command: command.to_string(),
+                    source_channel_type: Some(ch_type.to_string()),
+                    source_connector_id: Some(conn_id.to_string()),
+                    source_conversation_scope: Some(conv_scope.to_string()),
+                })
+                .await;
+        }
+
+        match tokio::time::timeout(Duration::from_secs(60), rx).await {
+            Ok(Ok(ApprovalDecision::AllowOnce)) => Ok(None),
+            Ok(Ok(ApprovalDecision::AlwaysAllow)) => {
+                let first_token = command.split_whitespace().next().unwrap_or(command);
+                let pattern = format!("{first_token} *");
+                registry
+                    .add_runtime_allow_pattern(&self.agent_id, pattern.clone())
+                    .await;
+                tracing::info!(pattern, "adding to exec allowlist");
+                Ok(None)
+            }
+            Ok(Ok(ApprovalDecision::Deny)) | Ok(Err(_)) => {
+                Ok(Some("Command denied by user".to_string()))
+            }
+            Err(_) => Ok(Some("Exec approval timed out (60s)".to_string())),
+        }
+    }
+
+    fn is_command_allowed(&self, command: &str) -> bool {
+        let cmd_lower = command.to_lowercase();
+        let first_token = command.split_whitespace().next().unwrap_or("");
+        let basename = std::path::Path::new(first_token)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(first_token);
+
+        if self.exec_security.safe_bins.iter().any(|b| b == basename) {
+            return true;
+        }
+
+        self.exec_security.allowlist.iter().any(|pattern| {
+            if pattern.ends_with(" *") {
+                let prefix = &pattern[..pattern.len() - 2];
+                basename == prefix || first_token == prefix
+            } else {
+                cmd_lower == pattern.to_lowercase() || basename == pattern
+            }
+        })
     }
 }
 
@@ -212,17 +308,23 @@ impl ServiceHandler for RemindersHandler {
     }
 }
 
-fn collect_env_vars() -> HashMap<String, String> {
+fn collect_env_vars(env_inherit: &[String]) -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
-    for key in ["PATH", "HOME", "TMPDIR"] {
+    for key in env_inherit {
         if let Ok(val) = std::env::var(key) {
-            env_vars.insert(key.to_string(), val);
+            env_vars.insert(key.clone(), val);
         }
     }
     env_vars
 }
 
-fn base_permissions(workspace: &Path, extra_dirs: &[(PathBuf, AccessLevel)]) -> Permissions {
+fn base_permissions(
+    workspace: &Path,
+    extra_dirs: &[(PathBuf, AccessLevel)],
+    exec_allow: &[String],
+    network_allowed: bool,
+    env_inherit: &[String],
+) -> Permissions {
     let workspace_self = workspace.display().to_string();
     let workspace_pattern = format!("{workspace_self}/**");
     // Include the directory itself (for opendir) AND its contents (for files within)
@@ -240,23 +342,41 @@ fn base_permissions(workspace: &Path, extra_dirs: &[(PathBuf, AccessLevel)]) -> 
         }
     }
 
-    Permissions::builder()
+    let mut builder = Permissions::builder()
         .fs_read(read_patterns)
         .fs_write(write_patterns)
-        .exec_allow(["sh"])
-        .network_deny()
-        .env_allow(["PATH", "HOME", "TMPDIR"])
+        .exec_allow(exec_allow.iter().map(|s| s.as_str()));
+
+    if network_allowed {
+        builder = builder.network_allow(["*:*"]);
+    } else {
+        builder = builder.network_deny();
+    }
+
+    builder
+        .env_allow(env_inherit.iter().map(|s| s.as_str()))
         .build()
 }
 
-fn make_sandbox(workspace: &Path, extra_dirs: &[(PathBuf, AccessLevel)]) -> Result<Sandbox> {
+fn make_sandbox(
+    workspace: &Path,
+    extra_dirs: &[(PathBuf, AccessLevel)],
+    sandbox_cfg: &SandboxPolicyConfig,
+) -> Result<Sandbox> {
+    let network_allowed = sandbox_cfg.network.unwrap_or(cfg!(target_os = "macos"));
     let config = SandboxConfig {
-        permissions: base_permissions(workspace, extra_dirs),
+        permissions: base_permissions(
+            workspace,
+            extra_dirs,
+            &sandbox_cfg.exec_allow,
+            network_allowed,
+            &sandbox_cfg.env_inherit,
+        ),
         work_dir: workspace.to_path_buf(),
         data_dir: None,
-        timeout: Duration::from_secs(30),
-        max_memory_mb: Some(512),
-        env_vars: collect_env_vars(),
+        timeout: Duration::from_secs(sandbox_cfg.timeout_secs),
+        max_memory_mb: Some(sandbox_cfg.max_memory_mb),
+        env_vars: collect_env_vars(&sandbox_cfg.env_inherit),
         broker_socket: None,
     };
     Sandbox::new(config)
@@ -267,8 +387,16 @@ async fn sandbox_with_broker(
     timeout_secs: u64,
     reminders_lists: &[String],
     extra_dirs: &[(PathBuf, AccessLevel)],
+    sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
-    let mut permissions = base_permissions(workspace, extra_dirs);
+    let network_allowed = sandbox_cfg.network.unwrap_or(cfg!(target_os = "macos"));
+    let mut permissions = base_permissions(
+        workspace,
+        extra_dirs,
+        &sandbox_cfg.exec_allow,
+        network_allowed,
+        &sandbox_cfg.env_inherit,
+    );
 
     let mut scope = HashMap::new();
     if !reminders_lists.is_empty() {
@@ -291,8 +419,8 @@ async fn sandbox_with_broker(
         work_dir: workspace.to_path_buf(),
         data_dir: None,
         timeout: Duration::from_secs(timeout_secs.max(1)),
-        max_memory_mb: Some(512),
-        env_vars: collect_env_vars(),
+        max_memory_mb: Some(sandbox_cfg.max_memory_mb),
+        env_vars: collect_env_vars(&sandbox_cfg.env_inherit),
         broker_socket: Some(broker_handle.socket_path.clone()),
     };
 
@@ -352,6 +480,72 @@ impl ToolExecutor for ExecuteCommandTool {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let source_info = ctx
+            .source_channel_type()
+            .zip(ctx.source_connector_id())
+            .zip(ctx.source_conversation_scope())
+            .map(|((channel_type, connector_id), conversation_scope)| {
+                (channel_type, connector_id, conversation_scope)
+            });
+
+        match &self.exec_security.security {
+            ExecSecurityMode::Deny => {
+                return Ok(ToolOutput {
+                    content: "Command denied: exec is disabled for this agent".to_string(),
+                    is_error: true,
+                });
+            }
+            ExecSecurityMode::Allowlist => {
+                let runtime_allowed = match self.approval_registry.as_ref() {
+                    Some(registry) => registry.is_runtime_allowed(&self.agent_id, command).await,
+                    None => false,
+                };
+                let is_allowed = self.is_command_allowed(command) || runtime_allowed;
+                if !is_allowed {
+                    match self.exec_security.ask {
+                        ExecAskMode::Off => {
+                            return Ok(ToolOutput {
+                                content: format!(
+                                    "Command not in allowlist. To run this command, add a matching pattern to exec_security.allowlist in agent config. Command: {command}"
+                                ),
+                                is_error: true,
+                            });
+                        }
+                        ExecAskMode::OnMiss | ExecAskMode::Always => {
+                            if let Some(reason) =
+                                self.wait_for_approval(command, source_info).await?
+                            {
+                                return Ok(ToolOutput {
+                                    content: if reason.contains("no approval UI available") {
+                                        format!("{reason}: {command}")
+                                    } else {
+                                        reason
+                                    },
+                                    is_error: true,
+                                });
+                            }
+                        }
+                    }
+                } else if self.exec_security.ask == ExecAskMode::Always {
+                    if let Some(reason) = self.wait_for_approval(command, source_info).await? {
+                        return Ok(ToolOutput {
+                            content: reason,
+                            is_error: true,
+                        });
+                    }
+                }
+            }
+            ExecSecurityMode::Full => {
+                if self.exec_security.ask == ExecAskMode::Always {
+                    if let Some(reason) = self.wait_for_approval(command, source_info).await? {
+                        return Ok(ToolOutput {
+                            content: reason,
+                            is_error: true,
+                        });
+                    }
+                }
+            }
+        }
 
         // Hard baseline check - applies to ALL tool origins
         if HardBaseline::exec_denied(command) {
@@ -389,12 +583,17 @@ impl ToolExecutor for ExecuteCommandTool {
         // Build sandbox dynamically to include current allowlist
         let extra_dirs = self.gate.allowed_dirs().await;
         let result = if enable_reminders_service {
-            let sandbox =
-                sandbox_with_broker(&self.workspace, timeout_secs, &reminders_lists, &extra_dirs)
-                    .await?;
+            let sandbox = sandbox_with_broker(
+                &self.workspace,
+                timeout_secs,
+                &reminders_lists,
+                &extra_dirs,
+                &self.sandbox_config,
+            )
+            .await?;
             sandbox.execute_with_timeout(command, timeout).await
         } else {
-            let sandbox = make_sandbox(&self.workspace, &extra_dirs)?;
+            let sandbox = make_sandbox(&self.workspace, &extra_dirs, &self.sandbox_config)?;
             sandbox.execute_with_timeout(command, timeout).await
         };
 
@@ -476,17 +675,50 @@ impl ToolExecutor for ExecuteCommandTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalRegistry;
+    use crate::config::{ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxPolicyConfig};
+    use clawhive_schema::ApprovalDecision;
     use tempfile::TempDir;
 
     fn make_gate(workspace: &Path) -> Arc<AccessGate> {
         Arc::new(AccessGate::in_memory(workspace.to_path_buf()))
     }
 
+    fn make_tool(tmp: &TempDir) -> ExecuteCommandTool {
+        let gate = make_gate(tmp.path());
+        ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig::default(),
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        )
+    }
+
+    fn make_full_mode_tool(tmp: &TempDir, timeout: u64) -> ExecuteCommandTool {
+        let gate = make_gate(tmp.path());
+        ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            timeout,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Full,
+                ..ExecSecurityConfig::default()
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        )
+    }
+
     #[tokio::test]
     async fn echo_command() {
         let tmp = TempDir::new().unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_tool(&tmp);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}), &ctx)
@@ -499,8 +731,7 @@ mod tests {
     #[tokio::test]
     async fn failing_command() {
         let tmp = TempDir::new().unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_full_mode_tool(&tmp, 10);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "exit 1"}), &ctx)
@@ -513,8 +744,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_command() {
         let tmp = TempDir::new().unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 1, gate);
+        let tool = make_full_mode_tool(&tmp, 1);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -531,8 +761,7 @@ mod tests {
     async fn runs_in_workspace_dir() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("marker.txt"), "found").unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_tool(&tmp);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(serde_json::json!({"command": "cat marker.txt"}), &ctx)
@@ -547,8 +776,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("data.txt"), "hello").unwrap();
 
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_tool(&tmp);
 
         // External context with cat allowed
         let perms = corral_core::Permissions {
@@ -574,8 +802,7 @@ mod tests {
     #[tokio::test]
     async fn external_context_denies_unlisted_command() {
         let tmp = TempDir::new().unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_tool(&tmp);
 
         // External context with only echo allowed
         let perms = corral_core::Permissions {
@@ -599,8 +826,7 @@ mod tests {
     #[tokio::test]
     async fn hard_baseline_blocks_dangerous_command() {
         let tmp = TempDir::new().unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_full_mode_tool(&tmp, 10);
 
         // Even builtin context should block dangerous commands
         let ctx = ToolContext::builtin();
@@ -616,8 +842,7 @@ mod tests {
     #[tokio::test]
     async fn denies_network_by_default_on_linux() {
         let tmp = TempDir::new().unwrap();
-        let gate = make_gate(tmp.path());
-        let tool = ExecuteCommandTool::new(tmp.path().to_path_buf(), 10, gate);
+        let tool = make_tool(&tmp);
         let ctx = ToolContext::builtin();
         let result = tool
             .execute(
@@ -627,5 +852,353 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn exec_security_deny_blocks_all_commands() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Deny,
+                ..ExecSecurityConfig::default()
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(serde_json::json!({"command": "echo denied"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("exec is disabled"));
+    }
+
+    #[tokio::test]
+    async fn exec_security_allowlist_blocks_unlisted_commands() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                allowlist: vec!["git *".into()],
+                safe_bins: vec![],
+                ..ExecSecurityConfig::default()
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(serde_json::json!({"command": "python --version"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("not in allowlist"));
+    }
+
+    #[tokio::test]
+    async fn exec_security_full_allows_non_baseline_command() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Full,
+                allowlist: vec![],
+                safe_bins: vec![],
+                ..ExecSecurityConfig::default()
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(serde_json::json!({"command": "echo allowed"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("allowed"));
+    }
+
+    #[test]
+    fn is_command_allowed_matches_allowlist_patterns() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                allowlist: vec!["git *".into(), "pwd".into()],
+                safe_bins: vec![],
+                ..ExecSecurityConfig::default()
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        );
+
+        assert!(tool.is_command_allowed("git status"));
+        assert!(tool.is_command_allowed("git"));
+        assert!(tool.is_command_allowed("pwd"));
+        assert!(!tool.is_command_allowed("ls -la"));
+    }
+
+    #[test]
+    fn is_command_allowed_accepts_safe_bins() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                allowlist: vec![],
+                safe_bins: vec!["jq".into()],
+                ..ExecSecurityConfig::default()
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "test-agent".to_string(),
+        );
+
+        assert!(tool.is_command_allowed("jq --version"));
+        assert!(tool.is_command_allowed("/usr/bin/jq .foo data.json"));
+        assert!(!tool.is_command_allowed("cat data.json"));
+    }
+
+    #[test]
+    fn collect_env_vars_uses_configured_keys_only() {
+        let key = "CLAWHIVE_EXEC_TEST_ENV";
+        std::env::set_var(key, "ok");
+
+        let env = collect_env_vars(&[key.to_string()]);
+
+        assert_eq!(env.get(key), Some(&"ok".to_string()));
+        assert!(!env.contains_key("PATH"));
+    }
+
+    #[test]
+    fn base_permissions_apply_exec_network_and_env_config() {
+        let tmp = TempDir::new().unwrap();
+        let perms = base_permissions(
+            tmp.path(),
+            &[],
+            &["sh".into(), "jq".into()],
+            true,
+            &["PATH".into(), "HOME".into()],
+        );
+
+        assert_eq!(perms.exec, vec!["sh".to_string(), "jq".to_string()]);
+        assert_eq!(perms.network.allow, vec!["*:*".to_string()]);
+        assert_eq!(perms.env, vec!["PATH".to_string(), "HOME".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn allowlist_onmiss_waits_for_allow_once_and_executes() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+
+        let tool_task = tokio::spawn(async move {
+            tool.execute(serde_json::json!({"command": "printf approved"}), &ctx)
+                .await
+                .unwrap()
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(approval_registry.has_pending().await);
+
+        let pending = approval_registry.pending_list().await;
+        let (trace_id, _, _) = pending.first().unwrap();
+        approval_registry
+            .resolve(*trace_id, ApprovalDecision::AllowOnce)
+            .await
+            .unwrap();
+
+        let output = tool_task.await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("approved"));
+    }
+
+    #[tokio::test]
+    async fn allowlist_onmiss_deny_blocks_execution() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+
+        let tool_task = tokio::spawn(async move {
+            tool.execute(serde_json::json!({"command": "printf denied"}), &ctx)
+                .await
+                .unwrap()
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let pending = approval_registry.pending_list().await;
+        let (trace_id, _, _) = pending.first().unwrap();
+        approval_registry
+            .resolve(*trace_id, ApprovalDecision::Deny)
+            .await
+            .unwrap();
+
+        let output = tool_task.await.unwrap();
+        assert!(output.is_error);
+        assert!(output.content.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn always_allow_persists_for_same_agent_via_registry() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate.clone(),
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+
+        let first = tokio::spawn(async move {
+            tool.execute(serde_json::json!({"command": "printf persist"}), &ctx)
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let pending = approval_registry.pending_list().await;
+        let (trace_id, _, _) = pending.first().unwrap();
+        approval_registry
+            .resolve(*trace_id, ApprovalDecision::AlwaysAllow)
+            .await
+            .unwrap();
+        let first_output = first.await.unwrap();
+        assert!(!first_output.is_error);
+
+        let tool_again = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx2 = ToolContext::builtin();
+        let second = tokio::spawn(async move {
+            tool_again
+                .execute(serde_json::json!({"command": "printf persist"}), &ctx2)
+                .await
+                .unwrap()
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !approval_registry.has_pending().await,
+            "second execution should not require approval"
+        );
+
+        let second_output = second.await.unwrap();
+        assert!(!second_output.is_error);
+        assert!(second_output.content.contains("persist"));
+    }
+
+    #[tokio::test]
+    async fn allowlist_onmiss_without_registry_denies() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            None,
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(serde_json::json!({"command": "printf denied"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("no approval UI available"));
     }
 }

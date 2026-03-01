@@ -60,6 +60,13 @@ export interface Metrics {
   agents_total: number;
   sessions_total: number;
   providers_total: number;
+  channels_total: number;
+}
+
+export interface WebSearchConfig {
+  enabled: boolean;
+  provider: string | null;
+  api_key: string | null;
 }
 
 export interface ConnectorConfig {
@@ -321,5 +328,41 @@ export function useScheduleHistory(scheduleId: string, limit = 10) {
     queryKey: ["schedules", scheduleId, "history", limit],
     queryFn: () => apiFetch<ScheduleRunHistoryItem[]>(`/api/schedules/${scheduleId}/history?limit=${limit}`),
     enabled: !!scheduleId,
+  });
+}
+
+export function useWebSearchConfig() {
+  return useQuery({
+    queryKey: ["web-search-config"],
+    queryFn: () => apiFetch<WebSearchConfig>("/api/setup/tools/web-search"),
+  });
+}
+
+export interface ProviderPreset {
+  id: string;
+  name: string;
+  api_base: string;
+  needs_key: boolean;
+  default_model: string;
+  models: string[];
+}
+
+export function useProviderPresets() {
+  return useQuery({
+    queryKey: ["provider-presets"],
+    queryFn: () => apiFetch<ProviderPreset[]>("/api/setup/provider-presets"),
+    staleTime: Infinity,
+  });
+}
+
+export function useUpdateWebSearch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: WebSearchConfig) =>
+      apiFetch<WebSearchConfig>("/api/setup/tools/web-search", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["web-search-config"] }),
   });
 }

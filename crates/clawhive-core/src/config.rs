@@ -167,6 +167,134 @@ pub struct ToolPolicyConfig {
     pub allow: Vec<String>,
 }
 
+/// How exec command security is enforced
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecSecurityMode {
+    /// Block all host exec requests
+    Deny,
+    /// Allow only allowlisted command patterns (default)
+    #[default]
+    Allowlist,
+    /// Allow everything (use with caution)
+    Full,
+}
+
+/// Exec approval behavior when command is not in allowlist
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecAskMode {
+    /// Never prompt user
+    Off,
+    /// Prompt only when allowlist does not match (default)
+    #[default]
+    OnMiss,
+    /// Prompt on every command
+    Always,
+}
+
+/// Exec security configuration for an agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecSecurityConfig {
+    #[serde(default)]
+    pub security: ExecSecurityMode,
+    #[serde(default)]
+    pub ask: ExecAskMode,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    #[serde(default)]
+    pub safe_bins: Vec<String>,
+}
+
+impl Default for ExecSecurityConfig {
+    fn default() -> Self {
+        Self {
+            security: ExecSecurityMode::Allowlist,
+            ask: ExecAskMode::OnMiss,
+            allowlist: vec![
+                "git *".into(),
+                "cargo *".into(),
+                "npm *".into(),
+                "ls *".into(),
+                "cat *".into(),
+                "echo *".into(),
+                "grep *".into(),
+                "find *".into(),
+                "which *".into(),
+                "pwd".into(),
+                "whoami".into(),
+                "date".into(),
+                "mkdir *".into(),
+                "cp *".into(),
+                "mv *".into(),
+                "touch *".into(),
+                "head *".into(),
+                "tail *".into(),
+                "wc *".into(),
+                "sort *".into(),
+                "uniq *".into(),
+            ],
+            safe_bins: vec![
+                "jq".into(),
+                "cut".into(),
+                "uniq".into(),
+                "head".into(),
+                "tail".into(),
+                "tr".into(),
+                "wc".into(),
+            ],
+        }
+    }
+}
+
+/// Sandbox environment configuration for an agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxPolicyConfig {
+    /// Allow network access in sandbox (default: false on Linux, true on macOS)
+    #[serde(default)]
+    pub network: Option<bool>,
+    /// Command timeout in seconds (default: 30)
+    #[serde(default = "default_sandbox_timeout")]
+    pub timeout_secs: u64,
+    /// Max memory in MB (default: 512)
+    #[serde(default = "default_sandbox_memory")]
+    pub max_memory_mb: u64,
+    /// Environment variables to inherit into sandbox
+    #[serde(default = "default_sandbox_env")]
+    pub env_inherit: Vec<String>,
+    /// Executables allowed in sandbox
+    #[serde(default = "default_sandbox_exec")]
+    pub exec_allow: Vec<String>,
+}
+
+fn default_sandbox_timeout() -> u64 {
+    30
+}
+
+fn default_sandbox_memory() -> u64 {
+    512
+}
+
+fn default_sandbox_env() -> Vec<String> {
+    vec!["PATH".into(), "HOME".into(), "TMPDIR".into()]
+}
+
+fn default_sandbox_exec() -> Vec<String> {
+    vec!["sh".into()]
+}
+
+impl Default for SandboxPolicyConfig {
+    fn default() -> Self {
+        Self {
+            network: None,
+            timeout_secs: default_sandbox_timeout(),
+            max_memory_mb: default_sandbox_memory(),
+            env_inherit: default_sandbox_env(),
+            exec_allow: default_sandbox_exec(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryPolicyConfig {
     pub mode: String,
@@ -215,6 +343,10 @@ pub struct FullAgentConfig {
     pub sub_agent: Option<SubAgentPolicyConfig>,
     #[serde(default)]
     pub heartbeat: Option<HeartbeatPolicyConfig>,
+    #[serde(default)]
+    pub exec_security: Option<ExecSecurityConfig>,
+    #[serde(default)]
+    pub sandbox: Option<SandboxPolicyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +534,24 @@ fn resolve_agents_env(agents: &mut [FullAgentConfig]) {
             memory_policy.mode = resolve_env_var(&memory_policy.mode);
             memory_policy.write_scope = resolve_env_var(&memory_policy.write_scope);
         }
+
+        if let Some(exec_security) = &mut agent.exec_security {
+            for allow in &mut exec_security.allowlist {
+                *allow = resolve_env_var(allow);
+            }
+            for bin in &mut exec_security.safe_bins {
+                *bin = resolve_env_var(bin);
+            }
+        }
+
+        if let Some(sandbox) = &mut agent.sandbox {
+            for key in &mut sandbox.env_inherit {
+                *key = resolve_env_var(key);
+            }
+            for cmd in &mut sandbox.exec_allow {
+                *cmd = resolve_env_var(cmd);
+            }
+        }
     }
 }
 
@@ -542,9 +692,30 @@ mod tests {
                 sub_agent: None,
                 workspace: None,
                 heartbeat: None,
+                exec_security: None,
+                sandbox: None,
             }],
         };
         let err = validate_config(&config).unwrap_err();
         assert!(err.to_string().contains("default_agent_id does not exist"));
+    }
+
+    #[test]
+    fn exec_security_default_values() {
+        let cfg = ExecSecurityConfig::default();
+        assert_eq!(cfg.security, ExecSecurityMode::Allowlist);
+        assert_eq!(cfg.ask, ExecAskMode::OnMiss);
+        assert!(cfg.allowlist.iter().any(|p| p == "git *"));
+        assert!(cfg.safe_bins.iter().any(|b| b == "jq"));
+    }
+
+    #[test]
+    fn sandbox_policy_default_values() {
+        let cfg = SandboxPolicyConfig::default();
+        assert_eq!(cfg.network, None);
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.max_memory_mb, 512);
+        assert_eq!(cfg.env_inherit, vec!["PATH", "HOME", "TMPDIR"]);
+        assert_eq!(cfg.exec_allow, vec!["sh"]);
     }
 }

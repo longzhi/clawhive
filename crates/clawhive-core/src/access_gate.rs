@@ -213,6 +213,12 @@ impl AccessGate {
         self.persist(&policy).await
     }
 
+    /// Try to automatically grant access to a directory.
+    /// Returns Ok(()) when the path is safe to auto-grant, Err when it requires human approval.
+    pub async fn try_auto_grant(&self, path: &Path, level: AccessLevel) -> Result<(), String> {
+        self.grant(path, level).await.map_err(|e| e.to_string())
+    }
+
     /// Remove a directory from the allow-list and persist.
     pub async fn revoke(&self, dir: &Path) -> Result<()> {
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
@@ -597,6 +603,27 @@ mod tests {
         let (_tmp, gate) = setup();
         let result = gate
             .grant(Path::new("/etc/something"), AccessLevel::Ro)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn try_auto_grant_safe_path_allowed() {
+        let (_tmp, gate) = setup();
+        let dir = Path::new("/some/other/project");
+        let result = gate.try_auto_grant(dir, AccessLevel::Ro).await;
+        assert!(result.is_ok());
+        let check = gate
+            .check(Path::new("/some/other/project/file.rs"), AccessLevel::Ro)
+            .await;
+        assert_eq!(check, AccessResult::Allowed);
+    }
+
+    #[tokio::test]
+    async fn try_auto_grant_sensitive_path_blocked() {
+        let (_tmp, gate) = setup();
+        let result = gate
+            .try_auto_grant(Path::new("/etc/something"), AccessLevel::Ro)
             .await;
         assert!(result.is_err());
     }

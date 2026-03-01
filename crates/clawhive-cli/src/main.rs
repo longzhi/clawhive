@@ -23,7 +23,8 @@ use clawhive_channels::ChannelBot;
 use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
 use clawhive_core::*;
 use clawhive_gateway::{
-    spawn_scheduled_task_listener, spawn_wait_task_listener, Gateway, RateLimitConfig, RateLimiter,
+    spawn_approval_delivery_listener, spawn_scheduled_task_listener, spawn_wait_task_listener,
+    Gateway, RateLimitConfig, RateLimiter,
 };
 use clawhive_memory::embedding::{
     EmbeddingProvider, GeminiEmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider,
@@ -472,8 +473,15 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Session(cmd) => {
-            let (_bus, memory, _gateway, _config, _schedule_manager, _wait_manager) =
-                bootstrap(&cli.config_root).await?;
+            let (
+                _bus,
+                memory,
+                _gateway,
+                _config,
+                _schedule_manager,
+                _wait_manager,
+                _approval_registry,
+            ) = bootstrap(&cli.config_root).await?;
             let session_mgr = SessionManager::new(memory, 1800);
             match cmd {
                 SessionCommands::Reset { session_key } => {
@@ -486,8 +494,15 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Task(cmd) => {
-            let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) =
-                bootstrap(&cli.config_root).await?;
+            let (
+                _bus,
+                _memory,
+                gateway,
+                _config,
+                _schedule_manager,
+                _wait_manager,
+                _approval_registry,
+            ) = bootstrap(&cli.config_root).await?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -519,8 +534,15 @@ async fn main() -> Result<()> {
             handle_auth_command(cmd).await?;
         }
         Commands::Schedule(cmd) => {
-            let (_bus, _memory, _gateway, _config, schedule_manager, _wait_manager) =
-                bootstrap(&cli.config_root).await?;
+            let (
+                _bus,
+                _memory,
+                _gateway,
+                _config,
+                schedule_manager,
+                _wait_manager,
+                _approval_registry,
+            ) = bootstrap(&cli.config_root).await?;
             match cmd {
                 ScheduleCommands::List => {
                     let entries = schedule_manager.list().await;
@@ -741,6 +763,7 @@ async fn bootstrap(
     ClawhiveConfig,
     Arc<ScheduleManager>,
     Arc<WaitTaskManager>,
+    Arc<ApprovalRegistry>,
 )> {
     let config = load_config(&root.join("config"))?;
 
@@ -800,6 +823,7 @@ async fn bootstrap(
 
     let bus = Arc::new(EventBus::new(256));
     let publisher = bus.publisher();
+    let approval_registry = Arc::new(ApprovalRegistry::new());
     let schedule_manager = Arc::new(ScheduleManager::new(
         &root.join("config/schedules.d"),
         &root.join("data/schedules"),
@@ -842,6 +866,7 @@ async fn bootstrap(
         skill_registry,
         memory.clone(),
         publisher.clone(),
+        Some(approval_registry.clone()),
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
@@ -860,6 +885,7 @@ async fn bootstrap(
         config.routing.clone(),
         publisher,
         rate_limiter,
+        Some(approval_registry.clone()),
     ));
 
     Ok((
@@ -869,6 +895,7 @@ async fn bootstrap(
         config,
         schedule_manager,
         wait_task_manager,
+        approval_registry,
     ))
 }
 
@@ -1354,7 +1381,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     write_pid_file(root)?;
     tracing::info!("PID file written (pid: {})", std::process::id());
 
-    let (bus, memory, gateway, config, schedule_manager, wait_task_manager) =
+    let (bus, memory, gateway, config, schedule_manager, wait_task_manager, approval_registry) =
         bootstrap(root).await?;
 
     let workspace_dir = root.to_path_buf();
@@ -1419,6 +1446,9 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 
     let _wait_task_listener_handle = spawn_wait_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Wait task gateway listener started");
+
+    let _approval_listener_handle = spawn_approval_delivery_listener(Arc::clone(&bus));
+    tracing::info!("Approval delivery listener started");
 
     // Spawn heartbeat tasks for agents with heartbeat enabled
     for agent_config in &config.agents {
@@ -1546,7 +1576,9 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
     let _tui_handle = if with_tui {
         let receivers = clawhive_tui::subscribe_all(bus.as_ref()).await;
         Some(tokio::spawn(async move {
-            if let Err(err) = clawhive_tui::run_tui_from_receivers(receivers).await {
+            if let Err(err) =
+                clawhive_tui::run_tui_from_receivers(receivers, Some(approval_registry)).await
+            {
                 tracing::error!("TUI exited with error: {err}");
             }
         }))
@@ -1693,7 +1725,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 }
 
 async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager) =
+    let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager, _approval_registry) =
         bootstrap(root).await?;
 
     let workspace_dir = root.to_path_buf();
@@ -1759,14 +1791,14 @@ async fn run_dashboard_tui(port: u16) -> Result<()> {
         }
     });
 
-    clawhive_tui::run_tui(&bus).await
+    clawhive_tui::run_tui(&bus, None).await
 }
 
 async fn run_code_tui(root: &Path, port: u16) -> Result<()> {
     let _ = port;
-    let (bus, _memory, gateway, _config, _schedule_manager, _wait_manager) =
+    let (bus, _memory, gateway, _config, _schedule_manager, _wait_manager, approval_registry) =
         bootstrap(root).await?;
-    clawhive_tui::run_code_tui(bus.as_ref(), gateway).await
+    clawhive_tui::run_code_tui(bus.as_ref(), gateway, Some(approval_registry)).await
 }
 
 async fn forward_sse_to_bus(
@@ -1849,7 +1881,7 @@ async fn forward_sse_to_bus(
 }
 
 async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
-    let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager) =
+    let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager, _approval_registry) =
         bootstrap(root).await?;
 
     println!("clawhive REPL. Type 'quit' to exit.");

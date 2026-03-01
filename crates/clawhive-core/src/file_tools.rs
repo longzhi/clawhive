@@ -22,12 +22,32 @@ async fn gate_check(
             content: reason,
             is_error: true,
         }),
-        AccessResult::NeedGrant { dir, need } => Some(ToolOutput {
-            content: format!(
-                "Access denied: directory {dir} is not authorized for {need} access. Call the grant_access tool with path=\"{dir}\" and level=\"{need}\" to request access, then retry."
-            ),
-            is_error: true,
-        }),
+        AccessResult::NeedGrant { dir, need } => {
+            let dir_path = Path::new(&dir);
+            match gate.try_auto_grant(dir_path, need).await {
+                Ok(()) => {
+                    tracing::info!(dir = %dir, level = %need, "auto-granted access to directory");
+                    match gate.check(resolved, level).await {
+                        AccessResult::Allowed => None,
+                        other => Some(ToolOutput {
+                            content: format!(
+                                "Auto-grant succeeded but access is still not allowed: {other:?}"
+                            ),
+                            is_error: true,
+                        }),
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(dir = %dir, error = %e, "auto-grant failed, requiring manual grant_access");
+                    Some(ToolOutput {
+                        content: format!(
+                            "Access denied: directory {dir} is not authorized for {need} access. Auto-grant was blocked ({e}). Call the grant_access tool with path=\"{dir}\" and level=\"{need}\" to request access, then retry."
+                        ),
+                        is_error: true,
+                    })
+                }
+            }
+        }
     }
 }
 
@@ -482,7 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outside_workspace_blocked_without_grant() {
+    async fn outside_workspace_auto_granted_on_first_access() {
         let tmp = TempDir::new().unwrap();
         // Create an "outside" directory
         let outside = tmp.path().join("outside");
@@ -493,17 +513,70 @@ mod tests {
         let ws = tmp.path().join("workspace");
         std::fs::create_dir(&ws).unwrap();
         let gate = make_gate(&ws);
-        let tool = ReadFileTool::new(ws, gate);
+        let target = outside.join("file.txt");
+
+        let before = gate.check(&target, AccessLevel::Ro).await;
+        assert!(matches!(before, AccessResult::NeedGrant { .. }));
+
+        let tool = ReadFileTool::new(ws, gate.clone());
         let ctx = ToolContext::builtin();
         let result = tool
-            .execute(
-                serde_json::json!({"path": outside.join("file.txt").to_str().unwrap()}),
-                &ctx,
-            )
+            .execute(serde_json::json!({"path": target.to_str().unwrap()}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("external"));
+
+        let after = gate.check(&target, AccessLevel::Ro).await;
+        assert_eq!(after, AccessResult::Allowed);
+    }
+
+    #[tokio::test]
+    async fn outside_workspace_subsequent_access_uses_existing_auto_grant() {
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let file = outside.join("file.txt");
+        std::fs::write(&file, "external data").unwrap();
+
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir(&ws).unwrap();
+        let gate = make_gate(&ws);
+        let tool = ReadFileTool::new(ws, gate.clone());
+        let ctx = ToolContext::builtin();
+
+        let first = tool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}), &ctx)
+            .await
+            .unwrap();
+        assert!(!first.is_error);
+
+        let second = tool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}), &ctx)
+            .await
+            .unwrap();
+        assert!(!second.is_error);
+        assert!(second.content.contains("external data"));
+
+        let entries = gate.list().await;
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sensitive_path_still_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir(&ws).unwrap();
+        let gate = make_gate(&ws);
+        let tool = ReadFileTool::new(ws, gate);
+        let ctx = ToolContext::builtin();
+
+        let result = tool
+            .execute(serde_json::json!({"path": "/home/user/.ssh/id_rsa"}), &ctx)
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(result.content.contains("not authorized"));
+        assert!(result.content.contains("denied"));
     }
 
     #[tokio::test]

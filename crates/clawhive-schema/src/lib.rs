@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod provider_presets;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub trace_id: Uuid,
@@ -151,6 +153,17 @@ pub enum ScheduledRunStatus {
     Skipped,
 }
 
+/// Decision from human approval UI
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ApprovalDecision {
+    /// Allow this one request only
+    AllowOnce,
+    /// Add to allowlist and allow
+    AlwaysAllow,
+    /// Block this request
+    Deny,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     Inbound(InboundMessage),
@@ -189,6 +202,11 @@ pub enum BusMessage {
     NeedHumanApproval {
         trace_id: Uuid,
         reason: String,
+        agent_id: String,
+        command: String,
+        source_channel_type: Option<String>,
+        source_connector_id: Option<String>,
+        source_conversation_scope: Option<String>,
     },
     MemoryReadRequested {
         session_key: String,
@@ -459,6 +477,11 @@ mod tests {
         let msg = BusMessage::NeedHumanApproval {
             trace_id,
             reason: "risky action".into(),
+            agent_id: "agent-1".into(),
+            command: "rm -rf /tmp/test".into(),
+            source_channel_type: Some("telegram".into()),
+            source_connector_id: Some("tg_main".into()),
+            source_conversation_scope: Some("chat:123".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let de: BusMessage = serde_json::from_str(&json).unwrap();

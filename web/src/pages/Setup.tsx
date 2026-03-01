@@ -9,34 +9,13 @@ import {
   useCreateAgent,
   useAddConnector,
   useRestart,
+  useUpdateWebSearch,
+  useProviderPresets,
 } from "@/hooks/use-api";
+import type { ProviderPreset } from "@/hooks/use-api";
 import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink } from "lucide-react";
 
-// ---------------------------------------------------------------------------
-// Provider metadata — mirrors setup.rs ProviderId
-// ---------------------------------------------------------------------------
-interface ProviderMeta {
-  id: string;
-  name: string;
-  apiBase: string;
-  needsKey: boolean;
-  defaultModels: string[];
-}
-
-const PROVIDERS: ProviderMeta[] = [
-  { id: "anthropic", name: "Anthropic", apiBase: "https://api.anthropic.com/v1", needsKey: true, defaultModels: ["claude-sonnet-4-6", "claude-haiku-4-5"] },
-  { id: "openai", name: "OpenAI", apiBase: "https://api.openai.com/v1", needsKey: true, defaultModels: ["gpt-4o", "gpt-4o-mini"] },
-  { id: "azure-openai", name: "Azure OpenAI", apiBase: "https://myresource.openai.azure.com/openai/v1", needsKey: true, defaultModels: ["gpt-4o", "gpt-4o-mini"] },
-  { id: "gemini", name: "Google Gemini", apiBase: "https://generativelanguage.googleapis.com/v1beta", needsKey: true, defaultModels: ["gemini-2.5-pro", "gemini-2.5-flash"] },
-  { id: "deepseek", name: "DeepSeek", apiBase: "https://api.deepseek.com/v1", needsKey: true, defaultModels: ["deepseek-chat", "deepseek-reasoner"] },
-  { id: "groq", name: "Groq", apiBase: "https://api.groq.com/openai/v1", needsKey: true, defaultModels: ["llama-3.3-70b-versatile"] },
-  { id: "ollama", name: "Ollama", apiBase: "http://localhost:11434/v1", needsKey: false, defaultModels: ["llama3.2", "mistral"] },
-  { id: "openrouter", name: "OpenRouter", apiBase: "https://openrouter.ai/api/v1", needsKey: true, defaultModels: ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"] },
-  { id: "together", name: "Together AI", apiBase: "https://api.together.xyz/v1", needsKey: true, defaultModels: ["meta-llama/Llama-3.3-70B-Instruct-Turbo"] },
-  { id: "fireworks", name: "Fireworks AI", apiBase: "https://api.fireworks.ai/inference/v1", needsKey: true, defaultModels: ["accounts/fireworks/models/llama-v3p3-70b-instruct"] },
-];
-
-const STEP_LABELS = ["Provider", "Agent", "Channel", "Launch"];
+const STEP_LABELS = ["Provider", "Agent", "Channel", "Tools", "Launch"];
 
 // ---------------------------------------------------------------------------
 // Main Setup Wizard
@@ -45,9 +24,10 @@ export default function SetupPage() {
   const navigate = useNavigate();
   const { data: setupStatus, isLoading: statusLoading } = useSetupStatus();
   const [step, setStep] = useState(0);
+  const [wizardActive, setWizardActive] = useState(false);
 
   // Step 1: Provider
-  const [selectedProvider, setSelectedProvider] = useState<ProviderMeta | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<ProviderPreset | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [apiBase, setApiBase] = useState("");
   const [providerCreated, setProviderCreated] = useState(false);
@@ -64,27 +44,42 @@ export default function SetupPage() {
   const [channelConnectorId, setChannelConnectorId] = useState("");
   const [channelCreated, setChannelCreated] = useState(false);
 
-  // Step 4: Launch
+  // Step 4: Web Search
+  const [wsEnabled, setWsEnabled] = useState(false);
+  const [wsProvider, setWsProvider] = useState("tavily");
+  const [wsApiKey, setWsApiKey] = useState("");
+  const [wsSaved, setWsSaved] = useState(false);
+
+  // Step 5: Launch
   const [restarting, setRestarting] = useState(false);
 
   const createProvider = useCreateProvider();
   const createAgent = useCreateAgent();
   const addConnector = useAddConnector();
+  const updateWebSearch = useUpdateWebSearch();
   const restart = useRestart();
+  const { data: providerPresets } = useProviderPresets();
 
-  // If already configured, redirect to dashboard
+  // Mark wizard as active once we start interacting
   useEffect(() => {
-    if (setupStatus && !setupStatus.needs_setup) {
+    if (setupStatus?.needs_setup) {
+      setWizardActive(true);
+    }
+  }, [setupStatus]);
+
+  // Only redirect if not in the middle of wizard
+  useEffect(() => {
+    if (setupStatus && !setupStatus.needs_setup && !wizardActive) {
       navigate("/", { replace: true });
     }
-  }, [setupStatus, navigate]);
+  }, [setupStatus, navigate, wizardActive]);
 
   // Set defaults when provider is selected
   useEffect(() => {
     if (selectedProvider) {
-      setApiBase(selectedProvider.apiBase);
-      if (selectedProvider.defaultModels.length > 0) {
-        setSelectedModel(selectedProvider.defaultModels[0]);
+      setApiBase(selectedProvider.api_base);
+      if (selectedProvider.models.length > 0) {
+        setSelectedModel(selectedProvider.models[0]);
       }
     }
   }, [selectedProvider]);
@@ -94,7 +89,8 @@ export default function SetupPage() {
       case 0: return providerCreated;
       case 1: return agentCreated;
       case 2: return true; // Channel is optional
-      case 3: return false;
+      case 3: return true; // Web Search is optional
+      case 4: return false;
       default: return false;
     }
   }, [step, providerCreated, agentCreated]);
@@ -104,9 +100,9 @@ export default function SetupPage() {
     try {
       await createProvider.mutateAsync({
         provider_id: selectedProvider.id,
-        api_base: apiBase || selectedProvider.apiBase,
-        api_key: selectedProvider.needsKey ? apiKey : undefined,
-        models: selectedProvider.defaultModels,
+        api_base: apiBase || selectedProvider.api_base,
+        api_key: selectedProvider.needs_key ? apiKey : undefined,
+        models: selectedProvider.models,
       });
       setProviderCreated(true);
     } catch {
@@ -140,6 +136,23 @@ export default function SetupPage() {
       setChannelCreated(true);
     } catch {
       // error is handled by mutation state
+    }
+  };
+
+  const handleSaveWebSearch = async () => {
+    if (!wsEnabled) {
+      setWsSaved(true);
+      return;
+    }
+    try {
+      await updateWebSearch.mutateAsync({
+        enabled: true,
+        provider: wsProvider,
+        api_key: wsApiKey || null,
+      });
+      setWsSaved(true);
+    } catch {
+      // error handled by mutation state
     }
   };
 
@@ -227,7 +240,7 @@ export default function SetupPage() {
         <div className="min-h-[360px]">
           {step === 0 && (
             <StepProvider
-              providers={PROVIDERS}
+              providers={providerPresets ?? []}
               selected={selectedProvider}
               onSelect={setSelectedProvider}
               apiKey={apiKey}
@@ -246,7 +259,7 @@ export default function SetupPage() {
               onNameChange={setAgentName}
               emoji={agentEmoji}
               onEmojiChange={setAgentEmoji}
-              models={selectedProvider?.defaultModels ?? []}
+              models={selectedProvider?.models ?? []}
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
               onSubmit={handleCreateAgent}
@@ -270,6 +283,20 @@ export default function SetupPage() {
             />
           )}
           {step === 3 && (
+            <StepWebSearch
+              enabled={wsEnabled}
+              onEnabledChange={setWsEnabled}
+              provider={wsProvider}
+              onProviderChange={setWsProvider}
+              apiKey={wsApiKey}
+              onApiKeyChange={setWsApiKey}
+              onSubmit={handleSaveWebSearch}
+              isSaving={updateWebSearch.isPending}
+              isSaved={wsSaved}
+              error={updateWebSearch.error?.message}
+            />
+          )}
+          {step === 4 && (
             <StepLaunch
               provider={selectedProvider}
               agentName={agentName}
@@ -293,13 +320,15 @@ export default function SetupPage() {
             <ChevronLeft className="h-4 w-4" />
             Back
           </Button>
-          {step < 3 && (
+          {step < 4 && (
             <Button
               size="sm"
               onClick={() => setStep((s) => s + 1)}
               disabled={!canAdvance()}
             >
-              {step === 2 ? (channelCreated ? "Next" : "Skip") : "Next"}
+              {(step === 2 || step === 3) ? (
+                (step === 2 && channelCreated) || (step === 3 && wsSaved) ? "Next" : "Skip"
+              ) : "Next"}
               <ChevronRight className="h-4 w-4" />
             </Button>
           )}
@@ -325,9 +354,9 @@ function StepProvider({
   isCreated,
   error,
 }: {
-  providers: ProviderMeta[];
-  selected: ProviderMeta | null;
-  onSelect: (p: ProviderMeta) => void;
+  providers: ProviderPreset[];
+  selected: ProviderPreset | null;
+  onSelect: (p: ProviderPreset) => void;
   apiKey: string;
   onApiKeyChange: (v: string) => void;
   apiBase: string;
@@ -366,7 +395,7 @@ function StepProvider({
       {selected && (
         <Card className="border-primary/20 bg-primary/[0.02]">
           <CardContent className="space-y-4">
-            {selected.needsKey && (
+            {selected.needs_key && (
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   API Key
@@ -399,7 +428,7 @@ function StepProvider({
 
             <div className="flex items-center justify-between">
               <p className="text-xs text-muted-foreground">
-                Models: {selected.defaultModels.join(", ")}
+                Models: {selected.models.join(", ")}
               </p>
               {isCreated ? (
                 <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
@@ -410,7 +439,7 @@ function StepProvider({
                 <Button
                   size="sm"
                   onClick={onSubmit}
-                  disabled={isCreating || (selected.needsKey && !apiKey)}
+                  disabled={isCreating || (selected.needs_key && !apiKey)}
                 >
                   {isCreating ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -621,15 +650,16 @@ function StepChannel({
           <CardContent className="space-y-4">
             <div>
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Connector ID
+                Bot Name
               </label>
               <Input
-                placeholder={kind === "telegram" ? "tg_main" : "dc_main"}
+                placeholder={kind === "telegram" ? "my_telegram_bot" : kind === "discord" ? "my_discord_bot" : `my_${kind}_bot`}
                 value={connectorId}
                 onChange={(e) => onConnectorIdChange(e.target.value)}
                 disabled={isCreated}
                 className="mt-1.5"
               />
+              <p className="text-xs text-muted-foreground mt-1">A unique name to identify this bot, no spaces (e.g. support_bot)</p>
             </div>
             <div>
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -684,7 +714,139 @@ function StepChannel({
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Launch
+// Step 4: Web Search (optional)
+// ---------------------------------------------------------------------------
+const WS_PROVIDERS = ["tavily", "serper", "brave"];
+
+function StepWebSearch({
+  enabled,
+  onEnabledChange,
+  provider,
+  onProviderChange,
+  apiKey,
+  onApiKeyChange,
+  onSubmit,
+  isSaving,
+  isSaved,
+  error,
+}: {
+  enabled: boolean;
+  onEnabledChange: (v: boolean) => void;
+  provider: string;
+  onProviderChange: (v: string) => void;
+  apiKey: string;
+  onApiKeyChange: (v: string) => void;
+  onSubmit: () => void;
+  isSaving: boolean;
+  isSaved: boolean;
+  error?: string;
+}) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold">Web Search</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Optional: enable web search so your agent can look up information online.
+          You can skip this and configure it later.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          onClick={() => { if (!isSaved) onEnabledChange(true); }}
+          disabled={isSaved}
+          className={`rounded-lg border px-4 py-4 text-left transition-all ${
+            enabled
+              ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+              : "border-border hover:border-primary/40 hover:bg-muted/50"
+          } ${isSaved ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+        >
+          <div className="text-sm font-medium">Enable</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">Give your agent web access</div>
+        </button>
+        <button
+          onClick={() => { if (!isSaved) onEnabledChange(false); }}
+          disabled={isSaved}
+          className={`rounded-lg border px-4 py-4 text-left transition-all ${
+            !enabled
+              ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+              : "border-border hover:border-primary/40 hover:bg-muted/50"
+          } ${isSaved ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+        >
+          <div className="text-sm font-medium">Skip</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">No web search for now</div>
+        </button>
+      </div>
+
+      {enabled && (
+        <Card className="border-primary/20 bg-primary/[0.02]">
+          <CardContent className="space-y-4">
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Search Provider
+              </label>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {WS_PROVIDERS.map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => { if (!isSaved) onProviderChange(p); }}
+                    disabled={isSaved}
+                    className={`rounded-md border px-3 py-1.5 text-xs font-medium capitalize transition-all ${
+                      provider === p
+                        ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
+                        : "border-border hover:border-primary/40"
+                    } ${isSaved ? "cursor-not-allowed" : "cursor-pointer"}`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                API Key
+              </label>
+              <Input
+                type="password"
+                placeholder={`Enter your ${provider} API key`}
+                value={apiKey}
+                onChange={(e) => onApiKeyChange(e.target.value)}
+                disabled={isSaved}
+                className="mt-1.5"
+              />
+            </div>
+            <div className="flex items-center justify-end">
+              {isSaved ? (
+                <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Saved
+                </span>
+              ) : (
+                <Button
+                  size="sm"
+                  onClick={onSubmit}
+                  disabled={isSaving || !apiKey}
+                >
+                  {isSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    "Save"
+                  )}
+                </Button>
+              )}
+            </div>
+            {error && (
+              <p className="text-xs text-destructive">{error}</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step 5: Launch
 // ---------------------------------------------------------------------------
 function StepLaunch({
   provider,
@@ -695,7 +857,7 @@ function StepLaunch({
   onLaunch,
   restarting,
 }: {
-  provider: ProviderMeta | null;
+  provider: ProviderPreset | null;
   agentName: string;
   agentEmoji: string;
   model: string;

@@ -19,6 +19,7 @@ pub struct Metrics {
     pub agents_total: usize,
     pub sessions_total: usize,
     pub providers_total: usize,
+    pub channels_total: usize,
 }
 
 pub fn router() -> Router<AppState> {
@@ -132,10 +133,32 @@ async fn get_metrics(State(state): State<AppState>) -> Json<Metrics> {
         })
         .unwrap_or(0);
 
+    let main_yaml = state.root.join("config/main.yaml");
+    let channels_total = std::fs::read_to_string(&main_yaml)
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
+        .map(|val| {
+            val["channels"]
+                .as_mapping()
+                .map(|m| {
+                    m.values()
+                        .filter(|ch| {
+                            ch["connectors"]
+                                .as_sequence()
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false)
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
     Json(Metrics {
         agents_active: active,
         agents_total: total,
         sessions_total,
         providers_total,
+        channels_total,
     })
 }

@@ -131,6 +131,8 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
         sub_agent: None,
         workspace: None,
         heartbeat: None,
+        exec_security: None,
+        sandbox: None,
     }
 }
 
@@ -168,6 +170,7 @@ fn make_orchestrator(
             SkillRegistry::new(),
             memory,
             publisher,
+            None,
             Arc::new(NativeExecutor),
             file_store,
             session_writer,
@@ -229,6 +232,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         SkillRegistry::new(),
         memory,
         bus.publisher(),
+        None,
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
@@ -387,6 +391,7 @@ async fn orchestrator_creates_session() {
         SkillRegistry::new(),
         memory.clone(),
         bus.publisher(),
+        None,
         Arc::new(NativeExecutor),
         file_store,
         session_writer,
@@ -491,6 +496,7 @@ async fn orchestrator_publishes_reply_ready() {
         SkillRegistry::new(),
         memory,
         bus.publisher(),
+        None,
         Arc::new(NativeExecutor),
         file_store,
         session_writer,

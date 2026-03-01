@@ -3,7 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
 
@@ -11,6 +11,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(setup_status))
         .route("/restart", post(restart))
+        .route("/tools/web-search", get(get_web_search).put(put_web_search))
+        .route("/provider-presets", get(get_provider_presets))
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,87 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Provider presets (single source of truth for CLI + Web UI)
+// ---------------------------------------------------------------------------
+async fn get_provider_presets() -> Json<Vec<serde_json::Value>> {
+    let presets: Vec<serde_json::Value> = clawhive_schema::provider_presets::PROVIDER_PRESETS
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "api_base": p.api_base,
+                "needs_key": p.needs_key,
+                "default_model": p.default_model,
+                "models": p.models,
+            })
+        })
+        .collect();
+    Json(presets)
+}
+
+// ---------------------------------------------------------------------------
+// Web Search tools config
+// ---------------------------------------------------------------------------
+#[derive(Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    pub enabled: bool,
+    pub provider: Option<String>,
+    pub api_key: Option<String>,
+}
+
+async fn get_web_search(
+    State(state): State<AppState>,
+) -> Result<Json<WebSearchConfig>, axum::http::StatusCode> {
+    let path = state.root.join("config/main.yaml");
+    let val = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
+        .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    let ws = &val["tools"]["web_search"];
+    Ok(Json(WebSearchConfig {
+        enabled: ws["enabled"].as_bool().unwrap_or(false),
+        provider: ws["provider"].as_str().map(|s| s.to_string()),
+        api_key: ws["api_key"].as_str().map(|s| s.to_string()),
+    }))
+}
+
+async fn put_web_search(
+    State(state): State<AppState>,
+    Json(config): Json<WebSearchConfig>,
+) -> Result<Json<WebSearchConfig>, axum::http::StatusCode> {
+    let path = state.root.join("config/main.yaml");
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)
+        .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    // Ensure tools mapping exists
+    if !doc["tools"].is_mapping() {
+        doc["tools"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+
+    let mut ws_map = serde_yaml::Mapping::new();
+    ws_map.insert("enabled".into(), serde_yaml::Value::Bool(config.enabled));
+    if let Some(ref p) = config.provider {
+        ws_map.insert("provider".into(), serde_yaml::Value::String(p.clone()));
+    }
+    if let Some(ref k) = config.api_key {
+        ws_map.insert("api_key".into(), serde_yaml::Value::String(k.clone()));
+    }
+    doc["tools"]["web_search"] = serde_yaml::Value::Mapping(ws_map);
+
+    let yaml =
+        serde_yaml::to_string(&doc).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(config))
+}
+
+// ---------------------------------------------------------------------------
+// Restart
+// ---------------------------------------------------------------------------
 #[derive(Serialize)]
 struct RestartResponse {
     ok: bool,

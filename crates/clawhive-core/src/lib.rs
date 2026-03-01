@@ -1,4 +1,5 @@
 pub mod access_gate;
+pub mod approval;
 pub mod audit;
 pub mod config;
 pub mod consolidation;
@@ -30,6 +31,7 @@ pub mod web_search_tool;
 pub mod workspace;
 
 pub use access_gate::*;
+pub use approval::*;
 pub use audit::*;
 pub use config::*;
 pub use consolidation::*;

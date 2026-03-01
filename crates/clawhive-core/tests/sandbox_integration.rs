@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clawhive_core::access_gate::AccessGate;
+use clawhive_core::config::{ExecSecurityConfig, SandboxPolicyConfig};
 use clawhive_core::file_tools::{ReadFileTool, WriteFileTool};
 use clawhive_core::shell_tool::ExecuteCommandTool;
 use clawhive_core::skill::SkillRegistry;
@@ -208,7 +209,16 @@ async fn e2e_shell_tool_with_skill_permissions() {
         workspace.clone(),
         workspace.join("access_policy.json"),
     ));
-    let tool = ExecuteCommandTool::new(workspace.clone(), 10, gate);
+    let tool = ExecuteCommandTool::new(
+        workspace.clone(),
+        10,
+        gate,
+        ExecSecurityConfig::default(),
+        SandboxPolicyConfig::default(),
+        None,
+        None,
+        "test-agent".to_string(),
+    );
     let result = tool
         .execute(serde_json::json!({"command": "cat hello.txt"}), &ctx)
         .await

@@ -81,6 +81,8 @@ fn make_orchestrator_with_provider(
         sub_agent: None,
         workspace: None,
         heartbeat: None,
+        exec_security: None,
+        sandbox: None,
     }];
     let file_store = MemoryFileStore::new(tmp.path());
     let session_writer = SessionWriter::new(tmp.path());
@@ -104,6 +106,7 @@ fn make_orchestrator_with_provider(
             SkillRegistry::new(),
             memory,
             bus.publisher(),
+            None,
             Arc::new(NativeExecutor),
             file_store,
             session_writer,

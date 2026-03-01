@@ -213,6 +213,8 @@ mod tests {
             sub_agent: None,
             workspace: None,
             heartbeat: None,
+            exec_security: None,
+            sandbox: None,
         };
 
         let mut agents = HashMap::new();
