@@ -29,3 +29,6 @@ package-lock.json
 
 # Local deploy script (not part of the project)
 deploy.sh
+
+# Playwright MCP
+.playwright-mcp/

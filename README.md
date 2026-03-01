@@ -5,13 +5,18 @@
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/longzhi/clawhive?include_prereleases)](https://github.com/longzhi/clawhive/releases)
 
-A Rust-native multi-agent framework focused on bounded runtime behavior, Markdown-native memory, and multi-channel deployment.
+An open-source, Rust-native alternative to [OpenClaw](https://github.com/openclaw/openclaw) — deploy your own AI agents across Telegram, Discord, Slack, WhatsApp, iMessage, and more with a single binary.
 
 ## Overview
 
-clawhive is a Rust-native multi-agent framework built with **security as a first-class concern**. Unlike platforms that bolt on safety as an afterthought, clawhive enforces a two-layer security model from day one: a non-bypassable hard baseline blocks dangerous operations system-wide, while external skills must explicitly declare permissions.
+clawhive delivers the personal AI assistant experience of OpenClaw, rebuilt from the ground up in Rust. Where OpenClaw runs on Node.js with 430k+ lines of code, clawhive ships as a **single static binary with zero runtime dependencies** — no Node.js, no npm, no Docker required. Just download, configure, and run.
 
-Built in Rust for **minimal resource footprint** and **rock-solid stability** — no garbage collection pauses, predictable memory usage, and a single static binary with zero runtime dependencies. The framework supports Telegram, Discord, Slack, WhatsApp, iMessage, and CLI channels, with a smaller operational footprint than broad "everything connector" platforms. Agents can spawn sub-agents with explicit depth and timeout bounds, and a ReAct loop provides iterative reasoning with repeat guards.
+**Why clawhive over OpenClaw?**
+
+- **Tiny footprint** — One binary, ~14 MB. Runs on a Raspberry Pi, a VPS, or a Mac Mini with minimal resource usage. No garbage collection pauses, predictable memory.
+- **Security by design** — Two-layer security model enforced from day one: a non-bypassable hard baseline blocks SSRF, dangerous commands, and sensitive file access system-wide. External skills must declare permissions explicitly — no ambient authority.
+- **Bounded execution** — Agents have enforced token budgets, timeout limits, and sub-agent recursion depth. No runaway loops, no surprise bills.
+- **Web + CLI setup** — Browser-based setup wizard or interactive CLI. Get your first agent running in under 2 minutes.
 
 ## 🔐 Security First
 
