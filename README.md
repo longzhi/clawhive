@@ -204,7 +204,16 @@ Or download manually from [GitHub Releases](https://github.com/longzhi/clawhive/
 
 ### Setup
 
-After installation, run the interactive setup wizard to configure providers, agents, and channels:
+After installation, configure providers, agents, and channels using either method:
+
+**Option A: Web Setup Wizard** — Start the server and open the browser-based wizard:
+
+```bash
+clawhive start
+# Open http://localhost:3000/setup in your browser
+```
+
+**Option B: CLI Setup Wizard** — Run the interactive terminal wizard:
 
 ```bash
 clawhive setup
