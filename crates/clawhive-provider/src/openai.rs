@@ -95,7 +95,7 @@ impl OpenAiProvider {
         ApiRequest {
             model: request.model,
             messages: to_api_messages(request.system, request.messages),
-            max_tokens: Some(request.max_tokens),
+            max_completion_tokens: Some(request.max_tokens),
             tools,
             stream,
             stream_options: if stream {
@@ -489,7 +489,7 @@ pub(crate) struct ApiRequest {
     pub model: String,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+    pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ApiTool>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
