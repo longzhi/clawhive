@@ -65,7 +65,7 @@ enum Commands {
         daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
-        #[arg(long, default_value = "3000", help = "HTTP API server port")]
+        #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Stop a running clawhive process")]
@@ -76,17 +76,17 @@ enum Commands {
         daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
-        #[arg(long, default_value = "3000", help = "HTTP API server port")]
+        #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Code mode: open developer TUI")]
     Code {
-        #[arg(long, default_value = "3000", help = "HTTP API server port")]
+        #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Dashboard mode: attach TUI observability panel to running gateway")]
     Dashboard {
-        #[arg(long, default_value = "3000", help = "HTTP API server port")]
+        #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Local REPL for testing (no Telegram needed)")]
