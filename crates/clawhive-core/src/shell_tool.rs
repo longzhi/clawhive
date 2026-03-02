@@ -15,7 +15,9 @@ use corral_core::{
 
 use super::access_gate::{AccessGate, AccessLevel};
 use super::approval::ApprovalRegistry;
-use super::config::{ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxPolicyConfig};
+use super::config::{
+    ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxNetworkMode, SandboxPolicyConfig,
+};
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -361,7 +363,10 @@ fn make_sandbox(
     extra_dirs: &[(PathBuf, AccessLevel)],
     sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
-    let network_allowed = sandbox_cfg.network.unwrap_or(cfg!(target_os = "macos"));
+    let network_allowed = match sandbox_cfg.network {
+        SandboxNetworkMode::Allow | SandboxNetworkMode::Ask => true,
+        SandboxNetworkMode::Deny => false,
+    };
     let config = SandboxConfig {
         permissions: base_permissions(
             workspace,
@@ -387,7 +392,10 @@ async fn sandbox_with_broker(
     extra_dirs: &[(PathBuf, AccessLevel)],
     sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
-    let network_allowed = sandbox_cfg.network.unwrap_or(cfg!(target_os = "macos"));
+    let network_allowed = match sandbox_cfg.network {
+        SandboxNetworkMode::Allow | SandboxNetworkMode::Ask => true,
+        SandboxNetworkMode::Deny => false,
+    };
     let mut permissions = base_permissions(
         workspace,
         extra_dirs,
@@ -991,7 +999,7 @@ mod tests {
     #[test]
     fn collect_env_vars_uses_configured_keys_only() {
         let key = "CLAWHIVE_EXEC_TEST_ENV";
-        std::env::set_var(key, "ok");
+        unsafe { std::env::set_var(key, "ok") };
 
         let env = collect_env_vars(&[key.to_string()]);
 
