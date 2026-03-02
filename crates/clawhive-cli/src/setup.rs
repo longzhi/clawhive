@@ -222,11 +222,25 @@ async fn handle_add_provider(
         None => return Ok(()),
     };
 
-    let already_configured = state
-        .providers
-        .iter()
-        .any(|item| item.provider_id == provider.as_str());
-    if already_configured && !force {
+    // For OpenAI we allow separate API-key and OAuth configs to coexist,
+    // so only block when both auth types are already present.
+    let fully_configured = if provider == ProviderId::OpenAi {
+        let has_key = state.providers.iter().any(|i| {
+            i.provider_id == "openai"
+                && matches!(i.auth_summary, crate::setup_scan::AuthSummary::ApiKey)
+        });
+        let has_oauth = state.providers.iter().any(|i| {
+            i.provider_id == "openai"
+                && matches!(i.auth_summary, crate::setup_scan::AuthSummary::OAuth { .. })
+        });
+        has_key && has_oauth
+    } else {
+        state
+            .providers
+            .iter()
+            .any(|item| item.provider_id == provider.as_str())
+    };
+    if fully_configured && !force {
         let should_reconfigure = Confirm::with_theme(theme)
             .with_prompt(format!(
                 "{} already configured. Reconfigure?",
@@ -1053,7 +1067,12 @@ fn write_provider_config_unchecked(
     fs::create_dir_all(&providers_dir)
         .with_context(|| format!("failed to create {}", providers_dir.display()))?;
 
-    let target = providers_dir.join(format!("{}.yaml", provider.as_str()));
+    // OpenAI OAuth config gets a distinct filename so it can coexist with the API-key config.
+    let filename = match (provider, auth) {
+        (ProviderId::OpenAi, AuthChoice::OAuth { .. }) => "openai-oauth".to_string(),
+        _ => provider.as_str().to_string(),
+    };
+    let target = providers_dir.join(format!("{filename}.yaml"));
     let yaml = generate_provider_yaml(provider, auth, api_base_override);
     fs::write(&target, yaml).with_context(|| format!("failed to write {}", target.display()))?;
     Ok(target)
