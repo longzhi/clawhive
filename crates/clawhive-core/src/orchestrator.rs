@@ -16,7 +16,7 @@ use futures_core::Stream;
 
 use super::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
 use super::approval::ApprovalRegistry;
-use super::config::{ExecSecurityConfig, FullAgentConfig, SandboxPolicyConfig};
+use super::config::{ExecSecurityConfig, FullAgentConfig, SandboxPolicyConfig, SecurityMode};
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
 use super::memory_tools::{MemoryGetTool, MemorySearchTool};
@@ -655,6 +655,7 @@ impl Orchestrator {
                 2048,
                 allowed.as_deref(),
                 merged_permissions,
+                agent.security.clone(),
                 source_info,
             )
             .await?;
@@ -878,6 +879,7 @@ impl Orchestrator {
                 2048,
                 allowed_stream.as_deref(),
                 merged_permissions,
+                agent.security.clone(),
                 source_info_stream,
             )
             .await?;
@@ -933,6 +935,7 @@ impl Orchestrator {
         max_tokens: u32,
         allowed_tools: Option<&[String]>,
         merged_permissions: Option<corral_core::Permissions>,
+        security_mode: SecurityMode,
         source_info: Option<(String, String, String)>, // (channel_type, connector_id, conversation_scope)
     ) -> Result<(clawhive_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
@@ -1029,8 +1032,10 @@ impl Orchestrator {
             // - With permissions: external skill context (sandboxed)
             // - Without: builtin context (trusted, only hard baseline checks)
             let ctx = match merged_permissions.as_ref() {
-                Some(perms) => ToolContext::external(perms.clone()),
-                None => ToolContext::builtin(),
+                Some(perms) => {
+                    ToolContext::external_with_security(perms.clone(), security_mode.clone())
+                }
+                None => ToolContext::builtin_with_security(security_mode.clone()),
             }
             .with_recent_messages(recent_messages);
             let ctx = if let Some((ref ch, ref co, ref cv)) = source_info {
@@ -1242,6 +1247,7 @@ impl Orchestrator {
                 2048,
                 agent.tool_policy.as_ref().map(|tp| tp.allow.as_slice()),
                 None,
+                agent.security.clone(),
                 source_info,
             )
             .await?;
