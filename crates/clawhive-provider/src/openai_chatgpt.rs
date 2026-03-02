@@ -462,9 +462,14 @@ fn parse_sse_event(
             let extra = if event.extra.is_empty() {
                 String::new()
             } else {
-                format!(" extra={}", serde_json::to_string(&event.extra).unwrap_or_default())
+                format!(
+                    " extra={}",
+                    serde_json::to_string(&event.extra).unwrap_or_default()
+                )
             };
-            Err(anyhow!("chatgpt responses api error: message={message:?} code={code:?}{extra}"))
+            Err(anyhow!(
+                "chatgpt responses api error: message={message:?} code={code:?}{extra}"
+            ))
         }
 
         "response.failed" => {
@@ -475,7 +480,10 @@ fn parse_sse_event(
             let extra = if event.extra.is_empty() {
                 String::new()
             } else {
-                format!(" extra={}", serde_json::to_string(&event.extra).unwrap_or_default())
+                format!(
+                    " extra={}",
+                    serde_json::to_string(&event.extra).unwrap_or_default()
+                )
             };
             Err(anyhow!(
                 "chatgpt responses api failed: message={:?}{extra}",
