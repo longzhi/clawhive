@@ -211,7 +211,18 @@ impl EventHandler for DiscordHandler {
         let channel_id = msg.channel_id;
         let user_id = msg.author.id.get();
         let current_user_id = ctx.cache.current_user().id;
-        let is_mention = msg.mentions.iter().any(|u| u.id == current_user_id);
+        let is_user_mention = msg.mentions.iter().any(|u| u.id == current_user_id);
+        // Also detect role mentions: in private channels, bots may not appear in the
+        // member list but can be mentioned via their managed role (@BotName App).
+        let is_role_mention = !msg.mention_roles.is_empty()
+            && msg.guild_id.is_some()
+            && ctx.cache.guild(msg.guild_id.unwrap()).is_some_and(|guild| {
+                guild.roles.values().any(|role| {
+                    role.tags.bot_id == Some(current_user_id)
+                        && msg.mention_roles.contains(&role.id)
+                })
+            });
+        let is_mention = is_user_mention || is_role_mention;
 
         // Group filtering: if groups whitelist is configured, only respond in specified channels
         if !self.allowed_groups.is_empty() && guild_id.is_some() {
