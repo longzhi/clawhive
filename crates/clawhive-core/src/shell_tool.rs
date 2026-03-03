@@ -673,11 +673,30 @@ impl ToolExecutor for ExecuteCommandTool {
                         .wait_for_network_approval(command, host, *port, source_info)
                         .await?
                     {
+                        tracing::warn!(
+                            target: "clawhive::audit::network",
+                            agent_id = %self.agent_id,
+                            tool = "execute_command",
+                            host = %host,
+                            port = %port,
+                            command = %command,
+                            "network access denied"
+                        );
                         return Ok(ToolOutput {
                             content: reason,
                             is_error: true,
                         });
                     }
+
+                    tracing::info!(
+                        target: "clawhive::audit::network",
+                        agent_id = %self.agent_id,
+                        tool = "execute_command",
+                        host = %host,
+                        port = %port,
+                        command = %command,
+                        "network access granted"
+                    );
                 }
             }
         }
