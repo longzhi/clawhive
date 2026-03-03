@@ -204,6 +204,8 @@ pub enum BusMessage {
         reason: String,
         agent_id: String,
         command: String,
+        /// Network target requiring approval (None = exec-only approval)
+        network_target: Option<String>,
         source_channel_type: Option<String>,
         source_connector_id: Option<String>,
         source_conversation_scope: Option<String>,
@@ -487,6 +489,7 @@ mod tests {
             reason: "risky action".into(),
             agent_id: "agent-1".into(),
             command: "rm -rf /tmp/test".into(),
+            network_target: None,
             source_channel_type: Some("telegram".into()),
             source_connector_id: Some("tg_main".into()),
             source_conversation_scope: Some("chat:123".into()),

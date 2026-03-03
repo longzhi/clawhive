@@ -2,7 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clawhive_core::access_gate::AccessGate;
-use clawhive_core::config::{ExecSecurityConfig, SandboxPolicyConfig};
+use clawhive_core::config::{
+    ExecSecurityConfig, SandboxNetworkMode, SandboxPolicyConfig, SecurityMode,
+};
 use clawhive_core::file_tools::{ReadFileTool, WriteFileTool};
 use clawhive_core::shell_tool::ExecuteCommandTool;
 use clawhive_core::skill::SkillRegistry;
@@ -225,4 +227,131 @@ async fn e2e_shell_tool_with_skill_permissions() {
         .unwrap();
     assert!(!result.is_error, "Should allow: {}", result.content);
     assert!(result.content.contains("sandbox works"));
+}
+
+#[test]
+fn e2e_security_off_allows_private_network_via_tool_context() {
+    let _tool = WebFetchTool::new();
+    let ctx = ToolContext::builtin_with_security(SecurityMode::Off);
+
+    assert!(ctx.check_network("127.0.0.1", 11434));
+    assert!(ctx.check_network("192.168.1.1", 80));
+}
+
+#[tokio::test]
+async fn e2e_shell_tool_runs_with_sandbox_network_deny_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("mode.txt"), "deny-mode").unwrap();
+
+    let gate = Arc::new(AccessGate::new(
+        workspace.clone(),
+        workspace.join("access_policy.json"),
+    ));
+    let sandbox_cfg = SandboxPolicyConfig {
+        network: SandboxNetworkMode::Deny,
+        ..SandboxPolicyConfig::default()
+    };
+    let tool = ExecuteCommandTool::new(
+        workspace.clone(),
+        10,
+        gate,
+        ExecSecurityConfig::default(),
+        sandbox_cfg,
+        None,
+        None,
+        "test-agent".to_string(),
+    );
+
+    let ctx = ToolContext::builtin();
+    let result = tool
+        .execute(serde_json::json!({"command": "cat mode.txt"}), &ctx)
+        .await
+        .unwrap();
+
+    assert!(
+        !result.is_error,
+        "Tool should still run in deny mode: {}",
+        result.content
+    );
+    assert!(result.content.contains("deny-mode"));
+}
+
+#[tokio::test]
+async fn e2e_shell_tool_runs_with_sandbox_network_allow_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("mode.txt"), "allow-mode").unwrap();
+
+    let gate = Arc::new(AccessGate::new(
+        workspace.clone(),
+        workspace.join("access_policy.json"),
+    ));
+    let sandbox_cfg = SandboxPolicyConfig {
+        network: SandboxNetworkMode::Allow,
+        ..SandboxPolicyConfig::default()
+    };
+    let tool = ExecuteCommandTool::new(
+        workspace.clone(),
+        10,
+        gate,
+        ExecSecurityConfig::default(),
+        sandbox_cfg,
+        None,
+        None,
+        "test-agent".to_string(),
+    );
+
+    let ctx = ToolContext::builtin();
+    let result = tool
+        .execute(serde_json::json!({"command": "cat mode.txt"}), &ctx)
+        .await
+        .unwrap();
+
+    assert!(
+        !result.is_error,
+        "Tool should still run in allow mode: {}",
+        result.content
+    );
+    assert!(result.content.contains("allow-mode"));
+}
+
+#[test]
+fn e2e_default_sandbox_ask_mode_has_expected_network_allowlist() {
+    let cfg = SandboxPolicyConfig::default();
+
+    assert_eq!(cfg.network, SandboxNetworkMode::Ask);
+    assert!(cfg.network_allow.contains(&"github.com".to_string()));
+    assert!(cfg
+        .network_allow
+        .contains(&"registry.npmjs.org".to_string()));
+    assert!(cfg.network_allow.contains(&"pypi.org".to_string()));
+    assert!(cfg.network_allow.contains(&"crates.io".to_string()));
+}
+
+#[test]
+fn e2e_tool_context_dangerous_allow_private_is_precise() {
+    let ctx = ToolContext::builtin_with_security_and_private_overrides(
+        SecurityMode::Standard,
+        vec!["127.0.0.1:11434".to_string()],
+    );
+
+    assert!(ctx.check_network("127.0.0.1", 11434));
+    assert!(!ctx.check_network("127.0.0.1", 3000));
+}
+
+#[test]
+fn e2e_tool_context_cloud_metadata_never_overridable() {
+    let ctx = ToolContext::builtin_with_security_and_private_overrides(
+        SecurityMode::Standard,
+        vec![
+            "169.254.169.254:80".to_string(),
+            "metadata.google.internal:80".to_string(),
+        ],
+    );
+
+    assert!(!ctx.check_network("169.254.169.254", 80));
+    assert!(!ctx.check_network("metadata.google.internal", 80));
 }

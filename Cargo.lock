@@ -689,6 +689,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "clap",
  "clawhive-bus",
  "clawhive-memory",
  "clawhive-provider",

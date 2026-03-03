@@ -613,8 +613,13 @@ async fn spawn_approval_listener(
             continue;
         };
 
-        let text =
-            format!("⚠️ **Command Approval Required**\nAgent: `{agent_id}`\nCommand: `{command}`");
+        let text = if let Some((cmd, target)) = command.split_once("\nNetwork: ") {
+            format!(
+                "⚠️ **Approval Required**\nAgent: `{agent_id}`\nCommand: `{cmd}`\nNetwork: `{target}`"
+            )
+        } else {
+            format!("⚠️ **Command Approval Required**\nAgent: `{agent_id}`\nCommand: `{command}`")
+        };
 
         let buttons = CreateActionRow::Buttons(vec![
             CreateButton::new(format!("approve:{short_id}:allow"))

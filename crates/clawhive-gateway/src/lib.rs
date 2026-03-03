@@ -404,6 +404,7 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                 reason: _,
                 agent_id,
                 command,
+                network_target,
                 source_channel_type,
                 source_connector_id,
                 source_conversation_scope,
@@ -421,6 +422,11 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
             };
 
             let short_id = trace_id.to_string()[..8].to_string();
+            let command = if let Some(target) = network_target {
+                format!("{command}\nNetwork: {target}")
+            } else {
+                command
+            };
 
             let _ = publisher
                 .publish(BusMessage::DeliverApprovalRequest {
@@ -548,6 +554,7 @@ mod tests {
         let agents = vec![FullAgentConfig {
             agent_id: "clawhive-main".into(),
             enabled: true,
+            security: SecurityMode::default(),
             identity: None,
             model_policy: ModelPolicy {
                 primary: "sonnet".into(),
@@ -629,6 +636,7 @@ mod tests {
         let agents = vec![FullAgentConfig {
             agent_id: "clawhive-main".into(),
             enabled: true,
+            security: SecurityMode::default(),
             identity: None,
             model_policy: ModelPolicy {
                 primary: "sonnet".into(),

@@ -22,7 +22,19 @@ pub struct PendingApproval {
 /// Persisted runtime allowlist — survives process restarts.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct PersistedAllowlist {
-    /// agent_id → list of allowed command patterns
+    agents: HashMap<String, AgentAllowlist>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct AgentAllowlist {
+    #[serde(default)]
+    exec: Vec<String>,
+    #[serde(default)]
+    network: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyAllowlist {
     agents: HashMap<String, Vec<String>>,
 }
 
@@ -32,7 +44,7 @@ struct PersistedAllowlist {
 pub struct ApprovalRegistry {
     pending: Arc<Mutex<HashMap<Uuid, PendingApproval>>>,
     short_id_map: Arc<Mutex<HashMap<String, Uuid>>>,
-    runtime_allowlist: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    runtime_allowlist: Arc<Mutex<HashMap<String, AgentAllowlist>>>,
     /// Path to persist runtime allowlist (None = in-memory only, for tests)
     persist_path: Option<PathBuf>,
 }
@@ -58,11 +70,25 @@ impl ApprovalRegistry {
         // Load existing allowlist from disk
         let loaded = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(data) => {
-                    serde_json::from_str::<PersistedAllowlist>(&data)
-                        .unwrap_or_default()
-                        .agents
-                }
+                Ok(data) => match serde_json::from_str::<PersistedAllowlist>(&data) {
+                    Ok(new_format) => new_format.agents,
+                    Err(_) => match serde_json::from_str::<LegacyAllowlist>(&data) {
+                        Ok(legacy) => legacy
+                            .agents
+                            .into_iter()
+                            .map(|(agent_id, exec)| {
+                                (
+                                    agent_id,
+                                    AgentAllowlist {
+                                        exec,
+                                        network: Vec::new(),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        Err(_) => HashMap::new(),
+                    },
+                },
                 Err(_) => HashMap::new(),
             }
         } else {
@@ -144,10 +170,45 @@ impl ApprovalRegistry {
     pub async fn add_runtime_allow_pattern(&self, agent_id: &str, pattern: String) {
         let mut map = self.runtime_allowlist.lock().await;
         let entry = map.entry(agent_id.to_string()).or_default();
-        if !entry.iter().any(|p| p == &pattern) {
-            entry.push(pattern);
+        if !entry.exec.iter().any(|p| p == &pattern) {
+            entry.exec.push(pattern);
         }
-        // Persist to disk
+        self.persist(&map);
+    }
+
+    pub async fn is_runtime_allowed(&self, agent_id: &str, command: &str) -> bool {
+        let map = self.runtime_allowlist.lock().await;
+        let Some(agent) = map.get(agent_id) else {
+            return false;
+        };
+        agent
+            .exec
+            .iter()
+            .any(|pattern| pattern_matches(pattern, command))
+    }
+
+    pub async fn add_network_allow_pattern(&self, agent_id: &str, pattern: String) {
+        let mut map = self.runtime_allowlist.lock().await;
+        let entry = map.entry(agent_id.to_string()).or_default();
+        if !entry.network.iter().any(|p| p == &pattern) {
+            entry.network.push(pattern);
+        }
+        self.persist(&map);
+    }
+
+    pub async fn is_network_allowed(&self, agent_id: &str, host: &str, port: u16) -> bool {
+        let map = self.runtime_allowlist.lock().await;
+        let Some(agent) = map.get(agent_id) else {
+            return false;
+        };
+        let target = format!("{host}:{port}");
+        agent
+            .network
+            .iter()
+            .any(|pattern| network_pattern_matches(pattern, &target))
+    }
+
+    fn persist(&self, map: &HashMap<String, AgentAllowlist>) {
         if let Some(ref path) = self.persist_path {
             let persisted = PersistedAllowlist {
                 agents: map.clone(),
@@ -159,16 +220,6 @@ impl ApprovalRegistry {
                 let _ = std::fs::write(path, data);
             }
         }
-    }
-
-    pub async fn is_runtime_allowed(&self, agent_id: &str, command: &str) -> bool {
-        let map = self.runtime_allowlist.lock().await;
-        let Some(patterns) = map.get(agent_id) else {
-            return false;
-        };
-        patterns
-            .iter()
-            .any(|pattern| pattern_matches(pattern, command))
     }
 }
 
@@ -184,4 +235,17 @@ fn pattern_matches(pattern: &str, command: &str) -> bool {
     } else {
         command.eq_ignore_ascii_case(pattern) || basename == pattern
     }
+}
+
+fn network_pattern_matches(pattern: &str, target: &str) -> bool {
+    let Some((pat_host, pat_port)) = pattern.rsplit_once(':') else {
+        return pattern == target;
+    };
+    let Some((tgt_host, _tgt_port)) = target.rsplit_once(':') else {
+        return false;
+    };
+    if pat_host != tgt_host {
+        return false;
+    }
+    pat_port == "*" || pattern == target
 }

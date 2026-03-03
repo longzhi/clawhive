@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 uuid.workspace = true

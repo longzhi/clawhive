@@ -12,6 +12,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use clawhive_provider::ToolDef;
 
+use super::config::SecurityMode;
 use super::policy::{PolicyContext, ToolOrigin};
 
 /// Output from a tool execution.
@@ -69,6 +70,32 @@ impl ToolContext {
         }
     }
 
+    /// Create a context for builtin tools with explicit security mode.
+    pub fn builtin_with_security(mode: SecurityMode) -> Self {
+        Self {
+            policy_ctx: PolicyContext::builtin_with_security(mode),
+            recent_messages: Vec::new(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
+            session_key: String::new(),
+        }
+    }
+
+    pub fn builtin_with_security_and_private_overrides(
+        mode: SecurityMode,
+        overrides: Vec<String>,
+    ) -> Self {
+        Self {
+            policy_ctx: PolicyContext::builtin_with_private_overrides(mode, overrides),
+            recent_messages: Vec::new(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
+            session_key: String::new(),
+        }
+    }
+
     /// Create a context for external skills (sandboxed, requires permissions).
     ///
     /// External skills must declare their required permissions in SKILL.md
@@ -76,6 +103,40 @@ impl ToolContext {
     pub fn external(permissions: corral_core::Permissions) -> Self {
         Self {
             policy_ctx: PolicyContext::external(permissions),
+            recent_messages: Vec::new(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
+            session_key: String::new(),
+        }
+    }
+
+    /// Create a context for external skills with explicit security mode.
+    pub fn external_with_security(
+        permissions: corral_core::Permissions,
+        mode: SecurityMode,
+    ) -> Self {
+        Self {
+            policy_ctx: PolicyContext::external_with_security(permissions, mode),
+            recent_messages: Vec::new(),
+            source_channel_type: None,
+            source_connector_id: None,
+            source_conversation_scope: None,
+            session_key: String::new(),
+        }
+    }
+
+    pub fn external_with_security_and_private_overrides(
+        permissions: corral_core::Permissions,
+        mode: SecurityMode,
+        overrides: Vec<String>,
+    ) -> Self {
+        Self {
+            policy_ctx: PolicyContext::external_with_security_and_private_overrides(
+                permissions,
+                mode,
+                overrides,
+            ),
             recent_messages: Vec::new(),
             source_channel_type: None,
             source_connector_id: None,

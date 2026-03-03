@@ -300,6 +300,7 @@ mod tests {
                     reason: "r".into(),
                     agent_id: "a".into(),
                     command: "cmd".into(),
+                    network_target: None,
                     source_channel_type: Some("telegram".into()),
                     source_connector_id: Some("tg_main".into()),
                     source_conversation_scope: Some("chat:1".into()),

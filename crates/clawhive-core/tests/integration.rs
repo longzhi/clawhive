@@ -121,6 +121,7 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
     FullAgentConfig {
         agent_id: agent_id.to_string(),
         enabled: true,
+        security: SecurityMode::default(),
         identity: None,
         model_policy: ModelPolicy {
             primary: primary.to_string(),

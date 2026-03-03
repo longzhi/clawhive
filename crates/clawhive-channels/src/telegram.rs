@@ -456,9 +456,15 @@ async fn spawn_approval_listener(
             continue;
         };
 
-        let text = format!(
-            "⚠️ <b>Command Approval Required</b>\nAgent: <code>{agent_id}</code>\nCommand: <code>{command}</code>"
-        );
+        let text = if let Some((cmd, target)) = command.split_once("\nNetwork: ") {
+            format!(
+                "⚠️ <b>Approval Required</b>\nAgent: <code>{agent_id}</code>\nCommand: <code>{cmd}</code>\nNetwork: <code>{target}</code>"
+            )
+        } else {
+            format!(
+                "⚠️ <b>Command Approval Required</b>\nAgent: <code>{agent_id}</code>\nCommand: <code>{command}</code>"
+            )
+        };
 
         let keyboard = InlineKeyboardMarkup::new(vec![vec![
             InlineKeyboardButton::callback("✅ Allow Once", format!("approve:{short_id}:allow")),

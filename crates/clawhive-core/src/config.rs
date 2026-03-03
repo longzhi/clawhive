@@ -1,7 +1,7 @@
 use std::{collections::HashSet, fs, path::Path};
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ModelPolicy;
 
@@ -179,6 +179,17 @@ pub struct ToolPolicyConfig {
     pub allow: Vec<String>,
 }
 
+/// Master security mode for an agent
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityMode {
+    /// All security checks enabled (default)
+    #[default]
+    Standard,
+    /// All security checks disabled - HardBaseline, approval, sandbox restrictions all off
+    Off,
+}
+
 /// How exec command security is enforced
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -260,11 +271,55 @@ impl Default for ExecSecurityConfig {
 }
 
 /// Sandbox environment configuration for an agent
+/// Network access mode for sandbox
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxNetworkMode {
+    /// Block all network access from sandbox
+    Deny,
+    /// Default: allow whitelisted, prompt for unknown domains
+    #[default]
+    Ask,
+    /// Allow all network access
+    Allow,
+}
+
+impl<'de> Deserialize<'de> for SandboxNetworkMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Bool(true) => Ok(Self::Allow),
+            serde_json::Value::Bool(false) => Ok(Self::Deny),
+            serde_json::Value::String(mode) => match mode.as_str() {
+                "deny" => Ok(Self::Deny),
+                "ask" => Ok(Self::Ask),
+                "allow" => Ok(Self::Allow),
+                _ => Err(serde::de::Error::custom(format!(
+                    "invalid sandbox network mode '{mode}', expected one of: deny, ask, allow"
+                ))),
+            },
+            _ => Err(serde::de::Error::custom(
+                "invalid sandbox network mode type, expected bool or string",
+            )),
+        }
+    }
+}
+
+/// Sandbox environment configuration for an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxPolicyConfig {
-    /// Allow network access in sandbox (default: false on Linux, true on macOS)
+    /// Network access mode in sandbox
     #[serde(default)]
-    pub network: Option<bool>,
+    pub network: SandboxNetworkMode,
+    /// Allowlisted network targets used by sandbox brokers/tooling
+    #[serde(default = "default_sandbox_network_allow")]
+    pub network_allow: Vec<String>,
+    /// Explicit private targets (dangerous) allowed by operator override
+    #[serde(default)]
+    pub dangerous_allow_private: Vec<String>,
     /// Command timeout in seconds (default: 30)
     #[serde(default = "default_sandbox_timeout")]
     pub timeout_secs: u64,
@@ -295,10 +350,37 @@ fn default_sandbox_exec() -> Vec<String> {
     vec!["sh".into()]
 }
 
+fn default_sandbox_network_allow() -> Vec<String> {
+    vec![
+        "github.com".into(),
+        "api.github.com".into(),
+        "raw.githubusercontent.com".into(),
+        "objects.githubusercontent.com".into(),
+        "registry.npmjs.org".into(),
+        "pypi.org".into(),
+        "files.pythonhosted.org".into(),
+        "crates.io".into(),
+        "static.crates.io".into(),
+        "cdn.jsdelivr.net".into(),
+        "unpkg.com".into(),
+        "docs.rs".into(),
+        "doc.rust-lang.org".into(),
+        "developer.mozilla.org".into(),
+        "api.openai.com".into(),
+        "api.anthropic.com".into(),
+        "generativelanguage.googleapis.com".into(),
+        "api.search.brave.com".into(),
+        "duckduckgo.com".into(),
+        "www.google.com".into(),
+    ]
+}
+
 impl Default for SandboxPolicyConfig {
     fn default() -> Self {
         Self {
-            network: None,
+            network: SandboxNetworkMode::Ask,
+            network_allow: default_sandbox_network_allow(),
+            dangerous_allow_private: Vec::new(),
             timeout_secs: default_sandbox_timeout(),
             max_memory_mb: default_sandbox_memory(),
             env_inherit: default_sandbox_env(),
@@ -346,6 +428,8 @@ impl Default for HeartbeatPolicyConfig {
 pub struct FullAgentConfig {
     pub agent_id: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub security: SecurityMode,
     #[serde(default)]
     pub workspace: Option<String>,
     pub identity: Option<IdentityConfig>,
@@ -560,6 +644,12 @@ fn resolve_agents_env(agents: &mut [FullAgentConfig]) {
         }
 
         if let Some(sandbox) = &mut agent.sandbox {
+            for host in &mut sandbox.network_allow {
+                *host = resolve_env_var(host);
+            }
+            for host in &mut sandbox.dangerous_allow_private {
+                *host = resolve_env_var(host);
+            }
             for key in &mut sandbox.env_inherit {
                 *key = resolve_env_var(key);
             }
@@ -697,6 +787,7 @@ mod tests {
             agents: vec![FullAgentConfig {
                 agent_id: "agent-a".into(),
                 enabled: true,
+                security: SecurityMode::default(),
                 identity: None,
                 model_policy: super::super::ModelPolicy {
                     primary: "m".into(),
@@ -727,10 +818,60 @@ mod tests {
     #[test]
     fn sandbox_policy_default_values() {
         let cfg = SandboxPolicyConfig::default();
-        assert_eq!(cfg.network, None);
+        assert_eq!(cfg.network, SandboxNetworkMode::Ask);
+        assert!(!cfg.network_allow.is_empty());
+        assert!(cfg.network_allow.iter().any(|h| h.contains("github.com")));
+        assert!(cfg.dangerous_allow_private.is_empty());
         assert_eq!(cfg.timeout_secs, 30);
         assert_eq!(cfg.max_memory_mb, 512);
         assert_eq!(cfg.env_inherit, vec!["PATH", "HOME", "TMPDIR"]);
         assert_eq!(cfg.exec_allow, vec!["sh"]);
+    }
+
+    #[test]
+    fn sandbox_network_mode_from_string() {
+        let ask: SandboxNetworkMode = serde_json::from_str("\"ask\"").unwrap();
+        assert_eq!(ask, SandboxNetworkMode::Ask);
+        let allow: SandboxNetworkMode = serde_json::from_str("\"allow\"").unwrap();
+        assert_eq!(allow, SandboxNetworkMode::Allow);
+        let deny: SandboxNetworkMode = serde_json::from_str("\"deny\"").unwrap();
+        assert_eq!(deny, SandboxNetworkMode::Deny);
+    }
+
+    #[test]
+    fn sandbox_network_mode_from_bool_compat() {
+        let allow: SandboxNetworkMode = serde_json::from_str("true").unwrap();
+        assert_eq!(allow, SandboxNetworkMode::Allow);
+        let deny: SandboxNetworkMode = serde_json::from_str("false").unwrap();
+        assert_eq!(deny, SandboxNetworkMode::Deny);
+    }
+
+    #[test]
+    fn sandbox_network_mode_default_is_ask() {
+        assert_eq!(SandboxNetworkMode::default(), SandboxNetworkMode::Ask);
+    }
+
+    #[test]
+    fn sandbox_policy_default_network_allow_not_empty() {
+        let cfg = SandboxPolicyConfig::default();
+        assert!(!cfg.network_allow.is_empty());
+        assert!(cfg.network_allow.iter().any(|h| h.contains("github.com")));
+    }
+
+    #[test]
+    fn security_mode_defaults_to_standard() {
+        let cfg: SecurityMode = serde_json::from_str("\"standard\"").unwrap();
+        assert_eq!(cfg, SecurityMode::Standard);
+    }
+
+    #[test]
+    fn security_mode_off() {
+        let cfg: SecurityMode = serde_json::from_str("\"off\"").unwrap();
+        assert_eq!(cfg, SecurityMode::Off);
+    }
+
+    #[test]
+    fn security_mode_default_is_standard() {
+        assert_eq!(SecurityMode::default(), SecurityMode::Standard);
     }
 }

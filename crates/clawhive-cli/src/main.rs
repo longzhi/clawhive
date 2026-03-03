@@ -4,9 +4,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::TimeZone;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -67,6 +67,12 @@ enum Commands {
         tui: bool,
         #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
+        /// Override security mode (overrides agent config)
+        #[arg(long, value_name = "MODE")]
+        security: Option<SecurityMode>,
+        /// Shorthand for --security off
+        #[arg(long)]
+        no_security: bool,
     },
     #[command(about = "Stop a running clawhive process")]
     Stop,
@@ -78,11 +84,23 @@ enum Commands {
         tui: bool,
         #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
+        /// Override security mode (overrides agent config)
+        #[arg(long, value_name = "MODE")]
+        security: Option<SecurityMode>,
+        /// Shorthand for --security off
+        #[arg(long)]
+        no_security: bool,
     },
     #[command(about = "Code mode: open developer TUI")]
     Code {
         #[arg(long, default_value = "8848", help = "HTTP API server port")]
         port: u16,
+        /// Override security mode (overrides agent config)
+        #[arg(long, value_name = "MODE")]
+        security: Option<SecurityMode>,
+        /// Shorthand for --security off
+        #[arg(long)]
+        no_security: bool,
     },
     #[command(about = "Dashboard mode: attach TUI observability panel to running gateway")]
     Dashboard {
@@ -93,6 +111,12 @@ enum Commands {
     Chat {
         #[arg(long, default_value = "clawhive-main", help = "Agent ID to use")]
         agent: String,
+        /// Override security mode (overrides agent config)
+        #[arg(long, value_name = "MODE")]
+        security: Option<SecurityMode>,
+        /// Shorthand for --security off
+        #[arg(long)]
+        no_security: bool,
     },
     #[command(about = "Validate config files")]
     Validate,
@@ -112,10 +136,55 @@ enum Commands {
     Schedule(ScheduleCommands),
     #[command(subcommand, about = "Manage wait tasks (background polling)")]
     Wait(WaitCommands),
+    #[command(subcommand, about = "Manage runtime allowlist")]
+    Allowlist(AllowlistCommands),
     #[command(about = "Interactive configuration manager")]
     Setup {
         #[arg(long, help = "Skip confirmation prompts on reconfigure/remove")]
         force: bool,
+    },
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct AllowlistFile {
+    #[serde(default)]
+    agents: HashMap<String, AllowlistAgent>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct AllowlistAgent {
+    #[serde(default)]
+    exec: Vec<String>,
+    #[serde(default)]
+    network: Vec<String>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AllowlistType {
+    Exec,
+    Network,
+}
+
+#[derive(Subcommand)]
+enum AllowlistCommands {
+    #[command(about = "List runtime allowlist entries")]
+    List {
+        #[arg(long, help = "Filter by agent ID")]
+        agent: Option<String>,
+    },
+    #[command(about = "Remove allowlist entries by exact pattern")]
+    Remove {
+        #[arg(help = "Pattern to remove")]
+        pattern: String,
+        #[arg(long, help = "Filter by agent ID")]
+        agent: Option<String>,
+        #[arg(long, value_enum, help = "Filter by entry type")]
+        r#type: Option<AllowlistType>,
+    },
+    #[command(about = "Clear allowlist entries")]
+    Clear {
+        #[arg(long, help = "Filter by agent ID")]
+        agent: Option<String>,
     },
 }
 
@@ -300,38 +369,62 @@ async fn main() -> Result<()> {
                 config.routing.bindings.len()
             );
         }
-        Commands::Start { daemon, tui, port } => {
+        Commands::Start {
+            daemon,
+            tui,
+            port,
+            security,
+            no_security,
+        } => {
             ensure_skeleton_config(&cli.config_root, port)?;
+            let security_override = resolve_security_override(security, no_security);
             if daemon {
-                daemonize(&cli.config_root, tui, port)?;
+                daemonize(&cli.config_root, tui, port, security_override)?;
             } else {
-                start_bot(&cli.config_root, tui, port).await?;
+                start_bot(&cli.config_root, tui, port, security_override).await?;
             }
         }
         Commands::Stop => {
             stop_process(&cli.config_root)?;
         }
-        Commands::Restart { daemon, tui, port } => {
+        Commands::Restart {
+            daemon,
+            tui,
+            port,
+            security,
+            no_security,
+        } => {
             let was_running = stop_process(&cli.config_root)?;
             if was_running {
                 // Brief pause to let ports release
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             ensure_skeleton_config(&cli.config_root, port)?;
+            let security_override = resolve_security_override(security, no_security);
             if daemon {
-                daemonize(&cli.config_root, tui, port)?;
+                daemonize(&cli.config_root, tui, port, security_override)?;
             } else {
-                start_bot(&cli.config_root, tui, port).await?;
+                start_bot(&cli.config_root, tui, port, security_override).await?;
             }
         }
-        Commands::Code { port } => {
-            run_code_tui(&cli.config_root, port).await?;
+        Commands::Code {
+            port,
+            security,
+            no_security,
+        } => {
+            let security_override = resolve_security_override(security, no_security);
+            run_code_tui(&cli.config_root, port, security_override).await?;
         }
         Commands::Dashboard { port } => {
             run_dashboard_tui(port).await?;
         }
-        Commands::Chat { agent } => {
-            run_repl(&cli.config_root, &agent).await?;
+        Commands::Chat {
+            agent,
+            security,
+            no_security,
+        } => {
+            let security_override = resolve_security_override(security, no_security);
+            run_repl(&cli.config_root, &agent, security_override).await?;
         }
         Commands::Consolidate => {
             run_consolidate(&cli.config_root).await?;
@@ -481,7 +574,7 @@ async fn main() -> Result<()> {
                 _schedule_manager,
                 _wait_manager,
                 _approval_registry,
-            ) = bootstrap(&cli.config_root).await?;
+            ) = bootstrap(&cli.config_root, None).await?;
             let session_mgr = SessionManager::new(memory, 1800);
             match cmd {
                 SessionCommands::Reset { session_key } => {
@@ -502,7 +595,7 @@ async fn main() -> Result<()> {
                 _schedule_manager,
                 _wait_manager,
                 _approval_registry,
-            ) = bootstrap(&cli.config_root).await?;
+            ) = bootstrap(&cli.config_root, None).await?;
             match cmd {
                 TaskCommands::Trigger {
                     agent: _agent,
@@ -542,7 +635,7 @@ async fn main() -> Result<()> {
                 schedule_manager,
                 _wait_manager,
                 _approval_registry,
-            ) = bootstrap(&cli.config_root).await?;
+            ) = bootstrap(&cli.config_root, None).await?;
             match cmd {
                 ScheduleCommands::List => {
                     let entries = schedule_manager.list().await;
@@ -713,6 +806,173 @@ async fn main() -> Result<()> {
                 },
             }
         }
+        Commands::Allowlist(cmd) => {
+            let allowlist_path = cli.config_root.join("data/runtime_allowlist.json");
+
+            match cmd {
+                AllowlistCommands::List { agent } => {
+                    if !allowlist_path.exists() {
+                        println!("No allowlist entries.");
+                        return Ok(());
+                    }
+
+                    let content = std::fs::read_to_string(&allowlist_path)?;
+                    let allowlist: AllowlistFile = serde_json::from_str(&content)
+                        .context("Failed to parse runtime_allowlist.json")?;
+                    let mut printed = false;
+
+                    for (agent_id, entries) in &allowlist.agents {
+                        if let Some(filter) = &agent {
+                            if filter != agent_id {
+                                continue;
+                            }
+                        }
+
+                        if printed {
+                            println!();
+                        }
+                        printed = true;
+
+                        println!("Agent: {agent_id}");
+                        println!("  exec:");
+                        for pattern in &entries.exec {
+                            println!("    - {pattern}");
+                        }
+                        println!("  network:");
+                        for pattern in &entries.network {
+                            println!("    - {pattern}");
+                        }
+                    }
+
+                    if !printed {
+                        println!("No allowlist entries.");
+                    }
+                }
+                AllowlistCommands::Remove {
+                    pattern,
+                    agent,
+                    r#type,
+                } => {
+                    if !allowlist_path.exists() {
+                        println!("No allowlist entries.");
+                        return Ok(());
+                    }
+
+                    let content = std::fs::read_to_string(&allowlist_path)?;
+                    let mut allowlist: AllowlistFile = serde_json::from_str(&content)
+                        .context("Failed to parse runtime_allowlist.json")?;
+                    let mut removed = Vec::new();
+
+                    for (agent_id, entries) in &mut allowlist.agents {
+                        if let Some(filter) = &agent {
+                            if filter != agent_id {
+                                continue;
+                            }
+                        }
+                        match r#type {
+                            Some(AllowlistType::Exec) => {
+                                let before = entries.exec.len();
+                                entries.exec.retain(|item| item != &pattern);
+                                let count = before.saturating_sub(entries.exec.len());
+                                if count > 0 {
+                                    removed.push((agent_id.clone(), "exec", count));
+                                }
+                            }
+                            Some(AllowlistType::Network) => {
+                                let before = entries.network.len();
+                                entries.network.retain(|item| item != &pattern);
+                                let count = before.saturating_sub(entries.network.len());
+                                if count > 0 {
+                                    removed.push((agent_id.clone(), "network", count));
+                                }
+                            }
+                            None => {
+                                let exec_before = entries.exec.len();
+                                entries.exec.retain(|item| item != &pattern);
+                                let exec_count = exec_before.saturating_sub(entries.exec.len());
+                                if exec_count > 0 {
+                                    removed.push((agent_id.clone(), "exec", exec_count));
+                                }
+
+                                let network_before = entries.network.len();
+                                entries.network.retain(|item| item != &pattern);
+                                let network_count =
+                                    network_before.saturating_sub(entries.network.len());
+                                if network_count > 0 {
+                                    removed.push((agent_id.clone(), "network", network_count));
+                                }
+                            }
+                        }
+                    }
+
+                    if removed.is_empty() {
+                        println!("No matching allowlist entries removed.");
+                        return Ok(());
+                    }
+
+                    if let Some(parent) = allowlist_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    allowlist.agents.retain(|_, entries| {
+                        !entries.exec.is_empty() || !entries.network.is_empty()
+                    });
+                    std::fs::write(&allowlist_path, serde_json::to_string_pretty(&allowlist)?)?;
+
+                    for (agent_id, category, count) in removed {
+                        println!(
+                            "Removed {count} {category} entr{suffix} from agent '{agent_id}'.",
+                            suffix = if count == 1 { "y" } else { "ies" }
+                        );
+                    }
+                }
+                AllowlistCommands::Clear { agent } => {
+                    if !allowlist_path.exists() {
+                        println!("No allowlist entries.");
+                        return Ok(());
+                    }
+
+                    let content = std::fs::read_to_string(&allowlist_path)?;
+                    let mut allowlist: AllowlistFile = serde_json::from_str(&content)
+                        .context("Failed to parse runtime_allowlist.json")?;
+                    let mut cleared = Vec::new();
+
+                    for (agent_id, entries) in &mut allowlist.agents {
+                        if let Some(filter) = &agent {
+                            if filter != agent_id {
+                                continue;
+                            }
+                        }
+
+                        let removed_count = entries.exec.len() + entries.network.len();
+                        if removed_count > 0 {
+                            entries.exec.clear();
+                            entries.network.clear();
+                            cleared.push((agent_id.clone(), removed_count));
+                        }
+                    }
+
+                    if cleared.is_empty() {
+                        println!("No allowlist entries to clear.");
+                        return Ok(());
+                    }
+
+                    if let Some(parent) = allowlist_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    allowlist.agents.retain(|_, entries| {
+                        !entries.exec.is_empty() || !entries.network.is_empty()
+                    });
+                    std::fs::write(&allowlist_path, serde_json::to_string_pretty(&allowlist)?)?;
+
+                    for (agent_id, count) in cleared {
+                        println!(
+                            "Cleared {count} entr{suffix} for agent '{agent_id}'.",
+                            suffix = if count == 1 { "y" } else { "ies" }
+                        );
+                    }
+                }
+            }
+        }
         Commands::Setup { force } => {
             run_setup(&cli.config_root, force).await?;
         }
@@ -753,9 +1013,21 @@ fn format_schedule_type(schedule: &ScheduleType) -> String {
     }
 }
 
+fn resolve_security_override(
+    security: Option<SecurityMode>,
+    no_security: bool,
+) -> Option<SecurityMode> {
+    if no_security {
+        Some(SecurityMode::Off)
+    } else {
+        security
+    }
+}
+
 #[allow(clippy::type_complexity)]
 async fn bootstrap(
     root: &Path,
+    security_override: Option<SecurityMode>,
 ) -> Result<(
     Arc<EventBus>,
     Arc<MemoryStore>,
@@ -765,7 +1037,21 @@ async fn bootstrap(
     Arc<WaitTaskManager>,
     Arc<ApprovalRegistry>,
 )> {
-    let config = load_config(&root.join("config"))?;
+    let mut config = load_config(&root.join("config"))?;
+
+    if let Some(mode) = security_override {
+        for agent in &mut config.agents {
+            agent.security = mode.clone();
+        }
+        if mode == SecurityMode::Off {
+            tracing::warn!(
+                "⚠️  Security disabled via --no-security flag. All security checks are OFF."
+            );
+            eprintln!(
+                "⚠️  WARNING: Security disabled. All security checks (HardBaseline, approval, sandbox restrictions) are OFF."
+            );
+        }
+    }
 
     let db_path = root.join("data/clawhive.db");
     if let Some(parent) = db_path.parent() {
@@ -829,9 +1115,16 @@ async fn bootstrap(
 
     let bus = Arc::new(EventBus::new(256));
     let publisher = bus.publisher();
-    let approval_registry = Arc::new(ApprovalRegistry::with_persistence(
-        root.join("data/exec_allowlist.json"),
-    ));
+    let new_path = root.join("data/runtime_allowlist.json");
+    let old_path = root.join("data/exec_allowlist.json");
+    if !new_path.exists() && old_path.exists() {
+        if let Err(e) = std::fs::rename(&old_path, &new_path) {
+            tracing::warn!("Failed to migrate exec_allowlist.json to runtime_allowlist.json: {e}");
+        } else {
+            tracing::info!("Migrated exec_allowlist.json -> runtime_allowlist.json");
+        }
+    }
+    let approval_registry = Arc::new(ApprovalRegistry::with_persistence(new_path));
     let schedule_manager = Arc::new(ScheduleManager::new(
         &root.join("config/schedules.d"),
         &root.join("data/schedules"),
@@ -1352,7 +1645,12 @@ fn check_and_clean_pid(root: &Path) -> Result<()> {
 }
 
 /// Daemonize clawhive by forking to background
-fn daemonize(root: &Path, tui: bool, port: u16) -> Result<()> {
+fn daemonize(
+    root: &Path,
+    tui: bool,
+    port: u16,
+    security_override: Option<SecurityMode>,
+) -> Result<()> {
     use std::process::{Command, Stdio};
 
     if tui {
@@ -1372,12 +1670,25 @@ fn daemonize(root: &Path, tui: bool, port: u16) -> Result<()> {
     let log_file_err = log_file.try_clone()?;
 
     // Spawn the process in background
-    let child = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    command
         .arg("--config-root")
         .arg(root)
         .arg("start")
         .arg("--port")
-        .arg(port.to_string())
+        .arg(port.to_string());
+
+    match security_override {
+        Some(SecurityMode::Off) => {
+            command.arg("--no-security");
+        }
+        Some(SecurityMode::Standard) => {
+            command.arg("--security").arg("standard");
+        }
+        None => {}
+    }
+
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_file_err))
@@ -1430,14 +1741,19 @@ fn stop_process(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
+async fn start_bot(
+    root: &Path,
+    with_tui: bool,
+    port: u16,
+    security_override: Option<SecurityMode>,
+) -> Result<()> {
     // PID file: check stale → write
     check_and_clean_pid(root)?;
     write_pid_file(root)?;
     tracing::info!("PID file written (pid: {})", std::process::id());
 
     let (bus, memory, gateway, config, schedule_manager, wait_task_manager, approval_registry) =
-        bootstrap(root).await?;
+        bootstrap(root, security_override).await?;
 
     let workspace_dir = root.to_path_buf();
     let file_store_for_consolidation =
@@ -1799,7 +2115,7 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
 
 async fn run_consolidate(root: &Path) -> Result<()> {
     let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager, _approval_registry) =
-        bootstrap(root).await?;
+        bootstrap(root, None).await?;
 
     let workspace_dir = root.to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
@@ -1867,10 +2183,14 @@ async fn run_dashboard_tui(port: u16) -> Result<()> {
     clawhive_tui::run_tui(&bus, None).await
 }
 
-async fn run_code_tui(root: &Path, port: u16) -> Result<()> {
+async fn run_code_tui(
+    root: &Path,
+    port: u16,
+    security_override: Option<SecurityMode>,
+) -> Result<()> {
     let _ = port;
     let (bus, _memory, gateway, _config, _schedule_manager, _wait_manager, approval_registry) =
-        bootstrap(root).await?;
+        bootstrap(root, security_override).await?;
     clawhive_tui::run_code_tui(bus.as_ref(), gateway, Some(approval_registry)).await
 }
 
@@ -1953,9 +2273,13 @@ async fn forward_sse_to_bus(
     }
 }
 
-async fn run_repl(root: &Path, _agent_id: &str) -> Result<()> {
+async fn run_repl(
+    root: &Path,
+    _agent_id: &str,
+    security_override: Option<SecurityMode>,
+) -> Result<()> {
     let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager, _approval_registry) =
-        bootstrap(root).await?;
+        bootstrap(root, security_override).await?;
 
     println!("clawhive REPL. Type 'quit' to exit.");
     println!("---");
@@ -2519,6 +2843,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_start_no_security_flag() {
+        let cli = Cli::try_parse_from(["clawhive", "start", "--no-security"]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Start {
+                no_security: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_start_security_off() {
+        let cli = Cli::try_parse_from(["clawhive", "start", "--security", "off"]).unwrap();
+        if let Commands::Start { security, .. } = cli.command.unwrap() {
+            assert_eq!(security, Some(SecurityMode::Off));
+        } else {
+            panic!("expected Start command");
+        }
+    }
+
+    #[test]
+    fn parses_chat_no_security_flag() {
+        let cli = Cli::try_parse_from(["clawhive", "chat", "--no-security"]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Commands::Chat {
+                no_security: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parses_agent_list_subcommand() {
         let cli = Cli::try_parse_from(["clawhive", "agent", "list"]).unwrap();
         assert!(matches!(
@@ -2639,7 +2997,7 @@ mod tests {
         let cli = Cli::try_parse_from(["clawhive", "code", "--port", "8082"]).unwrap();
         assert!(matches!(
             cli.command.unwrap(),
-            Commands::Code { port: 8082 }
+            Commands::Code { port: 8082, .. }
         ));
     }
 

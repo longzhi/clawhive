@@ -96,11 +96,26 @@ impl ToolExecutor for WebFetchTool {
 
             // Policy context check (external skills need network permission)
             if !ctx.check_network(host, port) {
+                tracing::warn!(
+                    target: "clawhive::audit::network",
+                    tool = "web_fetch",
+                    url = %url,
+                    host = %host,
+                    "network access denied"
+                );
                 return Ok(ToolOutput {
                     content: format!("Network access denied for {host}:{port}"),
                     is_error: true,
                 });
             }
+
+            tracing::info!(
+                target: "clawhive::audit::network",
+                tool = "web_fetch",
+                url = %url,
+                host = %host,
+                "network access granted"
+            );
         }
 
         // Fetch

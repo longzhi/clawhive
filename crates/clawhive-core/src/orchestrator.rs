@@ -16,7 +16,7 @@ use futures_core::Stream;
 
 use super::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
 use super::approval::ApprovalRegistry;
-use super::config::{ExecSecurityConfig, FullAgentConfig, SandboxPolicyConfig};
+use super::config::{ExecSecurityConfig, FullAgentConfig, SandboxPolicyConfig, SecurityMode};
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
 use super::memory_tools::{MemoryGetTool, MemorySearchTool};
@@ -277,6 +277,26 @@ impl Orchestrator {
         merged.env.dedup();
 
         Some(merged)
+    }
+
+    fn compute_merged_permissions(
+        active_skills: &SkillRegistry,
+        forced_skills: Option<&[String]>,
+    ) -> Option<corral_core::Permissions> {
+        if let Some(forced_names) = forced_skills {
+            let selected_perms = forced_names
+                .iter()
+                .filter_map(|forced| {
+                    active_skills
+                        .get(forced)
+                        .and_then(|skill| skill.permissions.as_ref())
+                        .map(|p| p.to_corral_permissions())
+                })
+                .collect::<Vec<_>>();
+            Self::merge_permissions(selected_perms)
+        } else {
+            active_skills.merged_permissions()
+        }
     }
 
     fn forced_allowed_tools(
@@ -565,7 +585,7 @@ impl Orchestrator {
 
             Self::merge_permissions(selected_perms)
         } else {
-            None
+            Self::compute_merged_permissions(&active_skills, None)
         };
 
         let memory_context = self
@@ -645,6 +665,11 @@ impl Orchestrator {
             inbound.connector_id.clone(),
             inbound.conversation_scope.clone(),
         ));
+        let private_network_overrides = agent
+            .sandbox
+            .as_ref()
+            .map(|s| s.dangerous_allow_private.clone())
+            .unwrap_or_default();
         let (resp, _messages) = self
             .tool_use_loop(
                 agent_id,
@@ -655,6 +680,8 @@ impl Orchestrator {
                 2048,
                 allowed.as_deref(),
                 merged_permissions,
+                agent.security.clone(),
+                private_network_overrides,
                 source_info,
             )
             .await?;
@@ -788,7 +815,7 @@ impl Orchestrator {
 
             Self::merge_permissions(selected_perms)
         } else {
-            None
+            Self::compute_merged_permissions(&active_skills, None)
         };
 
         let memory_context = self
@@ -868,6 +895,11 @@ impl Orchestrator {
             inbound.connector_id.clone(),
             inbound.conversation_scope.clone(),
         ));
+        let private_network_overrides_stream = agent
+            .sandbox
+            .as_ref()
+            .map(|s| s.dangerous_allow_private.clone())
+            .unwrap_or_default();
         let (_resp, final_messages) = self
             .tool_use_loop(
                 agent_id,
@@ -878,6 +910,8 @@ impl Orchestrator {
                 2048,
                 allowed_stream.as_deref(),
                 merged_permissions,
+                agent.security.clone(),
+                private_network_overrides_stream,
                 source_info_stream,
             )
             .await?;
@@ -933,6 +967,8 @@ impl Orchestrator {
         max_tokens: u32,
         allowed_tools: Option<&[String]>,
         merged_permissions: Option<corral_core::Permissions>,
+        security_mode: SecurityMode,
+        private_network_overrides: Vec<String>,
         source_info: Option<(String, String, String)>, // (channel_type, connector_id, conversation_scope)
     ) -> Result<(clawhive_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
@@ -1029,8 +1065,15 @@ impl Orchestrator {
             // - With permissions: external skill context (sandboxed)
             // - Without: builtin context (trusted, only hard baseline checks)
             let ctx = match merged_permissions.as_ref() {
-                Some(perms) => ToolContext::external(perms.clone()),
-                None => ToolContext::builtin(),
+                Some(perms) => ToolContext::external_with_security_and_private_overrides(
+                    perms.clone(),
+                    security_mode.clone(),
+                    private_network_overrides.clone(),
+                ),
+                None => ToolContext::builtin_with_security_and_private_overrides(
+                    security_mode.clone(),
+                    private_network_overrides.clone(),
+                ),
             }
             .with_recent_messages(recent_messages);
             let ctx = if let Some((ref ch, ref co, ref cv)) = source_info {
@@ -1242,6 +1285,12 @@ impl Orchestrator {
                 2048,
                 agent.tool_policy.as_ref().map(|tp| tp.allow.as_slice()),
                 None,
+                agent.security.clone(),
+                agent
+                    .sandbox
+                    .as_ref()
+                    .map(|s| s.dangerous_allow_private.clone())
+                    .unwrap_or_default(),
                 source_info,
             )
             .await?;
@@ -1501,4 +1550,51 @@ fn format_group_context_md(
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_permissions_in_normal_mode_use_all_active_skills() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill_a = dir.path().join("skill-a");
+        std::fs::create_dir_all(&skill_a).unwrap();
+        std::fs::write(
+            skill_a.join("SKILL.md"),
+            r#"---
+name: skill-a
+description: A
+permissions:
+  network:
+    allow: ["api.a.com:443"]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let skill_b = dir.path().join("skill-b");
+        std::fs::create_dir_all(&skill_b).unwrap();
+        std::fs::write(
+            skill_b.join("SKILL.md"),
+            r#"---
+name: skill-b
+description: B
+permissions:
+  network:
+    allow: ["api.b.com:443"]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let active_skills = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let merged = Orchestrator::compute_merged_permissions(&active_skills, None);
+
+        let perms = merged.expect("expected merged permissions in normal mode");
+        assert!(perms.network.allow.contains(&"api.a.com:443".to_string()));
+        assert!(perms.network.allow.contains(&"api.b.com:443".to_string()));
+    }
 }

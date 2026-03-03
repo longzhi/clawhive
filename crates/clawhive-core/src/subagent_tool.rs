@@ -100,7 +100,7 @@ impl ToolExecutor for SubAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FullAgentConfig, ModelPolicy};
+    use crate::{FullAgentConfig, ModelPolicy, SecurityMode};
     use clawhive_provider::{ProviderRegistry, StubProvider};
     use std::collections::HashMap;
 
@@ -113,6 +113,7 @@ mod tests {
         let agent = FullAgentConfig {
             agent_id: "helper".into(),
             enabled: true,
+            security: SecurityMode::default(),
             identity: None,
             model_policy: ModelPolicy {
                 primary: "stub/test-model".into(),

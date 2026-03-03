@@ -315,6 +315,9 @@ impl App {
             BusMessage::NeedHumanApproval {
                 trace_id,
                 ref reason,
+                ref agent_id,
+                ref command,
+                ref network_target,
                 ..
             } => {
                 self.push_event(format!(
@@ -322,8 +325,13 @@ impl App {
                     &trace_id.to_string()[..8]
                 ));
                 self.push_log(format!("[{ts}] APPROVAL: {reason}"));
+                let command_display = if let Some(target) = network_target {
+                    format!("{command} | network: {target}")
+                } else {
+                    command.clone()
+                };
                 self.pending_approvals
-                    .push((trace_id, reason.clone(), String::new()));
+                    .push((trace_id, command_display, agent_id.clone()));
                 self.approval_overlay = true;
                 self.approval_selected = self.pending_approvals.len().saturating_sub(1);
             }
@@ -1028,7 +1036,7 @@ fn ui(frame: &mut Frame, app: &App) {
             frame,
             &app.pending_approvals,
             app.approval_selected,
-            " ⚠ Exec Approval Required ",
+            " ⚠ Approval Required ",
         );
     }
 }
@@ -1147,7 +1155,7 @@ fn code_ui(frame: &mut Frame, app: &CodeApp) {
             frame,
             &app.pending_approvals,
             app.approval_selected,
-            " ⚠ Exec Approval Required ",
+            " ⚠ Approval Required ",
         );
     }
 }
@@ -1319,6 +1327,7 @@ mod tests {
             reason: "python --version".to_string(),
             agent_id: "test-agent".to_string(),
             command: "python --version".to_string(),
+            network_target: None,
             source_channel_type: None,
             source_connector_id: None,
             source_conversation_scope: None,

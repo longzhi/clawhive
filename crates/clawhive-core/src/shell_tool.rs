@@ -15,7 +15,9 @@ use corral_core::{
 
 use super::access_gate::{AccessGate, AccessLevel};
 use super::approval::ApprovalRegistry;
-use super::config::{ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxPolicyConfig};
+use super::config::{
+    ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxNetworkMode, SandboxPolicyConfig,
+};
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -81,6 +83,7 @@ impl ExecuteCommandTool {
                     reason: format!("Command requires approval: {command}"),
                     agent_id: self.agent_id.clone(),
                     command: command.to_string(),
+                    network_target: None,
                     source_channel_type: Some(ch_type.to_string()),
                     source_connector_id: Some(conn_id.to_string()),
                     source_conversation_scope: Some(conv_scope.to_string()),
@@ -100,6 +103,58 @@ impl ExecuteCommandTool {
                 Ok(None)
             }
             Ok(ApprovalDecision::Deny) | Err(_) => Ok(Some("Command denied by user".to_string())),
+        }
+    }
+
+    async fn wait_for_network_approval(
+        &self,
+        command: &str,
+        host: &str,
+        port: u16,
+        source_info: Option<(&str, &str, &str)>,
+    ) -> Result<Option<String>> {
+        let Some(registry) = self.approval_registry.as_ref() else {
+            return Ok(Some(
+                "Network access requires approval but no approval UI available".to_string(),
+            ));
+        };
+
+        let target = format!("{host}:{port}");
+        let trace_id = uuid::Uuid::new_v4();
+        tracing::info!(command, %trace_id, target, "requesting network approval");
+
+        let rx = registry
+            .request(trace_id, command.to_string(), self.agent_id.clone())
+            .await;
+
+        if let (Some(bus), Some((ch_type, conn_id, conv_scope))) = (self.bus.as_ref(), source_info)
+        {
+            let _ = bus
+                .publish(BusMessage::NeedHumanApproval {
+                    trace_id,
+                    reason: format!("Network access: {target}"),
+                    agent_id: self.agent_id.clone(),
+                    command: command.to_string(),
+                    network_target: Some(target.clone()),
+                    source_channel_type: Some(ch_type.to_string()),
+                    source_connector_id: Some(conn_id.to_string()),
+                    source_conversation_scope: Some(conv_scope.to_string()),
+                })
+                .await;
+        }
+
+        match rx.await {
+            Ok(ApprovalDecision::AllowOnce) => Ok(None),
+            Ok(ApprovalDecision::AlwaysAllow) => {
+                registry
+                    .add_network_allow_pattern(&self.agent_id, target)
+                    .await;
+                tracing::info!(host, port, "adding to network allowlist");
+                Ok(None)
+            }
+            Ok(ApprovalDecision::Deny) | Err(_) => Ok(Some(format!(
+                "Network access to {host}:{port} denied by user"
+            ))),
         }
     }
 
@@ -124,6 +179,51 @@ impl ExecuteCommandTool {
             }
         })
     }
+}
+
+/// Extract target hosts from command arguments (best-effort URL parsing)
+fn extract_network_targets(command: &str) -> Vec<(String, u16)> {
+    let mut targets = Vec::new();
+    for token in command.split_whitespace() {
+        if let Ok(url) = reqwest::Url::parse(token) {
+            if let Some(host) = url.host_str() {
+                let port = url.port_or_known_default().unwrap_or(443);
+                targets.push((host.to_string(), port));
+            }
+        }
+    }
+    targets
+}
+
+/// Known package manager commands and their registry domains
+fn package_manager_domains(command: &str) -> Vec<String> {
+    let first_token = command.split_whitespace().next().unwrap_or("");
+    let basename = std::path::Path::new(first_token)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first_token);
+    match basename {
+        "npm" | "npx" | "yarn" | "pnpm" => {
+            vec!["registry.npmjs.org".into(), "registry.yarnpkg.com".into()]
+        }
+        "pip" | "pip3" => vec!["pypi.org".into(), "files.pythonhosted.org".into()],
+        "cargo" => vec!["crates.io".into(), "static.crates.io".into()],
+        "gem" => vec!["rubygems.org".into()],
+        "go" => vec!["proxy.golang.org".into()],
+        _ => vec![],
+    }
+}
+
+/// Check if a network target matches a domain pattern from the whitelist
+fn domain_matches(pattern: &str, host: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+    // Wildcard: *.example.com matches sub.example.com
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host.ends_with(suffix) && host.len() > suffix.len();
+    }
+    false
 }
 
 struct RemindersHandler;
@@ -361,7 +461,10 @@ fn make_sandbox(
     extra_dirs: &[(PathBuf, AccessLevel)],
     sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
-    let network_allowed = sandbox_cfg.network.unwrap_or(cfg!(target_os = "macos"));
+    let network_allowed = match sandbox_cfg.network {
+        SandboxNetworkMode::Allow | SandboxNetworkMode::Ask => true,
+        SandboxNetworkMode::Deny => false,
+    };
     let config = SandboxConfig {
         permissions: base_permissions(
             workspace,
@@ -387,7 +490,10 @@ async fn sandbox_with_broker(
     extra_dirs: &[(PathBuf, AccessLevel)],
     sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
-    let network_allowed = sandbox_cfg.network.unwrap_or(cfg!(target_os = "macos"));
+    let network_allowed = match sandbox_cfg.network {
+        SandboxNetworkMode::Allow | SandboxNetworkMode::Ask => true,
+        SandboxNetworkMode::Deny => false,
+    };
     let mut permissions = base_permissions(
         workspace,
         extra_dirs,
@@ -541,6 +647,56 @@ impl ToolExecutor for ExecuteCommandTool {
                             is_error: true,
                         });
                     }
+                }
+            }
+        }
+
+        // Network approval flow (ask mode)
+        if self.sandbox_config.network == SandboxNetworkMode::Ask {
+            let targets = extract_network_targets(command);
+            let pkg_domains = package_manager_domains(command);
+
+            for (host, port) in &targets {
+                let is_whitelisted = self
+                    .sandbox_config
+                    .network_allow
+                    .iter()
+                    .any(|pattern| domain_matches(pattern, host));
+                let is_pkg_manager = pkg_domains.iter().any(|d| domain_matches(d, host));
+                let is_runtime_allowed = match self.approval_registry.as_ref() {
+                    Some(reg) => reg.is_network_allowed(&self.agent_id, host, *port).await,
+                    None => false,
+                };
+
+                if !is_whitelisted && !is_pkg_manager && !is_runtime_allowed {
+                    if let Some(reason) = self
+                        .wait_for_network_approval(command, host, *port, source_info)
+                        .await?
+                    {
+                        tracing::warn!(
+                            target: "clawhive::audit::network",
+                            agent_id = %self.agent_id,
+                            tool = "execute_command",
+                            host = %host,
+                            port = %port,
+                            command = %command,
+                            "network access denied"
+                        );
+                        return Ok(ToolOutput {
+                            content: reason,
+                            is_error: true,
+                        });
+                    }
+
+                    tracing::info!(
+                        target: "clawhive::audit::network",
+                        agent_id = %self.agent_id,
+                        tool = "execute_command",
+                        host = %host,
+                        port = %port,
+                        command = %command,
+                        "network access granted"
+                    );
                 }
             }
         }
@@ -991,7 +1147,7 @@ mod tests {
     #[test]
     fn collect_env_vars_uses_configured_keys_only() {
         let key = "CLAWHIVE_EXEC_TEST_ENV";
-        std::env::set_var(key, "ok");
+        unsafe { std::env::set_var(key, "ok") };
 
         let env = collect_env_vars(&[key.to_string()]);
 
@@ -1013,6 +1169,62 @@ mod tests {
         assert_eq!(perms.exec, vec!["sh".to_string(), "jq".to_string()]);
         assert_eq!(perms.network.allow, vec!["*:*".to_string()]);
         assert_eq!(perms.env, vec!["PATH".to_string(), "HOME".to_string()]);
+    }
+
+    #[test]
+    fn extract_network_targets_finds_urls() {
+        let targets = extract_network_targets("git clone https://github.com/user/repo.git");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, "github.com");
+        assert_eq!(targets[0].1, 443);
+    }
+
+    #[test]
+    fn extract_network_targets_finds_http_urls() {
+        let targets = extract_network_targets("curl http://example.com:8080/api");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, "example.com");
+        assert_eq!(targets[0].1, 8080);
+    }
+
+    #[test]
+    fn extract_network_targets_no_urls() {
+        let targets = extract_network_targets("ls -la /tmp");
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn package_manager_domains_npm() {
+        let domains = package_manager_domains("npm install express");
+        assert!(domains.iter().any(|d| d.contains("npmjs.org")));
+    }
+
+    #[test]
+    fn package_manager_domains_pip() {
+        let domains = package_manager_domains("pip install requests");
+        assert!(domains.iter().any(|d| d.contains("pypi.org")));
+    }
+
+    #[test]
+    fn package_manager_domains_unknown() {
+        let domains = package_manager_domains("echo hello");
+        assert!(domains.is_empty());
+    }
+
+    #[test]
+    fn domain_matches_exact() {
+        assert!(domain_matches("github.com", "github.com"));
+        assert!(!domain_matches("github.com", "api.github.com"));
+    }
+
+    #[test]
+    fn domain_matches_wildcard() {
+        assert!(domain_matches("*.github.com", "api.github.com"));
+        assert!(domain_matches(
+            "*.github.com",
+            "raw.githubusercontent.github.com"
+        ));
+        assert!(!domain_matches("*.github.com", "github.com"));
     }
 
     #[tokio::test]

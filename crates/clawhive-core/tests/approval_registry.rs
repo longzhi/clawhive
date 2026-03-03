@@ -87,3 +87,61 @@ async fn resolve_by_short_id_unknown_returns_error() {
 
     assert!(err.contains("No pending approval for short id"));
 }
+
+#[tokio::test]
+async fn network_allowlist_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_allowlist.json");
+
+    let reg = ApprovalRegistry::with_persistence(path.clone());
+    reg.add_network_allow_pattern("main", "custom-api.com:443".into())
+        .await;
+    assert!(reg.is_network_allowed("main", "custom-api.com", 443).await);
+    assert!(!reg.is_network_allowed("main", "other.com", 443).await);
+
+    let reg2 = ApprovalRegistry::with_persistence(path);
+    assert!(reg2.is_network_allowed("main", "custom-api.com", 443).await);
+}
+
+#[tokio::test]
+async fn migrates_old_exec_only_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_allowlist.json");
+
+    std::fs::write(&path, r#"{"agents":{"main":["git *","cargo *"]}}"#).unwrap();
+
+    let reg = ApprovalRegistry::with_persistence(path);
+    assert!(reg.is_runtime_allowed("main", "git status").await);
+    assert!(reg.is_runtime_allowed("main", "cargo build").await);
+    assert!(!reg.is_network_allowed("main", "example.com", 443).await);
+}
+
+#[tokio::test]
+async fn new_format_loads_both_exec_and_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_allowlist.json");
+
+    std::fs::write(
+        &path,
+        r#"{"agents":{"main":{"exec":["git *"],"network":["custom.com:443"]}}}"#,
+    )
+    .unwrap();
+
+    let reg = ApprovalRegistry::with_persistence(path);
+    assert!(reg.is_runtime_allowed("main", "git status").await);
+    assert!(reg.is_network_allowed("main", "custom.com", 443).await);
+    assert!(!reg.is_network_allowed("main", "other.com", 443).await);
+}
+
+#[tokio::test]
+async fn network_allow_pattern_with_wildcard_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_allowlist.json");
+
+    let reg = ApprovalRegistry::with_persistence(path);
+    reg.add_network_allow_pattern("main", "api.example.com:*".into())
+        .await;
+    assert!(reg.is_network_allowed("main", "api.example.com", 443).await);
+    assert!(reg.is_network_allowed("main", "api.example.com", 80).await);
+    assert!(!reg.is_network_allowed("main", "other.com", 443).await);
+}

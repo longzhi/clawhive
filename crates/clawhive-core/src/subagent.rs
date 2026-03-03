@@ -190,7 +190,7 @@ impl SubAgentRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ModelPolicy;
+    use super::super::{ModelPolicy, SecurityMode};
     use super::*;
     use clawhive_provider::{ProviderRegistry, StubProvider};
 
@@ -203,6 +203,7 @@ mod tests {
         let agent = FullAgentConfig {
             agent_id: "test-agent".into(),
             enabled: true,
+            security: SecurityMode::default(),
             identity: None,
             model_policy: ModelPolicy {
                 primary: "stub/test-model".into(),

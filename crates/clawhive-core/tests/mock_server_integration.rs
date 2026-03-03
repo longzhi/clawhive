@@ -71,6 +71,7 @@ fn make_orchestrator_with_provider(
     let agents = vec![FullAgentConfig {
         agent_id: "clawhive-main".into(),
         enabled: true,
+        security: SecurityMode::default(),
         identity: None,
         model_policy: ModelPolicy {
             primary: "sonnet".into(),
