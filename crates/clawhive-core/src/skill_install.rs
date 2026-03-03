@@ -61,7 +61,8 @@ pub struct InstallResult {
 
 pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        return download_remote_skill(source).await;
+        let resolved = normalize_github_url(source);
+        return download_remote_skill(&resolved.url, resolved.subpath.as_deref()).await;
     }
 
     let local = PathBuf::from(source);
@@ -240,7 +241,86 @@ fn render_permissions_lines(permissions: &SkillPermissions) -> Vec<String> {
     out
 }
 
-async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
+/// Result of GitHub URL normalization.
+struct NormalizedGitHubUrl {
+    url: String,
+    /// Optional subpath within the archive to locate the skill (e.g. "skills/weather").
+    subpath: Option<String>,
+}
+
+/// Normalize GitHub URLs to downloadable formats.
+///
+/// Supports:
+/// - `github.com/user/repo` → archive tarball of default branch
+/// - `github.com/user/repo/tree/branch/path` → archive tarball + subpath hint
+/// - `github.com/user/repo/blob/branch/path/SKILL.md` → raw file URL
+/// - Non-GitHub URLs → returned as-is
+fn normalize_github_url(url: &str) -> NormalizedGitHubUrl {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return NormalizedGitHubUrl {
+            url: url.to_string(),
+            subpath: None,
+        };
+    };
+
+    let host = parsed.host_str().unwrap_or("");
+    if host != "github.com" && host != "www.github.com" {
+        return NormalizedGitHubUrl {
+            url: url.to_string(),
+            subpath: None,
+        };
+    }
+
+    let segments: Vec<&str> = parsed.path().trim_matches('/').split('/').collect();
+    if segments.len() < 2 {
+        return NormalizedGitHubUrl {
+            url: url.to_string(),
+            subpath: None,
+        };
+    }
+
+    let owner = segments[0];
+    let repo = segments[1];
+
+    // github.com/user/repo/blob/branch/path/to/SKILL.md → raw URL
+    if segments.len() >= 4 && segments[2] == "blob" {
+        let branch = segments[3];
+        let file_path = segments[4..].join("/");
+        return NormalizedGitHubUrl {
+            url: format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"),
+            subpath: None,
+        };
+    }
+
+    // github.com/user/repo/tree/branch/sub/path → archive + subpath
+    if segments.len() >= 4 && segments[2] == "tree" {
+        let branch = segments[3];
+        let subpath = if segments.len() > 4 {
+            Some(segments[4..].join("/"))
+        } else {
+            None
+        };
+        return NormalizedGitHubUrl {
+            url: format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.tar.gz"),
+            subpath,
+        };
+    }
+
+    // github.com/user/repo → archive of default branch
+    if segments.len() == 2 {
+        return NormalizedGitHubUrl {
+            url: format!("https://github.com/{owner}/{repo}/archive/refs/heads/main.tar.gz"),
+            subpath: None,
+        };
+    }
+
+    NormalizedGitHubUrl {
+        url: url.to_string(),
+        subpath: None,
+    }
+}
+
+async fn download_remote_skill(url: &str, subpath: Option<&str>) -> Result<ResolvedSkillSource> {
     const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
 
     let parsed =
@@ -311,7 +391,13 @@ Example: https://github.com/user/repo/archive/refs/heads/main.tar.gz"
         std::fs::write(extract_root.join("SKILL.md"), &body)?;
     }
 
-    let skill_root = find_skill_root(&extract_root)?;
+    // If a subpath hint was provided (e.g. from github.com/user/repo/tree/branch/skills/weather),
+    // locate the skill within that subpath instead of searching the entire archive.
+    let skill_root = if let Some(sub) = subpath {
+        find_skill_in_subpath(&extract_root, sub)?
+    } else {
+        find_skill_root(&extract_root)?
+    };
 
     Ok(ResolvedSkillSource::Remote {
         _temp_dir: temp,
@@ -341,6 +427,32 @@ fn find_skill_root(root: &Path) -> Result<PathBuf> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid SKILL.md path in archive"))?;
     Ok(parent.to_path_buf())
+}
+
+/// Find skill root within a specific subpath of an extracted archive.
+/// GitHub archives have a top-level `repo-branch/` directory, so we search for the subpath
+/// within any top-level directory.
+fn find_skill_in_subpath(extract_root: &Path, subpath: &str) -> Result<PathBuf> {
+    // Direct match: extract_root/subpath/SKILL.md
+    let direct = extract_root.join(subpath);
+    if direct.join("SKILL.md").exists() {
+        return Ok(direct);
+    }
+
+    // GitHub archive pattern: extract_root/<repo-branch>/subpath/SKILL.md
+    if let Ok(entries) = std::fs::read_dir(extract_root) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let candidate = entry.path().join(subpath);
+                if candidate.join("SKILL.md").exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    // Subpath not found; fall back to general search
+    find_skill_root(extract_root)
 }
 
 fn find_skill_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -723,5 +835,51 @@ mod tests {
         let audit = config_root.join("logs").join("skill-installs.jsonl");
         let content = std::fs::read_to_string(audit).unwrap();
         assert!(content.contains("\"skill\":\"safe\""));
+    }
+
+    #[test]
+    fn normalize_github_repo_url() {
+        let r = normalize_github_url("https://github.com/user/repo");
+        assert_eq!(
+            r.url,
+            "https://github.com/user/repo/archive/refs/heads/main.tar.gz"
+        );
+        assert!(r.subpath.is_none());
+    }
+
+    #[test]
+    fn normalize_github_tree_url_with_subpath() {
+        let r = normalize_github_url(
+            "https://github.com/sundial-org/awesome-openclaw-skills/tree/main/skills/weather",
+        );
+        assert_eq!(
+            r.url,
+            "https://github.com/sundial-org/awesome-openclaw-skills/archive/refs/heads/main.tar.gz"
+        );
+        assert_eq!(r.subpath.as_deref(), Some("skills/weather"));
+    }
+
+    #[test]
+    fn normalize_github_tree_url_no_subpath() {
+        let r = normalize_github_url("https://github.com/user/repo/tree/develop");
+        assert_eq!(
+            r.url,
+            "https://github.com/user/repo/archive/refs/heads/develop.tar.gz"
+        );
+        assert!(r.subpath.is_none());
+    }
+
+    #[test]
+    fn normalize_github_blob_url() {
+        let r = normalize_github_url("https://github.com/sundial-org/awesome-openclaw-skills/blob/main/skills/weather/SKILL.md");
+        assert_eq!(r.url, "https://raw.githubusercontent.com/sundial-org/awesome-openclaw-skills/main/skills/weather/SKILL.md");
+        assert!(r.subpath.is_none());
+    }
+
+    #[test]
+    fn normalize_non_github_url_unchanged() {
+        let r = normalize_github_url("https://example.com/skill.tar.gz");
+        assert_eq!(r.url, "https://example.com/skill.tar.gz");
+        assert!(r.subpath.is_none());
     }
 }
