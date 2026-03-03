@@ -279,6 +279,26 @@ impl Orchestrator {
         Some(merged)
     }
 
+    fn compute_merged_permissions(
+        active_skills: &SkillRegistry,
+        forced_skills: Option<&[String]>,
+    ) -> Option<corral_core::Permissions> {
+        if let Some(forced_names) = forced_skills {
+            let selected_perms = forced_names
+                .iter()
+                .filter_map(|forced| {
+                    active_skills
+                        .get(forced)
+                        .and_then(|skill| skill.permissions.as_ref())
+                        .map(|p| p.to_corral_permissions())
+                })
+                .collect::<Vec<_>>();
+            Self::merge_permissions(selected_perms)
+        } else {
+            active_skills.merged_permissions()
+        }
+    }
+
     fn forced_allowed_tools(
         forced_skills: Option<&[String]>,
         agent_allowed: Option<Vec<String>>,
@@ -565,7 +585,7 @@ impl Orchestrator {
 
             Self::merge_permissions(selected_perms)
         } else {
-            None
+            Self::compute_merged_permissions(&active_skills, None)
         };
 
         let memory_context = self
@@ -789,7 +809,7 @@ impl Orchestrator {
 
             Self::merge_permissions(selected_perms)
         } else {
-            None
+            Self::compute_merged_permissions(&active_skills, None)
         };
 
         let memory_context = self
@@ -1507,4 +1527,51 @@ fn format_group_context_md(
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_permissions_in_normal_mode_use_all_active_skills() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill_a = dir.path().join("skill-a");
+        std::fs::create_dir_all(&skill_a).unwrap();
+        std::fs::write(
+            skill_a.join("SKILL.md"),
+            r#"---
+name: skill-a
+description: A
+permissions:
+  network:
+    allow: ["api.a.com:443"]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let skill_b = dir.path().join("skill-b");
+        std::fs::create_dir_all(&skill_b).unwrap();
+        std::fs::write(
+            skill_b.join("SKILL.md"),
+            r#"---
+name: skill-b
+description: B
+permissions:
+  network:
+    allow: ["api.b.com:443"]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let active_skills = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let merged = Orchestrator::compute_merged_permissions(&active_skills, None);
+
+        let perms = merged.expect("expected merged permissions in normal mode");
+        assert!(perms.network.allow.contains(&"api.a.com:443".to_string()));
+        assert!(perms.network.allow.contains(&"api.b.com:443".to_string()));
+    }
 }
