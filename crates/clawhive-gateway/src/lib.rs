@@ -281,112 +281,9 @@ pub fn spawn_scheduled_task_listener(
                 continue;
             };
 
-            let task = match &payload {
-                ScheduledTaskPayload::SystemEvent { text }
-                | ScheduledTaskPayload::DirectDeliver { text } => text.clone(),
-                ScheduledTaskPayload::AgentTurn { message, .. } => message.clone(),
-            };
-
-            // For simple reminders (Announce mode with source info), deliver task text directly
-            // without running through the agent. This gives users the reminder content they set.
-            let has_announce_source = delivery.source_channel_type.is_some()
-                && delivery.source_connector_id.is_some()
-                && delivery.source_conversation_scope.is_some();
-            let should_direct_deliver =
-                matches!(&payload, ScheduledTaskPayload::DirectDeliver { .. })
-                    || (matches!(&delivery.mode, ScheduledDeliveryMode::Announce)
-                        && has_announce_source);
-
-            if should_direct_deliver {
-                // Direct delivery: just send the task text as-is
-                let (ch_type, conn_id, conv_scope) =
-                    if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
-                        delivery.source_channel_type.clone(),
-                        delivery.source_connector_id.clone(),
-                        delivery.source_conversation_scope.clone(),
-                    ) {
-                        (ch_type, conn_id, conv_scope)
-                    } else if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
-                        delivery.channel.clone(),
-                        delivery.connector_id.clone(),
-                        delivery.source_conversation_scope.clone(),
-                    ) {
-                        (ch_type, conn_id, conv_scope)
-                    } else {
-                        (
-                            "scheduler".to_string(),
-                            schedule_id.clone(),
-                            format!("schedule:{}", schedule_id),
-                        )
-                    };
-
-                let _ = bus
-                    .publish(BusMessage::DeliverAnnounce {
-                        channel_type: ch_type,
-                        connector_id: conn_id,
-                        conversation_scope: conv_scope,
-                        text: format!("⏰ {}", task),
-                    })
-                    .await;
-
-                let _ = bus
-                    .publish(BusMessage::ScheduledTaskCompleted {
-                        schedule_id,
-                        status: ScheduledRunStatus::Ok,
-                        error: None,
-                        started_at: triggered_at,
-                        ended_at: chrono::Utc::now(),
-                        response: Some(task),
-                    })
-                    .await;
-                continue;
-            }
-
-            // For other cases, run through the agent
-            let conversation_scope = match &payload {
-                ScheduledTaskPayload::AgentTurn { .. } => {
-                    format!("schedule:{}:{}", schedule_id, Uuid::new_v4())
-                }
-                ScheduledTaskPayload::SystemEvent { .. }
-                | ScheduledTaskPayload::DirectDeliver { .. } => format!("schedule:{}", schedule_id),
-            };
-
-            let inbound = InboundMessage {
-                trace_id: Uuid::new_v4(),
-                channel_type: "scheduler".into(),
-                connector_id: schedule_id.clone(),
-                conversation_scope,
-                user_scope: "user:scheduler".into(),
-                text: task,
-                at: triggered_at,
-                thread_id: None,
-                is_mention: false,
-                mention_target: None,
-                message_id: None,
-                attachments: vec![],
-                group_context: None,
-            };
-
-            match gateway.handle_inbound(inbound).await {
-                Ok(outbound) => {
-                    // If delivery mode is Announce and we have source info, publish DeliverAnnounce
-                    if matches!(&delivery.mode, ScheduledDeliveryMode::Announce) {
-                        if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
-                            delivery.source_channel_type.clone(),
-                            delivery.source_connector_id.clone(),
-                            delivery.source_conversation_scope.clone(),
-                        ) {
-                            let _ = bus
-                                .publish(BusMessage::DeliverAnnounce {
-                                    channel_type: ch_type,
-                                    connector_id: conn_id,
-                                    conversation_scope: conv_scope,
-                                    text: outbound.text.clone(),
-                                })
-                                .await;
-                        }
-                    }
-
+            match payload {
+                ScheduledTaskPayload::DirectDeliver { text } => {
+                    deliver_if_needed(&bus, &delivery, &format!("⏰ {}", text)).await;
                     let _ = bus
                         .publish(BusMessage::ScheduledTaskCompleted {
                             schedule_id,
@@ -394,25 +291,188 @@ pub fn spawn_scheduled_task_listener(
                             error: None,
                             started_at: triggered_at,
                             ended_at: chrono::Utc::now(),
-                            response: Some(outbound.text),
+                            response: Some(text),
                         })
                         .await;
                 }
-                Err(e) => {
-                    let _ = bus
-                        .publish(BusMessage::ScheduledTaskCompleted {
-                            schedule_id,
-                            status: ScheduledRunStatus::Error,
-                            error: Some(e.to_string()),
-                            started_at: triggered_at,
-                            ended_at: chrono::Utc::now(),
-                            response: None,
-                        })
-                        .await;
+                ScheduledTaskPayload::SystemEvent { text } => {
+                    let (ch_type, conn_id, conv_scope) = match (
+                        &delivery.source_channel_type,
+                        &delivery.source_connector_id,
+                        &delivery.source_conversation_scope,
+                    ) {
+                        (Some(ct), Some(ci), Some(cs)) => (ct.clone(), ci.clone(), cs.clone()),
+                        _ => {
+                            tracing::warn!(
+                                schedule_id = %schedule_id,
+                                "SystemEvent missing source scope, falling back to DirectDeliver"
+                            );
+                            deliver_if_needed(&bus, &delivery, &format!("⏰ {}", text)).await;
+                            let _ = bus
+                                .publish(BusMessage::ScheduledTaskCompleted {
+                                    schedule_id,
+                                    status: ScheduledRunStatus::Ok,
+                                    error: None,
+                                    started_at: triggered_at,
+                                    ended_at: chrono::Utc::now(),
+                                    response: Some(text),
+                                })
+                                .await;
+                            continue;
+                        }
+                    };
+
+                    let user_scope = delivery
+                        .source_user_scope
+                        .clone()
+                        .unwrap_or_else(|| "user:scheduler".into());
+
+                    let inbound = InboundMessage {
+                        trace_id: Uuid::new_v4(),
+                        channel_type: ch_type,
+                        connector_id: conn_id,
+                        conversation_scope: conv_scope,
+                        user_scope,
+                        text: format!("[Scheduled Reminder]\n{}", text),
+                        at: triggered_at,
+                        thread_id: None,
+                        is_mention: false,
+                        mention_target: None,
+                        message_id: None,
+                        attachments: vec![],
+                        group_context: None,
+                    };
+
+                    match gateway.handle_inbound(inbound).await {
+                        Ok(_outbound) => {
+                            let _ = bus
+                                .publish(BusMessage::ScheduledTaskCompleted {
+                                    schedule_id,
+                                    status: ScheduledRunStatus::Ok,
+                                    error: None,
+                                    started_at: triggered_at,
+                                    ended_at: chrono::Utc::now(),
+                                    response: None,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = bus
+                                .publish(BusMessage::ScheduledTaskCompleted {
+                                    schedule_id,
+                                    status: ScheduledRunStatus::Error,
+                                    error: Some(e.to_string()),
+                                    started_at: triggered_at,
+                                    ended_at: chrono::Utc::now(),
+                                    response: None,
+                                })
+                                .await;
+                        }
+                    }
+                }
+                ScheduledTaskPayload::AgentTurn {
+                    message,
+                    model: _,
+                    thinking: _,
+                    timeout_seconds,
+                    light_context: _,
+                } => {
+                    let conversation_scope = format!("schedule:{}:{}", schedule_id, Uuid::new_v4());
+
+                    let inbound = InboundMessage {
+                        trace_id: Uuid::new_v4(),
+                        channel_type: "scheduler".into(),
+                        connector_id: schedule_id.clone(),
+                        conversation_scope,
+                        user_scope: "user:scheduler".into(),
+                        text: message,
+                        at: triggered_at,
+                        thread_id: None,
+                        is_mention: false,
+                        mention_target: None,
+                        message_id: None,
+                        attachments: vec![],
+                        group_context: None,
+                    };
+
+                    let effective_timeout = timeout_seconds.clamp(30, 3600);
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(effective_timeout),
+                        gateway.handle_inbound(inbound),
+                    )
+                    .await;
+
+                    match result {
+                        Ok(Ok(outbound)) => {
+                            deliver_if_needed(&bus, &delivery, &outbound.text).await;
+                            let _ = bus
+                                .publish(BusMessage::ScheduledTaskCompleted {
+                                    schedule_id,
+                                    status: ScheduledRunStatus::Ok,
+                                    error: None,
+                                    started_at: triggered_at,
+                                    ended_at: chrono::Utc::now(),
+                                    response: Some(outbound.text),
+                                })
+                                .await;
+                        }
+                        Ok(Err(e)) => {
+                            let _ = bus
+                                .publish(BusMessage::ScheduledTaskCompleted {
+                                    schedule_id,
+                                    status: ScheduledRunStatus::Error,
+                                    error: Some(e.to_string()),
+                                    started_at: triggered_at,
+                                    ended_at: chrono::Utc::now(),
+                                    response: None,
+                                })
+                                .await;
+                        }
+                        Err(_) => {
+                            let _ = bus
+                                .publish(BusMessage::ScheduledTaskCompleted {
+                                    schedule_id,
+                                    status: ScheduledRunStatus::Error,
+                                    error: Some(format!(
+                                        "execution timed out after {}s",
+                                        effective_timeout
+                                    )),
+                                    started_at: triggered_at,
+                                    ended_at: chrono::Utc::now(),
+                                    response: None,
+                                })
+                                .await;
+                        }
+                    }
                 }
             }
         }
     })
+}
+
+async fn deliver_if_needed(bus: &Arc<EventBus>, delivery: &ScheduledDeliveryInfo, text: &str) {
+    match delivery.mode {
+        ScheduledDeliveryMode::None => {}
+        ScheduledDeliveryMode::Announce => {
+            if let (Some(ch), Some(conn), Some(scope)) = (
+                &delivery.source_channel_type,
+                &delivery.source_connector_id,
+                &delivery.source_conversation_scope,
+            ) {
+                let _ = bus
+                    .publish(BusMessage::DeliverAnnounce {
+                        channel_type: ch.clone(),
+                        connector_id: conn.clone(),
+                        conversation_scope: scope.clone(),
+                        text: text.to_string(),
+                    })
+                    .await;
+            }
+        }
+        ScheduledDeliveryMode::Webhook => {
+            tracing::warn!("Webhook delivery not yet implemented");
+        }
+    }
 }
 
 pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::JoinHandle<()> {
