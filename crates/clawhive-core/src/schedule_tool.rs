@@ -601,6 +601,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn add_action_captures_source_user_scope() {
+        let (manager, _bus, _tmp) = setup();
+        let tool = ScheduleTool::new(manager.clone());
+        let ctx = ToolContext::builtin()
+            .with_source(
+                "discord".into(),
+                "dc_main".into(),
+                "guild:1:channel:2".into(),
+            )
+            .with_source_user_scope("user:789".into());
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "add",
+                    "job": {
+                        "name": "User scope test",
+                        "schedule": { "kind": "at", "at": "5m" },
+                        "task": "test task"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let entries = manager.list().await;
+        assert_eq!(
+            entries[0].config.delivery.source_user_scope.as_deref(),
+            Some("user:789")
+        );
+    }
+
     #[test]
     fn try_parse_relative_ms_works() {
         use super::try_parse_relative_ms;
