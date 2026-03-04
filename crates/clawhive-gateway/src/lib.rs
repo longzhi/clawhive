@@ -273,32 +273,52 @@ pub fn spawn_scheduled_task_listener(
             let BusMessage::ScheduledTaskTriggered {
                 schedule_id,
                 agent_id: _,
-                task,
-                session_mode,
-                delivery_mode,
-                delivery_channel: _,
-                delivery_connector_id: _,
-                source_channel_type,
-                source_connector_id,
-                source_conversation_scope,
+                payload,
+                delivery,
                 triggered_at,
             } = msg
             else {
                 continue;
             };
 
+            let task = match &payload {
+                ScheduledTaskPayload::SystemEvent { text }
+                | ScheduledTaskPayload::DirectDeliver { text } => text.clone(),
+                ScheduledTaskPayload::AgentTurn { message, .. } => message.clone(),
+            };
+
             // For simple reminders (Announce mode with source info), deliver task text directly
             // without running through the agent. This gives users the reminder content they set.
-            let should_direct_deliver = matches!(delivery_mode, ScheduledDeliveryMode::Announce)
-                && source_channel_type.is_some()
-                && source_connector_id.is_some()
-                && source_conversation_scope.is_some();
+            let has_announce_source = delivery.source_channel_type.is_some()
+                && delivery.source_connector_id.is_some()
+                && delivery.source_conversation_scope.is_some();
+            let should_direct_deliver =
+                matches!(&payload, ScheduledTaskPayload::DirectDeliver { .. })
+                    || (matches!(&delivery.mode, ScheduledDeliveryMode::Announce)
+                        && has_announce_source);
 
             if should_direct_deliver {
                 // Direct delivery: just send the task text as-is
-                let ch_type = source_channel_type.clone().unwrap();
-                let conn_id = source_connector_id.clone().unwrap();
-                let conv_scope = source_conversation_scope.clone().unwrap();
+                let (ch_type, conn_id, conv_scope) =
+                    if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
+                        delivery.source_channel_type.clone(),
+                        delivery.source_connector_id.clone(),
+                        delivery.source_conversation_scope.clone(),
+                    ) {
+                        (ch_type, conn_id, conv_scope)
+                    } else if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
+                        delivery.channel.clone(),
+                        delivery.connector_id.clone(),
+                        delivery.source_conversation_scope.clone(),
+                    ) {
+                        (ch_type, conn_id, conv_scope)
+                    } else {
+                        (
+                            "scheduler".to_string(),
+                            schedule_id.clone(),
+                            format!("schedule:{}", schedule_id),
+                        )
+                    };
 
                 let _ = bus
                     .publish(BusMessage::DeliverAnnounce {
@@ -323,11 +343,12 @@ pub fn spawn_scheduled_task_listener(
             }
 
             // For other cases, run through the agent
-            let conversation_scope = match session_mode {
-                ScheduledSessionMode::Isolated => {
+            let conversation_scope = match &payload {
+                ScheduledTaskPayload::AgentTurn { .. } => {
                     format!("schedule:{}:{}", schedule_id, Uuid::new_v4())
                 }
-                ScheduledSessionMode::Main => format!("schedule:{}", schedule_id),
+                ScheduledTaskPayload::SystemEvent { .. }
+                | ScheduledTaskPayload::DirectDeliver { .. } => format!("schedule:{}", schedule_id),
             };
 
             let inbound = InboundMessage {
@@ -349,11 +370,11 @@ pub fn spawn_scheduled_task_listener(
             match gateway.handle_inbound(inbound).await {
                 Ok(outbound) => {
                     // If delivery mode is Announce and we have source info, publish DeliverAnnounce
-                    if matches!(delivery_mode, ScheduledDeliveryMode::Announce) {
+                    if matches!(&delivery.mode, ScheduledDeliveryMode::Announce) {
                         if let (Some(ch_type), Some(conn_id), Some(conv_scope)) = (
-                            source_channel_type.clone(),
-                            source_connector_id.clone(),
-                            source_conversation_scope.clone(),
+                            delivery.source_channel_type.clone(),
+                            delivery.source_connector_id.clone(),
+                            delivery.source_conversation_scope.clone(),
                         ) {
                             let _ = bus
                                 .publish(BusMessage::DeliverAnnounce {

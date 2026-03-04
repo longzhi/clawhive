@@ -7,14 +7,15 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use clawhive_bus::EventBus;
 use clawhive_schema::{
-    BusMessage, ScheduledDeliveryMode, ScheduledRunStatus, ScheduledSessionMode,
+    BusMessage, ScheduledDeliveryInfo, ScheduledDeliveryMode, ScheduledRunStatus,
+    ScheduledTaskPayload,
 };
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 use crate::{
     compute_next_run_at_ms, error_backoff_ms, DeliveryMode, HistoryStore, RunRecord, RunStatus,
-    ScheduleConfig, ScheduleState, ScheduleType, SessionMode, StateStore,
+    ScheduleConfig, ScheduleState, ScheduleType, StateStore,
 };
 
 const MAX_SLEEP_MS: u64 = 60_000;
@@ -255,20 +256,26 @@ impl ScheduleManager {
         let msg = BusMessage::ScheduledTaskTriggered {
             schedule_id: entry.config.schedule_id.clone(),
             agent_id: entry.config.agent_id.clone(),
-            task: entry.config.task.clone(),
-            session_mode: match entry.config.session_mode {
-                SessionMode::Isolated => ScheduledSessionMode::Isolated,
-                SessionMode::Main => ScheduledSessionMode::Main,
+            payload: ScheduledTaskPayload::AgentTurn {
+                message: entry.config.task.clone(),
+                model: None,
+                thinking: None,
+                timeout_seconds: entry.config.timeout_seconds,
+                light_context: false,
             },
-            delivery_mode: match entry.config.delivery.mode {
-                DeliveryMode::None => ScheduledDeliveryMode::None,
-                DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
+            delivery: ScheduledDeliveryInfo {
+                mode: match entry.config.delivery.mode {
+                    DeliveryMode::None => ScheduledDeliveryMode::None,
+                    DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
+                },
+                channel: entry.config.delivery.channel.clone(),
+                connector_id: entry.config.delivery.connector_id.clone(),
+                source_channel_type: entry.config.delivery.source_channel_type.clone(),
+                source_connector_id: entry.config.delivery.source_connector_id.clone(),
+                source_conversation_scope: entry.config.delivery.source_conversation_scope.clone(),
+                source_user_scope: entry.config.delivery.source_user_scope.clone(),
+                webhook_url: None,
             },
-            delivery_channel: entry.config.delivery.channel.clone(),
-            delivery_connector_id: entry.config.delivery.connector_id.clone(),
-            source_channel_type: entry.config.delivery.source_channel_type.clone(),
-            source_connector_id: entry.config.delivery.source_connector_id.clone(),
-            source_conversation_scope: entry.config.delivery.source_conversation_scope.clone(),
             triggered_at: Utc::now(),
         };
         self.bus.publish(msg).await?;
@@ -343,24 +350,30 @@ impl ScheduleManager {
                     .publish(BusMessage::ScheduledTaskTriggered {
                         schedule_id: entry.config.schedule_id.clone(),
                         agent_id: entry.config.agent_id.clone(),
-                        task: entry.config.task.clone(),
-                        session_mode: match entry.config.session_mode {
-                            SessionMode::Isolated => ScheduledSessionMode::Isolated,
-                            SessionMode::Main => ScheduledSessionMode::Main,
+                        payload: ScheduledTaskPayload::AgentTurn {
+                            message: entry.config.task.clone(),
+                            model: None,
+                            thinking: None,
+                            timeout_seconds: entry.config.timeout_seconds,
+                            light_context: false,
                         },
-                        delivery_mode: match entry.config.delivery.mode {
-                            DeliveryMode::None => ScheduledDeliveryMode::None,
-                            DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
+                        delivery: ScheduledDeliveryInfo {
+                            mode: match entry.config.delivery.mode {
+                                DeliveryMode::None => ScheduledDeliveryMode::None,
+                                DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
+                            },
+                            channel: entry.config.delivery.channel.clone(),
+                            connector_id: entry.config.delivery.connector_id.clone(),
+                            source_channel_type: entry.config.delivery.source_channel_type.clone(),
+                            source_connector_id: entry.config.delivery.source_connector_id.clone(),
+                            source_conversation_scope: entry
+                                .config
+                                .delivery
+                                .source_conversation_scope
+                                .clone(),
+                            source_user_scope: entry.config.delivery.source_user_scope.clone(),
+                            webhook_url: None,
                         },
-                        delivery_channel: entry.config.delivery.channel.clone(),
-                        delivery_connector_id: entry.config.delivery.connector_id.clone(),
-                        source_channel_type: entry.config.delivery.source_channel_type.clone(),
-                        source_connector_id: entry.config.delivery.source_connector_id.clone(),
-                        source_conversation_scope: entry
-                            .config
-                            .delivery
-                            .source_conversation_scope
-                            .clone(),
                         triggered_at: Utc::now(),
                     })
                     .await;

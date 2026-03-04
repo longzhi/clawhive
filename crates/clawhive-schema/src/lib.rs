@@ -128,11 +128,20 @@ pub enum ActionKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ScheduledSessionMode {
-    #[serde(rename = "isolated")]
-    Isolated,
-    #[serde(rename = "main")]
-    Main,
+#[serde(tag = "kind")]
+pub enum ScheduledTaskPayload {
+    #[serde(rename = "system_event")]
+    SystemEvent { text: String },
+    #[serde(rename = "agent_turn")]
+    AgentTurn {
+        message: String,
+        model: Option<String>,
+        thinking: Option<String>,
+        timeout_seconds: u64,
+        light_context: bool,
+    },
+    #[serde(rename = "direct_deliver")]
+    DirectDeliver { text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +150,20 @@ pub enum ScheduledDeliveryMode {
     None,
     #[serde(rename = "announce")]
     Announce,
+    #[serde(rename = "webhook")]
+    Webhook,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledDeliveryInfo {
+    pub mode: ScheduledDeliveryMode,
+    pub channel: Option<String>,
+    pub connector_id: Option<String>,
+    pub source_channel_type: Option<String>,
+    pub source_connector_id: Option<String>,
+    pub source_conversation_scope: Option<String>,
+    pub source_user_scope: Option<String>,
+    pub webhook_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,17 +250,8 @@ pub enum BusMessage {
     ScheduledTaskTriggered {
         schedule_id: String,
         agent_id: String,
-        task: String,
-        session_mode: ScheduledSessionMode,
-        delivery_mode: ScheduledDeliveryMode,
-        delivery_channel: Option<String>,
-        delivery_connector_id: Option<String>,
-        /// Source channel type for announce delivery (e.g., "discord", "telegram")
-        source_channel_type: Option<String>,
-        /// Source connector id for announce delivery (e.g., "dc_main", "tg_main")
-        source_connector_id: Option<String>,
-        /// Source conversation scope for announce delivery (e.g., "guild:123:channel:456")
-        source_conversation_scope: Option<String>,
+        payload: ScheduledTaskPayload,
+        delivery: ScheduledDeliveryInfo,
         triggered_at: DateTime<Utc>,
     },
     ScheduledTaskCompleted {
@@ -590,5 +604,21 @@ mod tests {
         };
         let key = SessionKey::from_inbound(&inbound);
         assert_eq!(key.0, "telegram:tg:special/id:group:chat:-100123:user:0");
+    }
+
+    #[test]
+    fn scheduled_task_payload_serde_roundtrip() {
+        let payload = ScheduledTaskPayload::AgentTurn {
+            message: "do task".into(),
+            model: None,
+            thinking: None,
+            timeout_seconds: 300,
+            light_context: false,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: ScheduledTaskPayload = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, ScheduledTaskPayload::AgentTurn { message, .. } if message == "do task")
+        );
     }
 }
