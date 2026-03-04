@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -409,11 +410,66 @@ impl ServiceHandler for RemindersHandler {
 fn collect_env_vars(env_inherit: &[String]) -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
     for key in env_inherit {
+        if key == "PATH" {
+            let inherited = std::env::var("PATH").unwrap_or_default();
+            let merged = augment_path_like_host(&inherited, &default_path_candidates());
+            env_vars.insert(key.clone(), merged);
+            continue;
+        }
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.clone(), val);
         }
     }
     env_vars
+}
+
+fn default_path_candidates() -> Vec<String> {
+    let mut candidates = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/usr/local/sbin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+    ];
+
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.extend([
+            format!("{home}/.clawhive/bin"),
+            format!("{home}/.cargo/bin"),
+            format!("{home}/.bun/bin"),
+            format!("{home}/.local/bin"),
+            format!("{home}/bin"),
+        ]);
+    }
+
+    candidates
+}
+
+fn augment_path_like_host(current_path: &str, candidates: &[String]) -> String {
+    let mut entries: Vec<PathBuf> = std::env::split_paths(current_path).collect();
+    let mut seen: HashSet<OsString> = entries
+        .iter()
+        .map(|p| p.as_os_str().to_os_string())
+        .collect();
+
+    for candidate in candidates {
+        if candidate.trim().is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(candidate);
+        let key = path.as_os_str().to_os_string();
+        if seen.insert(key) {
+            entries.push(path);
+        }
+    }
+
+    match std::env::join_paths(entries) {
+        Ok(os) => os.to_string_lossy().into_owned(),
+        Err(_) => current_path.to_string(),
+    }
 }
 
 fn base_permissions(
@@ -1153,6 +1209,28 @@ mod tests {
 
         assert_eq!(env.get(key), Some(&"ok".to_string()));
         assert!(!env.contains_key("PATH"));
+    }
+
+    #[test]
+    fn augment_path_like_host_preserves_existing_order_and_dedups() {
+        let merged = augment_path_like_host(
+            "/usr/bin:/bin:/opt/homebrew/bin",
+            &["/opt/homebrew/bin".into(), "/usr/local/bin".into()],
+        );
+        assert_eq!(
+            merged,
+            "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin".to_string()
+        );
+    }
+
+    #[test]
+    fn augment_path_like_host_adds_missing_candidates() {
+        let merged = augment_path_like_host(
+            "/usr/bin:/bin",
+            &["/opt/homebrew/bin".into(), "/usr/local/bin".into()],
+        );
+        assert!(merged.contains("/opt/homebrew/bin"));
+        assert!(merged.contains("/usr/local/bin"));
     }
 
     #[test]
