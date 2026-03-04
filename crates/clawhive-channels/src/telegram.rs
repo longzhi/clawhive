@@ -259,6 +259,7 @@ impl TelegramBot {
                 let adapter = adapter_for_callback.clone();
                 let connector_id = connector_id_for_callback.clone();
 
+                tracing::info!(callback_data = ?q.data, from = q.from.id.0, "telegram callback_query received");
                 async move {
                     let Some(data) = q.data else {
                         return Ok::<(), teloxide::RequestError>(());
