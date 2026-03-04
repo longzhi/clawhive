@@ -57,3 +57,6 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 rust-embed = "8"
 mime_guess = "2"
+semver = "1"
+sha2 = "0.10"
+self-replace = "1"

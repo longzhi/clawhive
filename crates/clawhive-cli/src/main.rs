@@ -143,6 +143,17 @@ enum Commands {
         #[arg(long, help = "Skip confirmation prompts on reconfigure/remove")]
         force: bool,
     },
+    #[command(about = "Update clawhive to the latest version", alias = "upgrade")]
+    Update {
+        #[arg(long, help = "Check for updates without installing")]
+        check: bool,
+        #[arg(long, help = "Update channel (alpha, beta, rc, stable)")]
+        channel: Option<String>,
+        #[arg(long, help = "Install a specific version")]
+        version: Option<String>,
+        #[arg(long, short = 'y', help = "Skip confirmation prompt")]
+        yes: bool,
+    },
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
@@ -1018,6 +1029,14 @@ async fn main() -> Result<()> {
         }
         Commands::Setup { force } => {
             run_setup(&cli.config_root, force).await?;
+        }
+        Commands::Update {
+            check,
+            channel,
+            version,
+            yes,
+        } => {
+            commands::update::handle_update(check, channel, version, yes).await?;
         }
     }
 
