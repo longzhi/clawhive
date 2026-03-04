@@ -432,6 +432,16 @@ impl DiscordHandler {
         component: &ComponentInteraction,
         text: &str,
     ) {
+        // Defer first — Discord requires a response within 3 seconds,
+        // but gateway.handle_inbound may take much longer.
+        let defer = CreateInteractionResponse::Defer(
+            CreateInteractionResponseMessage::new().ephemeral(true),
+        );
+        if let Err(e) = component.create_response(&ctx.http, defer).await {
+            tracing::error!("Failed to defer Discord component interaction: {e}");
+            return;
+        }
+
         let adapter = DiscordAdapter::new(self.connector_id.clone());
         let guild_id = component.guild_id.map(|id| id.get());
         let channel_id = component.channel_id;
@@ -443,12 +453,11 @@ impl DiscordHandler {
             Err(e) => format!("❌ Error: {e}"),
         };
 
-        let response = CreateInteractionResponse::Message(
-            CreateInteractionResponseMessage::new()
-                .content(reply_text)
-                .ephemeral(true),
-        );
-        let _ = component.create_response(&ctx.http, response).await;
+        // Edit the deferred response with actual content.
+        let builder = EditInteractionResponse::new().content(&reply_text);
+        if let Err(e) = component.edit_response(&ctx.http, builder).await {
+            tracing::error!("Failed to edit Discord component response: {e}");
+        }
     }
 
     async fn handle_command_interaction(&self, ctx: &Context, cmd: CommandInteraction) {
