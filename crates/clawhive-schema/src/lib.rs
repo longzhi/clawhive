@@ -155,6 +155,13 @@ pub enum ScheduledDeliveryMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledFailureDestination {
+    pub channel: Option<String>,
+    pub connector_id: Option<String>,
+    pub conversation_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledDeliveryInfo {
     pub mode: ScheduledDeliveryMode,
     pub channel: Option<String>,
@@ -164,6 +171,23 @@ pub struct ScheduledDeliveryInfo {
     pub source_conversation_scope: Option<String>,
     pub source_user_scope: Option<String>,
     pub webhook_url: Option<String>,
+    pub failure_destination: Option<ScheduledFailureDestination>,
+    #[serde(default)]
+    pub best_effort: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ScheduledDeliveryStatus {
+    #[serde(rename = "delivered")]
+    Delivered,
+    #[serde(rename = "not_delivered")]
+    NotDelivered,
+    #[serde(rename = "not_requested")]
+    NotRequested,
+}
+
+fn default_scheduled_delivery_status() -> ScheduledDeliveryStatus {
+    ScheduledDeliveryStatus::NotRequested
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +284,10 @@ pub enum BusMessage {
         error: Option<String>,
         started_at: DateTime<Utc>,
         ended_at: DateTime<Utc>,
+        #[serde(default = "default_scheduled_delivery_status")]
+        delivery_status: ScheduledDeliveryStatus,
+        #[serde(default)]
+        delivery_error: Option<String>,
         response: Option<String>,
     },
     DeliverAnnounce {

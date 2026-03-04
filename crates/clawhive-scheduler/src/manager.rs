@@ -7,15 +7,15 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use clawhive_bus::EventBus;
 use clawhive_schema::{
-    BusMessage, ScheduledDeliveryInfo, ScheduledDeliveryMode, ScheduledRunStatus,
-    ScheduledTaskPayload,
+    BusMessage, ScheduledDeliveryInfo, ScheduledDeliveryMode, ScheduledDeliveryStatus,
+    ScheduledFailureDestination, ScheduledRunStatus, ScheduledTaskPayload,
 };
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 use crate::{
-    compute_next_run_at_ms, error_backoff_ms, DeliveryMode, HistoryStore, RunRecord, RunStatus,
-    ScheduleConfig, ScheduleState, ScheduleType, StateStore,
+    compute_next_run_at_ms, error_backoff_ms, DeliveryMode, DeliveryStatus, HistoryStore,
+    RunRecord, RunStatus, ScheduleConfig, ScheduleState, ScheduleType, StateStore,
 };
 
 const MAX_SLEEP_MS: u64 = 60_000;
@@ -40,6 +40,16 @@ pub struct CompletedResult {
     pub started_at_ms: i64,
     pub ended_at_ms: i64,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CompletionEvent {
+    status: ScheduledRunStatus,
+    error: Option<String>,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+    delivery_status: ScheduledDeliveryStatus,
+    delivery_error: Option<String>,
 }
 
 fn to_scheduled_payload(config: &ScheduleConfig) -> ScheduledTaskPayload {
@@ -73,6 +83,41 @@ fn to_scheduled_payload(config: &ScheduleConfig) -> ScheduledTaskPayload {
             timeout_seconds: config.timeout_seconds,
             light_context: false,
         }
+    }
+}
+
+fn to_scheduled_delivery(config: &ScheduleConfig) -> ScheduledDeliveryInfo {
+    ScheduledDeliveryInfo {
+        mode: match config.delivery.mode {
+            DeliveryMode::None => ScheduledDeliveryMode::None,
+            DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
+            DeliveryMode::Webhook => ScheduledDeliveryMode::Webhook,
+        },
+        channel: config.delivery.channel.clone(),
+        connector_id: config.delivery.connector_id.clone(),
+        source_channel_type: config.delivery.source_channel_type.clone(),
+        source_connector_id: config.delivery.source_connector_id.clone(),
+        source_conversation_scope: config.delivery.source_conversation_scope.clone(),
+        source_user_scope: config.delivery.source_user_scope.clone(),
+        webhook_url: config.delivery.webhook_url.clone(),
+        failure_destination: config.delivery.failure_destination.as_ref().map(|f| {
+            ScheduledFailureDestination {
+                channel: f.channel.clone(),
+                connector_id: f.connector_id.clone(),
+                conversation_scope: f.conversation_scope.clone(),
+            }
+        }),
+        best_effort: config.delivery.best_effort,
+    }
+}
+
+fn build_trigger_message(config: &ScheduleConfig) -> BusMessage {
+    BusMessage::ScheduledTaskTriggered {
+        schedule_id: config.schedule_id.clone(),
+        agent_id: config.agent_id.clone(),
+        payload: to_scheduled_payload(config),
+        delivery: to_scheduled_delivery(config),
+        triggered_at: Utc::now(),
     }
 }
 
@@ -187,8 +232,19 @@ impl ScheduleManager {
                     self.check_and_trigger().await;
                 }
                 maybe_msg = completion_rx.recv() => {
-                    if let Some(BusMessage::ScheduledTaskCompleted { schedule_id, status, error, started_at, ended_at, .. }) = maybe_msg {
-                        self.apply_completion(&schedule_id, status, error, started_at.timestamp_millis(), ended_at.timestamp_millis()).await;
+                    if let Some(BusMessage::ScheduledTaskCompleted { schedule_id, status, error, started_at, ended_at, delivery_status, delivery_error, .. }) = maybe_msg {
+                        let completion = CompletionEvent {
+                            status,
+                            error,
+                            started_at_ms: started_at.timestamp_millis(),
+                            ended_at_ms: ended_at.timestamp_millis(),
+                            delivery_status,
+                            delivery_error,
+                        };
+                        self.apply_completion(
+                            &schedule_id,
+                            completion,
+                        ).await;
                     }
                 }
             }
@@ -213,7 +269,8 @@ impl ScheduleManager {
             .and_then(|entry| entry.state.next_run_at_ms)
     }
 
-    pub async fn add_schedule(&self, config: ScheduleConfig) -> Result<()> {
+    pub async fn add_schedule(&self, mut config: ScheduleConfig) -> Result<()> {
+        config.migrate_legacy();
         let now_ms = Utc::now().timestamp_millis();
         let next = if config.enabled {
             compute_next_run_at_ms(&config.schedule, now_ms)?
@@ -250,6 +307,7 @@ impl ScheduleManager {
         let mut value = serde_json::to_value(&entry.config)?;
         merge_json_value(&mut value, patch);
         let mut updated: ScheduleConfig = serde_json::from_value(value)?;
+        updated.migrate_legacy();
         if updated.schedule_id != schedule_id {
             updated.schedule_id = schedule_id.to_string();
         }
@@ -287,28 +345,9 @@ impl ScheduleManager {
             return Err(anyhow!("schedule already running: {schedule_id}"));
         }
 
-        entry.state.running_at_ms = Some(now_ms);
-        let msg = BusMessage::ScheduledTaskTriggered {
-            schedule_id: entry.config.schedule_id.clone(),
-            agent_id: entry.config.agent_id.clone(),
-            payload: to_scheduled_payload(&entry.config),
-            delivery: ScheduledDeliveryInfo {
-                mode: match entry.config.delivery.mode {
-                    DeliveryMode::None => ScheduledDeliveryMode::None,
-                    DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
-                    DeliveryMode::Webhook => ScheduledDeliveryMode::Webhook,
-                },
-                channel: entry.config.delivery.channel.clone(),
-                connector_id: entry.config.delivery.connector_id.clone(),
-                source_channel_type: entry.config.delivery.source_channel_type.clone(),
-                source_connector_id: entry.config.delivery.source_connector_id.clone(),
-                source_conversation_scope: entry.config.delivery.source_conversation_scope.clone(),
-                source_user_scope: entry.config.delivery.source_user_scope.clone(),
-                webhook_url: entry.config.delivery.webhook_url.clone(),
-            },
-            triggered_at: Utc::now(),
-        };
+        let msg = build_trigger_message(&entry.config);
         self.bus.publish(msg).await?;
+        entry.state.running_at_ms = Some(now_ms);
         self.state_store.persist(&entries).await?;
         Ok(())
     }
@@ -373,77 +412,71 @@ impl ScheduleManager {
                 .unwrap_or(false);
 
             if due {
-                entry.state.running_at_ms = Some(now_ms);
+                let msg = build_trigger_message(&entry.config);
+                match self.bus.publish(msg).await {
+                    Ok(()) => {
+                        entry.state.running_at_ms = Some(now_ms);
+                    }
+                    Err(e) => {
+                        let error = format!("failed to publish schedule trigger: {e}");
+                        tracing::warn!(
+                            schedule_id = %entry.config.schedule_id,
+                            error = %error,
+                            "Schedule trigger publish failed"
+                        );
 
-                let _ = self
-                    .bus
-                    .publish(BusMessage::ScheduledTaskTriggered {
-                        schedule_id: entry.config.schedule_id.clone(),
-                        agent_id: entry.config.agent_id.clone(),
-                        payload: to_scheduled_payload(&entry.config),
-                        delivery: ScheduledDeliveryInfo {
-                            mode: match entry.config.delivery.mode {
-                                DeliveryMode::None => ScheduledDeliveryMode::None,
-                                DeliveryMode::Announce => ScheduledDeliveryMode::Announce,
-                                DeliveryMode::Webhook => ScheduledDeliveryMode::Webhook,
+                        let _ = apply_job_result(
+                            entry,
+                            &CompletedResult {
+                                status: RunStatus::Error,
+                                error: Some(error),
+                                started_at_ms: now_ms,
+                                ended_at_ms: now_ms,
+                                duration_ms: 0,
                             },
-                            channel: entry.config.delivery.channel.clone(),
-                            connector_id: entry.config.delivery.connector_id.clone(),
-                            source_channel_type: entry.config.delivery.source_channel_type.clone(),
-                            source_connector_id: entry.config.delivery.source_connector_id.clone(),
-                            source_conversation_scope: entry
-                                .config
-                                .delivery
-                                .source_conversation_scope
-                                .clone(),
-                            source_user_scope: entry.config.delivery.source_user_scope.clone(),
-                            webhook_url: entry.config.delivery.webhook_url.clone(),
-                        },
-                        triggered_at: Utc::now(),
-                    })
-                    .await;
+                        );
+                    }
+                }
             }
         }
 
-        let _ = self.bus.publisher();
-        let _ = &self.history_store;
         let _ = self.state_store.persist(&entries).await;
     }
 
-    async fn apply_completion(
-        &self,
-        schedule_id: &str,
-        status: ScheduledRunStatus,
-        error: Option<String>,
-        started_at_ms: i64,
-        ended_at_ms: i64,
-    ) {
+    async fn apply_completion(&self, schedule_id: &str, completion: CompletionEvent) {
         let mut entries = self.entries.write().await;
         let Some(entry) = entries.get_mut(schedule_id) else {
             return;
         };
 
-        let run_status = match status {
+        let run_status = match completion.status {
             ScheduledRunStatus::Ok => RunStatus::Ok,
             ScheduledRunStatus::Error => RunStatus::Error,
             ScheduledRunStatus::Skipped => RunStatus::Skipped,
         };
-        let duration_ms = (ended_at_ms - started_at_ms).max(0) as u64;
+        let duration_ms = (completion.ended_at_ms - completion.started_at_ms).max(0) as u64;
 
         let should_delete = apply_job_result(
             entry,
             &CompletedResult {
                 status: run_status.clone(),
-                error,
-                started_at_ms,
-                ended_at_ms,
+                error: completion.error,
+                started_at_ms: completion.started_at_ms,
+                ended_at_ms: completion.ended_at_ms,
                 duration_ms,
             },
         );
 
+        entry.state.last_delivery_status = Some(match completion.delivery_status {
+            ScheduledDeliveryStatus::Delivered => DeliveryStatus::Delivered,
+            ScheduledDeliveryStatus::NotDelivered => DeliveryStatus::NotDelivered,
+            ScheduledDeliveryStatus::NotRequested => DeliveryStatus::NotRequested,
+        });
+        entry.state.last_delivery_error = completion.delivery_error;
+
         if let (Some(started_at), Some(ended_at)) = (
-            Utc.timestamp_millis_opt(started_at_ms).single(),
-            Utc.timestamp_millis_opt(ended_at_ms).single(),
+            Utc.timestamp_millis_opt(completion.started_at_ms).single(),
+            Utc.timestamp_millis_opt(completion.ended_at_ms).single(),
         ) {
             let _ = self
                 .history_store
@@ -529,10 +562,10 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use clawhive_schema::ScheduledRunStatus;
+    use clawhive_schema::{ScheduledDeliveryStatus, ScheduledRunStatus};
     use uuid::Uuid;
 
-    use super::{ScheduleEntry, ScheduleManager};
+    use super::{CompletionEvent, ScheduleEntry, ScheduleManager};
     use crate::{
         DeliveryConfig, HistoryStore, ScheduleConfig, ScheduleState, ScheduleType, SessionMode,
         StateStore,
@@ -612,7 +645,17 @@ mod tests {
         let ended = Utc::now().timestamp_millis();
 
         manager
-            .apply_completion("one-shot", ScheduledRunStatus::Ok, None, started, ended)
+            .apply_completion(
+                "one-shot",
+                CompletionEvent {
+                    status: ScheduledRunStatus::Ok,
+                    error: None,
+                    started_at_ms: started,
+                    ended_at_ms: ended,
+                    delivery_status: ScheduledDeliveryStatus::NotRequested,
+                    delivery_error: None,
+                },
+            )
             .await;
 
         let entries = manager.list().await;
@@ -637,10 +680,14 @@ mod tests {
         manager
             .apply_completion(
                 "retry-every-second",
-                ScheduledRunStatus::Error,
-                Some("network timeout".to_string()),
-                started,
-                ended,
+                CompletionEvent {
+                    status: ScheduledRunStatus::Error,
+                    error: Some("network timeout".to_string()),
+                    started_at_ms: started,
+                    ended_at_ms: ended,
+                    delivery_status: ScheduledDeliveryStatus::NotRequested,
+                    delivery_error: None,
+                },
             )
             .await;
 
@@ -673,10 +720,14 @@ mod tests {
         manager
             .apply_completion(
                 "invalid-one-shot",
-                ScheduledRunStatus::Error,
-                Some("execution failed".to_string()),
-                started,
-                ended,
+                CompletionEvent {
+                    status: ScheduledRunStatus::Error,
+                    error: Some("execution failed".to_string()),
+                    started_at_ms: started,
+                    ended_at_ms: ended,
+                    delivery_status: ScheduledDeliveryStatus::NotRequested,
+                    delivery_error: None,
+                },
             )
             .await;
 

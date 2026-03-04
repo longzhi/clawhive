@@ -21,11 +21,11 @@ impl SqliteStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(db_path)?;
+        let mut conn = Connection::open(db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
         // Run migrations synchronously before wrapping in async mutex
-        run_migrations(&conn)?;
+        run_migrations(&mut conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -145,14 +145,31 @@ impl SqliteStore {
         )?;
 
         let rows = stmt.query_map(params![schedule_id, limit as i64], |row| {
+            let started_raw: String = row.get(1)?;
+            let ended_raw: String = row.get(2)?;
+            let started_at = chrono::DateTime::parse_from_rfc3339(&started_raw)
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?
+                .with_timezone(&chrono::Utc);
+            let ended_at = chrono::DateTime::parse_from_rfc3339(&ended_raw)
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?
+                .with_timezone(&chrono::Utc);
+
             Ok(RunRecord {
                 schedule_id: row.get(0)?,
-                started_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                ended_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
+                started_at,
+                ended_at,
                 status: parse_run_status(&row.get::<_, String>(3)?),
                 error: row.get(4)?,
                 duration_ms: row.get::<_, i64>(5)? as u64,
@@ -198,7 +215,7 @@ impl SqliteStore {
         )?;
 
         let task = stmt
-            .query_row([task_id], |row| Ok(Self::row_to_wait_task(row)))
+            .query_row([task_id], Self::row_to_wait_task)
             .optional()?;
         Ok(task)
     }
@@ -274,7 +291,7 @@ impl SqliteStore {
         stmt: &mut rusqlite::Statement,
         params: P,
     ) -> Result<Vec<WaitTask>> {
-        let rows = stmt.query_map(params, |row| Ok(Self::row_to_wait_task(row)))?;
+        let rows = stmt.query_map(params, Self::row_to_wait_task)?;
         let mut tasks = Vec::new();
         for row in rows {
             tasks.push(row?);
@@ -282,24 +299,24 @@ impl SqliteStore {
         Ok(tasks)
     }
 
-    fn row_to_wait_task(row: &rusqlite::Row) -> WaitTask {
-        WaitTask {
-            id: row.get(0).unwrap(),
-            session_key: row.get(1).unwrap(),
-            check_cmd: row.get(2).unwrap(),
-            success_condition: row.get(3).unwrap(),
-            failure_condition: row.get(4).unwrap(),
-            poll_interval_ms: row.get::<_, i64>(5).unwrap() as u64,
-            timeout_at_ms: row.get(6).unwrap(),
-            created_at_ms: row.get(7).unwrap(),
-            last_check_at_ms: row.get(8).unwrap(),
-            status: parse_wait_task_status(&row.get::<_, String>(9).unwrap()),
-            on_success_message: row.get(10).unwrap(),
-            on_failure_message: row.get(11).unwrap(),
-            on_timeout_message: row.get(12).unwrap(),
-            last_output: row.get(13).unwrap(),
-            error: row.get(14).unwrap(),
-        }
+    fn row_to_wait_task(row: &rusqlite::Row) -> rusqlite::Result<WaitTask> {
+        Ok(WaitTask {
+            id: row.get(0)?,
+            session_key: row.get(1)?,
+            check_cmd: row.get(2)?,
+            success_condition: row.get(3)?,
+            failure_condition: row.get(4)?,
+            poll_interval_ms: row.get::<_, i64>(5)? as u64,
+            timeout_at_ms: row.get(6)?,
+            created_at_ms: row.get(7)?,
+            last_check_at_ms: row.get(8)?,
+            status: parse_wait_task_status(&row.get::<_, String>(9)?),
+            on_success_message: row.get(10)?,
+            on_failure_message: row.get(11)?,
+            on_timeout_message: row.get(12)?,
+            last_output: row.get(13)?,
+            error: row.get(14)?,
+        })
     }
 }
 
@@ -307,7 +324,7 @@ impl SqliteStore {
 // Migrations
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+fn run_migrations(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
         r#"CREATE TABLE IF NOT EXISTS __scheduler_schema_version (
             version INTEGER PRIMARY KEY,
@@ -387,11 +404,14 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         if applied.contains(&version) {
             continue;
         }
-        conn.execute_batch(sql)?;
-        conn.execute(
+
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.execute(
             "INSERT INTO __scheduler_schema_version(version) VALUES (?1)",
             [version],
         )?;
+        tx.commit()?;
     }
 
     Ok(())
