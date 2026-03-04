@@ -26,6 +26,8 @@ pub struct ToolAuditEntry {
     pub session_id: Option<String>,
     /// Agent that invoked the tool
     pub agent_id: Option<String>,
+    /// Caller module path (for tracing origin)
+    pub caller_module: Option<String>,
 }
 
 /// Tool execution result for audit purposes.
@@ -69,6 +71,7 @@ impl ToolAuditEntry {
             duration_ms,
             session_id: None,
             agent_id: None,
+            caller_module: None,
         }
     }
 
@@ -90,6 +93,7 @@ impl ToolAuditEntry {
             duration_ms: 0,
             session_id: None,
             agent_id: None,
+            caller_module: None,
         }
     }
 
@@ -112,6 +116,7 @@ impl ToolAuditEntry {
             duration_ms,
             session_id: None,
             agent_id: None,
+            caller_module: None,
         }
     }
 
@@ -124,6 +129,12 @@ impl ToolAuditEntry {
     /// Set the agent ID for this audit entry.
     pub fn with_agent(mut self, agent_id: impl Into<String>) -> Self {
         self.agent_id = Some(agent_id.into());
+        self
+    }
+
+    /// Set the caller module for this audit entry.
+    pub fn with_module(mut self, module: &str) -> Self {
+        self.caller_module = Some(module.to_string());
         self
     }
 
@@ -143,6 +154,7 @@ impl ToolAuditEntry {
             duration_ms = self.duration_ms,
             session_id = ?self.session_id,
             agent_id = ?self.agent_id,
+            caller_module = ?self.caller_module,
             input = %self.input_summary,
             "tool_execution"
         );

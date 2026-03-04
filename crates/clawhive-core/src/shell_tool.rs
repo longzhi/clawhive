@@ -517,6 +517,13 @@ fn make_sandbox(
     extra_dirs: &[(PathBuf, AccessLevel)],
     sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
+    tracing::debug!(
+        workspace = %workspace.display(),
+        extra_dirs_count = extra_dirs.len(),
+        network_mode = ?sandbox_cfg.network,
+        exec_allow_count = sandbox_cfg.exec_allow.len(),
+        "building sandbox with permissions"
+    );
     let network_allowed = match sandbox_cfg.network {
         SandboxNetworkMode::Allow | SandboxNetworkMode::Ask => true,
         SandboxNetworkMode::Deny => false,
@@ -546,6 +553,14 @@ async fn sandbox_with_broker(
     extra_dirs: &[(PathBuf, AccessLevel)],
     sandbox_cfg: &SandboxPolicyConfig,
 ) -> Result<Sandbox> {
+    tracing::debug!(
+        workspace = %workspace.display(),
+        extra_dirs_count = extra_dirs.len(),
+        network_mode = ?sandbox_cfg.network,
+        exec_allow_count = sandbox_cfg.exec_allow.len(),
+        reminders_lists_count = reminders_lists.len(),
+        "building sandbox with broker and reminders service"
+    );
     let network_allowed = match sandbox_cfg.network {
         SandboxNetworkMode::Allow | SandboxNetworkMode::Ask => true,
         SandboxNetworkMode::Deny => false,
@@ -764,7 +779,8 @@ impl ToolExecutor for ExecuteCommandTool {
                 ctx.origin(),
                 &input,
                 "command blocked by hard baseline",
-            );
+            )
+            .with_module(module_path!());
             entry.emit();
             return Ok(ToolOutput {
                 content: "Command denied: matches dangerous pattern (hard baseline)".to_string(),
@@ -779,7 +795,8 @@ impl ToolExecutor for ExecuteCommandTool {
                 ctx.origin(),
                 &input,
                 "command not in allowed exec list",
-            );
+            )
+            .with_module(module_path!());
             entry.emit();
             return Ok(ToolOutput {
                 content: "Command denied: not in allowed exec list for this skill".to_string(),
@@ -789,6 +806,20 @@ impl ToolExecutor for ExecuteCommandTool {
 
         let timeout = Duration::from_secs(timeout_secs.max(1));
         let start = Instant::now();
+
+        // Log command execution details
+        let command_preview = if command.len() > 200 {
+            format!("{}...", &command[..200])
+        } else {
+            command.to_string()
+        };
+        tracing::info!(
+            command = %command_preview,
+            timeout_secs = timeout_secs,
+            enable_reminders_service = enable_reminders_service,
+            agent_id = %self.agent_id,
+            "executing command in sandbox"
+        );
 
         // Build sandbox dynamically to include current allowlist
         let extra_dirs = self.gate.allowed_dirs().await;
@@ -832,6 +863,15 @@ impl ToolExecutor for ExecuteCommandTool {
                 let exit_code = output.exit_code;
                 let mut is_error = !output.exit_code.eq(&0);
 
+                tracing::debug!(
+                    exit_code = exit_code,
+                    duration_ms = duration_ms,
+                    stdout_bytes = output.stdout.len(),
+                    stderr_bytes = output.stderr.len(),
+                    was_killed = output.was_killed,
+                    "command execution completed"
+                );
+
                 if output.was_killed {
                     is_error = true;
                     if !combined.is_empty() {
@@ -857,7 +897,8 @@ impl ToolExecutor for ExecuteCommandTool {
                     &input,
                     &content,
                     duration_ms,
-                );
+                )
+                .with_module(module_path!());
                 entry.emit();
 
                 Ok(ToolOutput { content, is_error })
@@ -870,7 +911,8 @@ impl ToolExecutor for ExecuteCommandTool {
                     &input,
                     e.to_string(),
                     duration_ms,
-                );
+                )
+                .with_module(module_path!());
                 entry.emit();
 
                 Ok(ToolOutput {

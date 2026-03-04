@@ -26,7 +26,7 @@ clawhive-runtime = { path = "../clawhive-runtime" }
 clawhive-scheduler = { path = "../clawhive-scheduler" }
 reqwest.workspace = true
 htmd = "0.5"
-corral-core = { git = "https://github.com/longzhi/corral", package = "corral-core", default-features = false, features = ["broker"] }
+corral-core = { git = "https://github.com/longzhi/corral", rev = "99c6361", package = "corral-core", default-features = false, features = ["broker"] }
 tempfile.workspace = true
 zip = "2"
 tar = "0.4"
