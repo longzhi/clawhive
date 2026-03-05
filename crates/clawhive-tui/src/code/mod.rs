@@ -1,7 +1,25 @@
-//! Code TUI module skeleton.
-
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::io;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use chrono::Local;
+use clawhive_bus::{EventBus, Topic};
+use clawhive_core::approval::ApprovalRegistry;
+use clawhive_gateway::Gateway;
+use clawhive_schema::{ApprovalDecision, BusMessage, InboundMessage};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    Frame, Terminal,
+};
+use tokio::sync::mpsc;
 
 pub mod bottom_pane;
 pub mod diff;
@@ -12,12 +30,11 @@ pub mod markdown;
 pub mod scroll;
 pub mod shimmer;
 
-use self::bottom_pane::{ApprovalRequest, BottomPaneState};
+use self::bottom_pane::input::InputView;
+use self::bottom_pane::{ApprovalRequest, BottomPaneState, FilterState};
 use self::history::HistoryCell;
 use self::scroll::ScrollState;
 
-/// Core application state for the new code-mode TUI.
-#[allow(dead_code)]
 pub(crate) struct CodeApp {
     pub history: Vec<HistoryCell>,
     pub bottom_pane: BottomPaneState,
@@ -26,8 +43,9 @@ pub(crate) struct CodeApp {
     pub history_scroll: ScrollState,
 
     pub input: String,
+    pub input_view: InputView,
     pub input_history: Vec<String>,
-    pub queued_message: Option<String>,
+    pub file_search_paths: Vec<String>,
 
     pub is_running: bool,
     pub agent_id: String,
@@ -42,7 +60,6 @@ pub(crate) struct CodeApp {
     pub quit_pressed_at: Option<Instant>,
 }
 
-#[allow(dead_code)]
 impl CodeApp {
     pub(crate) fn new(agent_id: String, model_name: String) -> Self {
         Self {
@@ -51,8 +68,9 @@ impl CodeApp {
             approval_queue: VecDeque::new(),
             history_scroll: ScrollState::new(),
             input: String::new(),
+            input_view: InputView::new(),
             input_history: Vec::new(),
-            queued_message: None,
+            file_search_paths: Vec::new(),
             is_running: false,
             agent_id,
             model_name,
@@ -62,6 +80,583 @@ impl CodeApp {
             verbose: false,
             should_quit: false,
             quit_pressed_at: None,
+        }
+    }
+
+    fn sync_input_view(&mut self) {
+        if self.input_view.text() != self.input {
+            self.input_view.set_text(&self.input);
+            self.input_view.detect_shell_mode();
+        }
+    }
+
+    pub(crate) fn input_view_height(&mut self) -> u16 {
+        self.sync_input_view();
+        self.input_view.desired_height()
+    }
+
+    fn filtered_paths(&self, query: &str) -> Vec<String> {
+        bottom_pane::file_search::filter_paths(&self.file_search_paths, query)
+    }
+
+    pub(crate) fn handle_bus_message(&mut self, msg: BusMessage, connector_id: &str) {
+        match msg {
+            BusMessage::MessageAccepted { .. } => {
+                self.is_running = true;
+            }
+            BusMessage::StreamDelta {
+                delta, is_final, ..
+            } => {
+                if is_final {
+                    if let Some(HistoryCell::AssistantText { is_streaming, .. }) =
+                        self.history.last_mut()
+                    {
+                        *is_streaming = false;
+                    }
+                    self.is_running = false;
+                } else if !delta.is_empty() {
+                    match self.history.last_mut() {
+                        Some(HistoryCell::AssistantText { text, is_streaming })
+                            if *is_streaming =>
+                        {
+                            text.push_str(&delta);
+                        }
+                        _ => {
+                            self.history.push(HistoryCell::AssistantText {
+                                text: delta,
+                                is_streaming: true,
+                            });
+                        }
+                    }
+                    self.history_scroll.ensure_bottom(self.history.len(), 20);
+                }
+            }
+            BusMessage::ReplyReady { outbound } => {
+                if outbound.channel_type == "code" && outbound.connector_id == connector_id {
+                    if let Some(HistoryCell::AssistantText { is_streaming, .. }) =
+                        self.history.last_mut()
+                    {
+                        *is_streaming = false;
+                    }
+                    if !matches!(self.history.last(), Some(HistoryCell::AssistantText { .. })) {
+                        self.history.push(HistoryCell::AssistantText {
+                            text: outbound.text,
+                            is_streaming: false,
+                        });
+                    }
+                    self.is_running = false;
+                    self.history_scroll.ensure_bottom(self.history.len(), 20);
+                }
+            }
+            BusMessage::TaskFailed { trace_id, error } => {
+                self.history.push(HistoryCell::Error {
+                    trace_id,
+                    message: error,
+                });
+                self.is_running = false;
+                self.history_scroll.ensure_bottom(self.history.len(), 20);
+            }
+            BusMessage::NeedHumanApproval {
+                trace_id,
+                command,
+                agent_id,
+                ..
+            } => {
+                let request = ApprovalRequest {
+                    trace_id,
+                    command,
+                    agent_id,
+                    diff: None,
+                    selected_option: 0,
+                };
+                self.approval_queue.push_back(request);
+                if !matches!(self.bottom_pane, BottomPaneState::Approval(_)) {
+                    if let Some(req) = self.approval_queue.pop_front() {
+                        self.bottom_pane = BottomPaneState::Approval(req);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn render(frame: &mut Frame, app: &mut CodeApp) {
+    let area = frame.area();
+    let input_height = app.input_view_height();
+
+    let bottom_height = match &app.bottom_pane {
+        BottomPaneState::Input => input_height,
+        BottomPaneState::Approval(req) => {
+            bottom_pane::approval::desired_approval_height(req, area.width)
+        }
+        BottomPaneState::ShortcutOverlay => bottom_pane::shortcuts::shortcut_overlay_height(),
+        BottomPaneState::SlashCommand(filter) => {
+            input_height + bottom_pane::slash_command::slash_picker_height(&filter.query)
+        }
+        BottomPaneState::FileSearch(filter) => {
+            let filtered = app.filtered_paths(&filter.query);
+            input_height + bottom_pane::file_search::file_picker_height(filtered.len())
+        }
+    };
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(4),
+            Constraint::Length(bottom_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    header::render_header(layout[0], frame.buffer_mut(), app);
+    history::render_history_pane(
+        &app.history,
+        &app.history_scroll,
+        layout[1],
+        frame.buffer_mut(),
+        app.verbose,
+    );
+
+    match &app.bottom_pane {
+        BottomPaneState::Input => {
+            bottom_pane::input::render_input_view(
+                layout[2],
+                frame.buffer_mut(),
+                &mut app.input_view,
+                app.is_running,
+                crate::shared::styles::AGENT_ACCENT,
+            );
+        }
+        BottomPaneState::Approval(req) => {
+            let queue_len = app.approval_queue.len() + 1;
+            bottom_pane::approval::render_approval_view(
+                layout[2],
+                frame.buffer_mut(),
+                req,
+                (1, queue_len),
+            );
+        }
+        BottomPaneState::ShortcutOverlay => {
+            bottom_pane::shortcuts::render_shortcut_overlay(layout[2], frame.buffer_mut());
+        }
+        BottomPaneState::SlashCommand(filter) => {
+            let picker_h = bottom_pane::slash_command::slash_picker_height(&filter.query);
+            let (input_area, picker_area) = split_bottom(layout[2], input_height, picker_h);
+
+            bottom_pane::input::render_input_view(
+                input_area,
+                frame.buffer_mut(),
+                &mut app.input_view,
+                app.is_running,
+                crate::shared::styles::AGENT_ACCENT,
+            );
+            bottom_pane::slash_command::render_slash_command_picker(
+                picker_area,
+                frame.buffer_mut(),
+                &filter.query,
+                filter.selected,
+            );
+        }
+        BottomPaneState::FileSearch(filter) => {
+            let filtered = app.filtered_paths(&filter.query);
+            let picker_h = bottom_pane::file_search::file_picker_height(filtered.len());
+            let (input_area, picker_area) = split_bottom(layout[2], input_height, picker_h);
+
+            bottom_pane::input::render_input_view(
+                input_area,
+                frame.buffer_mut(),
+                &mut app.input_view,
+                app.is_running,
+                crate::shared::styles::AGENT_ACCENT,
+            );
+            bottom_pane::file_search::render_file_search_picker(
+                picker_area,
+                frame.buffer_mut(),
+                &filtered,
+                filter.selected,
+            );
+        }
+    }
+
+    footer::render_footer(layout[3], frame.buffer_mut(), app);
+}
+
+fn split_bottom(area: Rect, input_height: u16, picker_height: u16) -> (Rect, Rect) {
+    let input_len = input_height.min(area.height);
+    let picker_len = picker_height.min(area.height.saturating_sub(input_len));
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(input_len),
+            Constraint::Length(picker_len),
+        ])
+        .split(area);
+    (parts[0], parts[1])
+}
+
+pub(crate) async fn run(
+    bus: &EventBus,
+    gateway: Arc<Gateway>,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+) -> Result<()> {
+    let mut rx_reply = bus.subscribe(Topic::ReplyReady).await;
+    let mut rx_accept = bus.subscribe(Topic::MessageAccepted).await;
+    let mut rx_fail = bus.subscribe(Topic::TaskFailed).await;
+    let mut rx_stream = bus.subscribe(Topic::StreamDelta).await;
+    let mut rx_approval = bus.subscribe(Topic::NeedHumanApproval).await;
+
+    let connector_id = format!(
+        "code-{}-{}-{}",
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string()),
+        std::process::id(),
+        &uuid::Uuid::new_v4().to_string()[..4]
+    );
+    let conversation_scope = format!("code:{connector_id}:main");
+    let user_scope = format!(
+        "user:code:{}",
+        std::env::var("USER").unwrap_or_else(|_| "developer".to_string())
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let gateway_bg = gateway.clone();
+    let connector_bg = connector_id.clone();
+    let scope_bg = conversation_scope.clone();
+    let user_bg = user_scope.clone();
+    tokio::spawn(async move {
+        while let Some(text) = rx.recv().await {
+            let inbound = InboundMessage {
+                trace_id: uuid::Uuid::new_v4(),
+                channel_type: "code".into(),
+                connector_id: connector_bg.clone(),
+                conversation_scope: scope_bg.clone(),
+                user_scope: user_bg.clone(),
+                text,
+                at: chrono::Utc::now(),
+                thread_id: None,
+                is_mention: false,
+                mention_target: None,
+                message_id: None,
+                attachments: vec![],
+                group_context: None,
+            };
+            if let Err(err) = gateway_bg.handle_inbound(inbound).await {
+                tracing::error!("code inbound failed: {err}");
+            }
+        }
+    });
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = CodeApp::new("clawhive-main".to_string(), "default".to_string());
+
+    let run_result = (|| -> Result<()> {
+        loop {
+            while let Ok(msg) = rx_reply.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+            while let Ok(msg) = rx_accept.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+            while let Ok(msg) = rx_fail.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+            while let Ok(msg) = rx_stream.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+            while let Ok(msg) = rx_approval.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+
+            terminal.draw(|f| render(f, &mut app))?;
+
+            if event::poll(Duration::from_millis(50))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        handle_key_event(&mut app, key, &tx, &approval_registry)?;
+                    }
+                }
+            }
+
+            if app.should_quit {
+                break;
+            }
+        }
+        Ok(())
+    })();
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    run_result
+}
+
+fn handle_key_event(
+    app: &mut CodeApp,
+    key: KeyEvent,
+    tx: &mpsc::UnboundedSender<String>,
+    approval_registry: &Option<Arc<ApprovalRegistry>>,
+) -> Result<()> {
+    if let BottomPaneState::Approval(req) = &mut app.bottom_pane {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter if req.selected_option == 0 => {
+                resolve_approval(app, ApprovalDecision::AllowOnce, approval_registry);
+            }
+            KeyCode::Char('a') | KeyCode::Enter if req.selected_option == 1 => {
+                resolve_approval(app, ApprovalDecision::AllowOnce, approval_registry);
+            }
+            KeyCode::Char('A') | KeyCode::Enter if req.selected_option == 2 => {
+                resolve_approval(app, ApprovalDecision::AlwaysAllow, approval_registry);
+            }
+            KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter if req.selected_option == 3 => {
+                resolve_approval(app, ApprovalDecision::Deny, approval_registry);
+            }
+            KeyCode::Up => {
+                req.selected_option = req.selected_option.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let max = bottom_pane::approval::approval_option_count(req).saturating_sub(1);
+                req.selected_option = (req.selected_option + 1).min(max);
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if matches!(app.bottom_pane, BottomPaneState::ShortcutOverlay) {
+        app.bottom_pane = BottomPaneState::Input;
+        return Ok(());
+    }
+
+    if let BottomPaneState::SlashCommand(filter) = &mut app.bottom_pane {
+        match key.code {
+            KeyCode::Esc => {
+                app.bottom_pane = BottomPaneState::Input;
+            }
+            KeyCode::Enter => {
+                app.bottom_pane = BottomPaneState::Input;
+            }
+            KeyCode::Up => {
+                filter.selected = filter.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                filter.selected += 1;
+            }
+            KeyCode::Char(c) => {
+                filter.query.push(c);
+            }
+            KeyCode::Backspace => {
+                filter.query.pop();
+                if filter.query.is_empty() {
+                    app.bottom_pane = BottomPaneState::Input;
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if let BottomPaneState::FileSearch(filter) = &mut app.bottom_pane {
+        match key.code {
+            KeyCode::Esc => {
+                app.bottom_pane = BottomPaneState::Input;
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                let all_paths = app.file_search_paths.clone();
+                let filtered = bottom_pane::file_search::filter_paths(&all_paths, &filter.query);
+                if let Some(path) =
+                    filtered.get(filter.selected.min(filtered.len().saturating_sub(1)))
+                {
+                    app.input.push_str(path);
+                    app.input_view.set_text(&app.input);
+                }
+                app.bottom_pane = BottomPaneState::Input;
+            }
+            KeyCode::Up => {
+                filter.selected = filter.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                filter.selected += 1;
+            }
+            KeyCode::Char(c) => {
+                filter.query.push(c);
+            }
+            KeyCode::Backspace => {
+                filter.query.pop();
+                if filter.query.is_empty() {
+                    app.bottom_pane = BottomPaneState::Input;
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        let now = Instant::now();
+        let should_quit = app
+            .quit_pressed_at
+            .map(|at| now.duration_since(at) <= Duration::from_millis(900))
+            .unwrap_or(false);
+        if should_quit {
+            app.should_quit = true;
+        } else {
+            app.quit_pressed_at = Some(now);
+        }
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.input.push('\n');
+        }
+        KeyCode::Enter => {
+            let text = app.input.trim().to_string();
+            if !text.is_empty() {
+                let outbound = if let Some(stripped) = text.strip_prefix('!') {
+                    stripped.to_string()
+                } else {
+                    text.clone()
+                };
+                if !outbound.is_empty() {
+                    let _ = tx.send(outbound);
+                    app.is_running = true;
+                }
+                app.history.push(HistoryCell::UserMessage {
+                    text: text.clone(),
+                    timestamp: Local::now(),
+                });
+                app.input_history.push(text.clone());
+                if text.contains('/') {
+                    app.file_search_paths.push(text);
+                }
+                app.history_scroll.ensure_bottom(app.history.len(), 20);
+            }
+            app.input.clear();
+            app.input_view.clear();
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('/') if app.input.is_empty() => {
+            app.bottom_pane = BottomPaneState::SlashCommand(FilterState {
+                query: String::new(),
+                selected: 0,
+            });
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('@') => {
+            app.input.push('@');
+            app.bottom_pane = BottomPaneState::FileSearch(FilterState {
+                query: String::new(),
+                selected: 0,
+            });
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('?') if app.input.is_empty() => {
+            app.bottom_pane = BottomPaneState::ShortcutOverlay;
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Esc => {
+            if app.is_running {
+                app.is_running = false;
+            } else {
+                app.input.clear();
+            }
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('q') if app.input.is_empty() && !app.is_running => {
+            app.should_quit = true;
+        }
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.verbose = !app.verbose;
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char(c) => {
+            app.input.push(c);
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Backspace => {
+            app.input.pop();
+            app.quit_pressed_at = None;
+        }
+        KeyCode::PageUp => {
+            app.history_scroll.page_up(20);
+            app.quit_pressed_at = None;
+        }
+        KeyCode::PageDown => {
+            app.history_scroll.page_down(app.history.len(), 20);
+            app.quit_pressed_at = None;
+        }
+        _ => {}
+    }
+
+    app.input_view.set_text(&app.input);
+    app.input_view.detect_shell_mode();
+    Ok(())
+}
+
+fn resolve_approval(
+    app: &mut CodeApp,
+    decision: ApprovalDecision,
+    registry: &Option<Arc<ApprovalRegistry>>,
+) {
+    if let BottomPaneState::Approval(req) = &app.bottom_pane {
+        let trace_id = req.trace_id;
+        if let Some(reg) = registry {
+            let _ = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(reg.resolve(trace_id, decision))
+            });
+        }
+    }
+
+    if let Some(next) = app.approval_queue.pop_front() {
+        app.bottom_pane = BottomPaneState::Approval(next);
+    } else {
+        app.bottom_pane = BottomPaneState::Input;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodeApp, HistoryCell};
+    use clawhive_schema::BusMessage;
+
+    #[test]
+    fn message_accepted_marks_app_running() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        app.handle_bus_message(
+            BusMessage::MessageAccepted {
+                trace_id: uuid::Uuid::new_v4(),
+            },
+            "connector-1",
+        );
+
+        assert!(app.is_running);
+    }
+
+    #[test]
+    fn stream_delta_creates_streaming_assistant_cell() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        app.handle_bus_message(
+            BusMessage::StreamDelta {
+                trace_id: uuid::Uuid::new_v4(),
+                delta: "hello".to_string(),
+                is_final: false,
+            },
+            "connector-1",
+        );
+
+        match app.history.last() {
+            Some(HistoryCell::AssistantText { text, is_streaming }) => {
+                assert_eq!(text, "hello");
+                assert!(*is_streaming);
+            }
+            _ => panic!("expected streaming assistant cell"),
         }
     }
 }
