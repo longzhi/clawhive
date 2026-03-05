@@ -91,6 +91,9 @@ impl CodeApp {
     }
 
     pub(crate) fn input_view_height(&mut self) -> u16 {
+        if self.is_running {
+            return 1;
+        }
         self.sync_input_view();
         self.input_view.desired_height()
     }
