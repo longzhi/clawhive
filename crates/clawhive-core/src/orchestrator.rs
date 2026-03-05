@@ -149,9 +149,21 @@ impl Orchestrator {
             effective_project_root.clone(),
             effective_project_root.join("access_policy.json"),
         ));
-        // Note: read_file/write_file/edit_file are NOT registered in the global
-        // registry — they are dispatched per-agent in execute_tool_for_agent()
-        // to ensure the correct workspace root is used.
+        // File tools (read/write/edit) are registered here for their DEFINITIONS only,
+        // so the LLM knows they exist. Actual execution is dispatched per-agent in
+        // execute_tool_for_agent() with the correct workspace root.
+        tool_registry.register(Box::new(ReadFileTool::new(
+            workspace_root.clone(),
+            default_access_gate.clone(),
+        )));
+        tool_registry.register(Box::new(WriteFileTool::new(
+            workspace_root.clone(),
+            default_access_gate.clone(),
+        )));
+        tool_registry.register(Box::new(EditFileTool::new(
+            workspace_root.clone(),
+            default_access_gate.clone(),
+        )));
         tool_registry.register(Box::new(ExecuteCommandTool::new(
             workspace_root.clone(),
             30,

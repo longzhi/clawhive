@@ -119,7 +119,8 @@ impl Persona {
             let has_soul = context_files.iter().any(|(name, _)| *name == "SOUL.md");
 
             parts.push(
-                "\n# Project Context\n\nThe following project context files have been loaded:"
+                "\n# Project Context\n\nThe following project context files have been loaded from `prompts/` in your workspace. \
+                 To update them, use write_file with the path `prompts/<filename>` (e.g. `prompts/IDENTITY.md`):"
                     .to_string(),
             );
 
@@ -471,7 +472,7 @@ mod tests {
 
         let assembled = persona.assembled_system_prompt();
         assert!(assembled.contains("# Project Context"));
-        assert!(assembled.contains("The following project context files have been loaded:"));
+        assert!(assembled.contains("project context files have been loaded from `prompts/`"));
         assert!(assembled.contains("## SOUL.md"));
         assert!(assembled.contains("## TOOLS.md"));
     }
