@@ -446,6 +446,9 @@ impl App {
                     "[{ts}] SkillConfirm → skill={skill_name} token={token}"
                 ));
             }
+            BusMessage::ToolCallStarted { .. } | BusMessage::ToolCallCompleted { .. } => {
+                // Not relevant for dashboard view
+            }
         }
     }
 }

@@ -271,6 +271,17 @@ pub enum BusMessage {
         delta: String,
         is_final: bool,
     },
+    ToolCallStarted {
+        trace_id: Uuid,
+        tool_name: String,
+        arguments: String,
+    },
+    ToolCallCompleted {
+        trace_id: Uuid,
+        tool_name: String,
+        output: String,
+        duration_ms: u64,
+    },
     ScheduledTaskTriggered {
         schedule_id: String,
         agent_id: String,

@@ -25,6 +25,8 @@ pub enum Topic {
     DeliverApprovalRequest,
     DeliverSkillConfirm,
     WaitTaskCompleted,
+    ToolCallStarted,
+    ToolCallCompleted,
 }
 
 impl Topic {
@@ -48,6 +50,8 @@ impl Topic {
             BusMessage::DeliverApprovalRequest { .. } => Topic::DeliverApprovalRequest,
             BusMessage::DeliverSkillConfirm { .. } => Topic::DeliverSkillConfirm,
             BusMessage::WaitTaskCompleted { .. } => Topic::WaitTaskCompleted,
+            BusMessage::ToolCallStarted { .. } => Topic::ToolCallStarted,
+            BusMessage::ToolCallCompleted { .. } => Topic::ToolCallCompleted,
         }
     }
 }

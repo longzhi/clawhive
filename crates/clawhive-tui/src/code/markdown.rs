@@ -1,10 +1,28 @@
 #![allow(dead_code)]
 
 use std::mem;
+use std::sync::OnceLock;
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::Theme;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+fn syntax_set() -> &'static SyntaxSet {
+    static SS: OnceLock<SyntaxSet> = OnceLock::new();
+    SS.get_or_init(two_face::syntax::extra_newlines)
+}
+
+fn highlight_theme() -> &'static Theme {
+    static THEME: OnceLock<Theme> = OnceLock::new();
+    THEME.get_or_init(|| {
+        let ts = two_face::theme::extra();
+        ts.get(two_face::theme::EmbeddedThemeName::Base16OceanDark)
+            .clone()
+    })
+}
 
 struct MarkdownRenderer {
     lines: Vec<Line<'static>>,
@@ -21,6 +39,7 @@ struct MarkdownRenderer {
     current_item_continuation_prefix: String,
     link_target: Option<String>,
     link_text: String,
+    code_highlighter: Option<HighlightLines<'static>>,
 }
 
 impl MarkdownRenderer {
@@ -40,6 +59,7 @@ impl MarkdownRenderer {
             current_item_continuation_prefix: String::new(),
             link_target: None,
             link_text: String::new(),
+            code_highlighter: None,
         }
     }
 
@@ -69,10 +89,7 @@ impl MarkdownRenderer {
 
         if self.in_code_block {
             for part in text.split('\n') {
-                self.lines.push(Line::from(vec![
-                    Span::styled("│ ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::styled(part.to_owned(), Style::default().fg(Color::DarkGray)),
-                ]));
+                self.push_code_block_line(part);
             }
             return;
         }
@@ -88,6 +105,57 @@ impl MarkdownRenderer {
             }
             self.push_span(part.to_owned(), self.current_style);
         }
+    }
+
+    fn push_code_block_line(&mut self, part: &str) {
+        if let Some(highlighter) = self.code_highlighter.as_mut() {
+            if let Ok(ranges) = highlighter.highlight_line(part, syntax_set()) {
+                let mut spans = vec![Span::styled(
+                    "│ ",
+                    Style::default().add_modifier(Modifier::DIM),
+                )];
+                for (style, token) in ranges {
+                    if token.is_empty() {
+                        continue;
+                    }
+                    spans.push(Span::styled(
+                        token.to_owned(),
+                        Style::default().fg(Color::Rgb(
+                            style.foreground.r,
+                            style.foreground.g,
+                            style.foreground.b,
+                        )),
+                    ));
+                }
+                self.lines.push(Line::from(spans));
+                return;
+            }
+        }
+
+        self.lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(part.to_owned(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    fn code_syntax(&self) -> Option<&'static SyntaxReference> {
+        let lang = self
+            .code_lang
+            .trim()
+            .split(|ch: char| ch.is_whitespace() || ch == ',')
+            .next()
+            .unwrap_or_default();
+        if lang.is_empty() {
+            return None;
+        }
+        syntax_set()
+            .find_syntax_by_token(lang)
+            .or_else(|| syntax_set().find_syntax_by_extension(lang))
+    }
+
+    fn build_code_highlighter(&self) -> Option<HighlightLines<'static>> {
+        let syntax = self.code_syntax()?;
+        Some(HighlightLines::new(syntax, highlight_theme()))
     }
 
     fn flush_current_as_wrapped(&mut self) {
@@ -305,6 +373,7 @@ pub(crate) fn render_markdown(source: &str, width: u16) -> Vec<Line<'static>> {
                         CodeBlockKind::Indented => String::new(),
                         CodeBlockKind::Fenced(lang) => lang.into_string(),
                     };
+                    renderer.code_highlighter = renderer.build_code_highlighter();
                     renderer.push_code_block_header();
                 }
                 Tag::List(None) => {
@@ -343,6 +412,7 @@ pub(crate) fn render_markdown(source: &str, width: u16) -> Vec<Line<'static>> {
                 }
                 TagEnd::CodeBlock => {
                     renderer.in_code_block = false;
+                    renderer.code_highlighter = None;
                     renderer.push_code_block_footer();
                     renderer.pending_paragraph_blank = true;
                     renderer.code_lang.clear();
@@ -446,6 +516,27 @@ mod tests {
             .map(line_to_text)
             .any(|text| text.starts_with("│ "));
         assert!(has_pipe);
+    }
+
+    #[test]
+    fn code_block_with_lang_gets_colored_spans() {
+        let source = "```rust\nlet x = 1;\n```";
+        let lines = render_markdown(source, 80);
+        let has_colored_span = lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            matches!(span.style.fg, Some(Color::Rgb(_, _, _)))
+                && span.content.as_ref().chars().any(|ch| !ch.is_whitespace())
+        });
+        assert!(has_colored_span);
+    }
+
+    #[test]
+    fn code_block_without_lang_uses_fallback() {
+        let source = "```\nplain text\n```";
+        let lines = render_markdown(source, 80);
+        let has_dark_gray_plain = lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.content.as_ref().contains("plain text") && span.style.fg == Some(Color::DarkGray)
+        });
+        assert!(has_dark_gray_plain);
     }
 
     #[test]

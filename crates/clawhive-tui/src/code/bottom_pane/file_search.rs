@@ -1,7 +1,65 @@
+use std::path::Path;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".next",
+    "dist",
+    "build",
+    "__pycache__",
+    ".tox",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+];
+
+/// Walk the workspace directory and collect up to `limit` file paths.
+/// Skips common noise directories. Returns relative paths sorted alphabetically.
+pub(crate) fn scan_workspace_files(root: &Path, limit: usize) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if name.starts_with('.') && name != "." {
+                if IGNORED_DIRS.contains(&name.as_ref()) {
+                    continue;
+                }
+                // Allow dotfiles but skip .git etc
+                if path.is_dir() && name == ".git" {
+                    continue;
+                }
+            }
+            if path.is_dir() {
+                if IGNORED_DIRS.contains(&name.as_ref()) {
+                    continue;
+                }
+                stack.push(path);
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                files.push(relative.to_string_lossy().into_owned());
+                if files.len() >= limit {
+                    break;
+                }
+            }
+        }
+        if files.len() >= limit {
+            break;
+        }
+    }
+    files.sort();
+    files
+}
 
 #[allow(dead_code)]
 pub(crate) fn filter_paths(paths: &[String], query: &str) -> Vec<String> {

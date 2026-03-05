@@ -41,11 +41,15 @@ pub(crate) struct CodeApp {
     pub approval_queue: VecDeque<ApprovalRequest>,
 
     pub history_scroll: ScrollState,
+    pub history_clear_offset: usize,
 
     pub input: String,
     pub input_view: InputView,
     pub input_history: Vec<String>,
+    pub input_history_index: Option<usize>,
     pub file_search_paths: Vec<String>,
+    pub queued_message: Option<String>,
+    pub changed_files: Vec<String>,
 
     pub is_running: bool,
     pub agent_id: String,
@@ -67,10 +71,14 @@ impl CodeApp {
             bottom_pane: BottomPaneState::default(),
             approval_queue: VecDeque::new(),
             history_scroll: ScrollState::new(),
+            history_clear_offset: 0,
             input: String::new(),
             input_view: InputView::new(),
             input_history: Vec::new(),
+            input_history_index: None,
             file_search_paths: Vec::new(),
+            queued_message: None,
+            changed_files: Vec::new(),
             is_running: false,
             agent_id,
             model_name,
@@ -105,8 +113,11 @@ impl CodeApp {
     pub(crate) fn execute_slash_command(&mut self, command_name: &str) {
         match command_name {
             "/compact" => {
+                // Mark current history as compacted - visually clear while preserving data
+                self.history_clear_offset = self.history.len();
+                self.history_scroll = ScrollState::new();
                 self.history.push(HistoryCell::AssistantText {
-                    text: "Conversation compacted. Context freed.".to_string(),
+                    text: "Conversation compacted. Previous context hidden.".to_string(),
                     is_streaming: false,
                 });
             }
@@ -131,13 +142,23 @@ impl CodeApp {
                 });
             }
             "/diff" => {
+                let text = if self.changed_files.is_empty() {
+                    "No file changes tracked in this session.".to_string()
+                } else {
+                    let mut out = String::from("**Files changed this session:**\n");
+                    for file in &self.changed_files {
+                        out.push_str(&format!("\n- `{}`", file));
+                    }
+                    out
+                };
                 self.history.push(HistoryCell::AssistantText {
-                    text: "No file changes tracked in this session.".to_string(),
+                    text,
                     is_streaming: false,
                 });
             }
             "/clear" => {
-                self.history.clear();
+                self.history_clear_offset = self.history.len();
+                self.history_scroll = ScrollState::new();
             }
             "/model" => {
                 let info = format!(
@@ -254,6 +275,80 @@ impl CodeApp {
                     }
                 }
             }
+            BusMessage::ToolCallStarted {
+                tool_name,
+                arguments,
+                ..
+            } => {
+                self.history.push(HistoryCell::ToolCall {
+                    tool_name,
+                    arguments,
+                    output: None,
+                    duration: None,
+                    is_running: true,
+                });
+                self.history_scroll.ensure_bottom(self.history.len(), 20);
+            }
+            BusMessage::ToolCallCompleted {
+                tool_name,
+                output,
+                duration_ms,
+                ..
+            } => {
+                // Try to find matching running ToolCall and update it
+                let duration = std::time::Duration::from_millis(duration_ms);
+                let mut found = false;
+                for cell in self.history.iter_mut().rev() {
+                    if let HistoryCell::ToolCall {
+                        tool_name: ref name,
+                        is_running: ref mut running,
+                        output: ref mut out,
+                        duration: ref mut dur,
+                        ..
+                    } = cell
+                    {
+                        if *running && *name == tool_name {
+                            *running = false;
+                            *out = if output.is_empty() {
+                                None
+                            } else {
+                                Some(history::ToolOutput::Text(
+                                    output.lines().map(String::from).collect(),
+                                ))
+                            };
+                            *dur = Some(duration);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    // No matching start found; insert completed tool call directly
+                    self.history.push(HistoryCell::ToolCall {
+                        tool_name: tool_name.clone(),
+                        arguments: String::new(),
+                        output: if output.is_empty() {
+                            None
+                        } else {
+                            Some(history::ToolOutput::Text(
+                                output.lines().map(String::from).collect(),
+                            ))
+                        },
+                        duration: Some(duration),
+                        is_running: false,
+                    });
+                }
+                // Track changed files from tool output
+                if tool_name == "write" || tool_name == "edit" {
+                    if let Some(first_line) = output.lines().next() {
+                        let file = first_line.trim().to_string();
+                        if !file.is_empty() && !self.changed_files.contains(&file) {
+                            self.changed_files.push(file);
+                        }
+                    }
+                }
+                self.history_scroll.ensure_bottom(self.history.len(), 20);
+            }
             _ => {}
         }
     }
@@ -289,8 +384,9 @@ pub(crate) fn render(frame: &mut Frame, app: &mut CodeApp) {
         .split(area);
 
     header::render_header(layout[0], frame.buffer_mut(), app);
+    let visible_history = &app.history[app.history_clear_offset..];
     history::render_history_pane(
-        &app.history,
+        visible_history,
         &app.history_scroll,
         layout[1],
         frame.buffer_mut(),
@@ -299,12 +395,17 @@ pub(crate) fn render(frame: &mut Frame, app: &mut CodeApp) {
 
     match &app.bottom_pane {
         BottomPaneState::Input => {
+            let accent = if app.input_view.is_shell_mode {
+                crate::shared::styles::INFO
+            } else {
+                crate::shared::styles::AGENT_ACCENT
+            };
             bottom_pane::input::render_input_view(
                 layout[2],
                 frame.buffer_mut(),
                 &mut app.input_view,
                 app.is_running,
-                crate::shared::styles::AGENT_ACCENT,
+                accent,
             );
         }
         BottomPaneState::Approval(req) => {
@@ -384,6 +485,8 @@ pub(crate) async fn run(
     let mut rx_fail = bus.subscribe(Topic::TaskFailed).await;
     let mut rx_stream = bus.subscribe(Topic::StreamDelta).await;
     let mut rx_approval = bus.subscribe(Topic::NeedHumanApproval).await;
+    let mut rx_tool_start = bus.subscribe(Topic::ToolCallStarted).await;
+    let mut rx_tool_done = bus.subscribe(Topic::ToolCallCompleted).await;
 
     let connector_id = format!(
         "code-{}-{}-{}",
@@ -450,6 +553,26 @@ pub(crate) async fn run(
             while let Ok(msg) = rx_approval.try_recv() {
                 app.handle_bus_message(msg, &connector_id);
             }
+            while let Ok(msg) = rx_tool_start.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+            while let Ok(msg) = rx_tool_done.try_recv() {
+                app.handle_bus_message(msg, &connector_id);
+            }
+
+            // Send queued message when agent finishes
+            if !app.is_running {
+                if let Some(queued) = app.queued_message.take() {
+                    app.history.push(HistoryCell::UserMessage {
+                        text: queued.clone(),
+                        timestamp: Local::now(),
+                    });
+                    app.input_history.push(queued.clone());
+                    let _ = tx.send(queued);
+                    app.is_running = true;
+                    app.history_scroll.ensure_bottom(app.history.len(), 20);
+                }
+            }
 
             terminal.draw(|f| render(f, &mut app))?;
 
@@ -501,6 +624,15 @@ fn handle_key_event(
             KeyCode::Down => {
                 let max = bottom_pane::approval::approval_option_count(req).saturating_sub(1);
                 req.selected_option = (req.selected_option + 1).min(max);
+            }
+            KeyCode::Char('?') | KeyCode::Enter if req.selected_option == 4 => {
+                // Explain command: add explanation request to history
+                let cmd = req.command.clone();
+                app.history.push(HistoryCell::AssistantText {
+                    text: format!("**Explain:** `{}`\n\nThis command will be executed in a shell. Review it carefully before approving.", cmd),
+                    is_streaming: false,
+                });
+                app.history_scroll.ensure_bottom(app.history.len(), 20);
             }
             _ => {}
         }
@@ -613,6 +745,13 @@ fn handle_key_event(
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
             app.input.push('\n');
         }
+        KeyCode::Tab if app.is_running && !app.input.trim().is_empty() => {
+            // Queue message to send after agent finishes
+            app.queued_message = Some(app.input.trim().to_string());
+            app.input.clear();
+            app.input_view.clear();
+            app.quit_pressed_at = None;
+        }
         KeyCode::Enter => {
             let text = app.input.trim().to_string();
             if !text.is_empty() {
@@ -630,6 +769,7 @@ fn handle_key_event(
                     timestamp: Local::now(),
                 });
                 app.input_history.push(text.clone());
+                app.input_history_index = None;
                 if text.contains('/') {
                     app.file_search_paths.push(text);
                 }
@@ -648,6 +788,10 @@ fn handle_key_event(
         }
         KeyCode::Char('@') => {
             app.input.push('@');
+            if app.file_search_paths.is_empty() {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                app.file_search_paths = bottom_pane::file_search::scan_workspace_files(&cwd, 5000);
+            }
             app.bottom_pane = BottomPaneState::FileSearch(FilterState {
                 query: String::new(),
                 selected: 0,
@@ -669,16 +813,44 @@ fn handle_key_event(
         KeyCode::Char('q') if app.input.is_empty() && !app.is_running => {
             app.should_quit = true;
         }
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+L: clear screen (same as /clear)
+            app.history_clear_offset = app.history.len();
+            app.history_scroll = ScrollState::new();
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+U: delete to line start
+            app.input.clear();
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+W: delete last word
+            let trimmed = app.input.trim_end();
+            if let Some(last_space) = trimmed.rfind(' ') {
+                app.input.truncate(last_space + 1);
+            } else {
+                app.input.clear();
+            }
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+J: insert newline (same as Shift+Enter)
+            app.input.push('\n');
+            app.quit_pressed_at = None;
+        }
         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.verbose = !app.verbose;
             app.quit_pressed_at = None;
         }
         KeyCode::Char(c) => {
             app.input.push(c);
+            app.input_history_index = None;
             app.quit_pressed_at = None;
         }
         KeyCode::Backspace => {
             app.input.pop();
+            app.input_history_index = None;
             app.quit_pressed_at = None;
         }
         KeyCode::PageUp => {
@@ -687,6 +859,40 @@ fn handle_key_event(
         }
         KeyCode::PageDown => {
             app.history_scroll.page_down(app.history.len(), 20);
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Up => {
+            if !app.input_history.is_empty() {
+                let new_index = if let Some(idx) = app.input_history_index {
+                    if idx > 0 {
+                        Some(idx - 1)
+                    } else {
+                        Some(idx)
+                    }
+                } else {
+                    Some(app.input_history.len() - 1)
+                };
+                if let Some(idx) = new_index {
+                    app.input_history_index = Some(idx);
+                    app.input = app.input_history[idx].clone();
+                    app.input_view.set_text(&app.input);
+                }
+            }
+            app.quit_pressed_at = None;
+        }
+        KeyCode::Down => {
+            if let Some(idx) = app.input_history_index {
+                if idx < app.input_history.len() - 1 {
+                    let new_idx = idx + 1;
+                    app.input_history_index = Some(new_idx);
+                    app.input = app.input_history[new_idx].clone();
+                    app.input_view.set_text(&app.input);
+                } else {
+                    app.input_history_index = None;
+                    app.input.clear();
+                    app.input_view.clear();
+                }
+            }
             app.quit_pressed_at = None;
         }
         _ => {}
@@ -770,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_slash_clear_clears_history() {
+    fn execute_slash_clear_sets_offset_but_preserves_history() {
         let mut app = CodeApp::new("agent".to_string(), "model".to_string());
         app.history.push(HistoryCell::AssistantText {
             text: "existing".to_string(),
@@ -779,7 +985,9 @@ mod tests {
 
         app.execute_slash_command("/clear");
 
-        assert!(app.history.is_empty());
+        // History is preserved but clear_offset hides it
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history_clear_offset, 1);
     }
 
     #[test]
@@ -946,5 +1154,85 @@ mod tests {
             super::BottomPaneState::Approval(_)
         ));
         assert_eq!(app.approval_queue.len(), 2);
+    }
+
+    #[test]
+    fn up_arrow_recalls_last_message() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        app.input_history.push("first message".to_string());
+        app.input_history.push("second message".to_string());
+
+        // Simulate pressing Up arrow
+        assert_eq!(app.input_history_index, None);
+        if !app.input_history.is_empty() {
+            let new_index = if let Some(idx) = app.input_history_index {
+                if idx > 0 {
+                    Some(idx - 1)
+                } else {
+                    Some(idx)
+                }
+            } else {
+                Some(app.input_history.len() - 1)
+            };
+            if let Some(idx) = new_index {
+                app.input_history_index = Some(idx);
+                app.input = app.input_history[idx].clone();
+            }
+        }
+
+        assert_eq!(app.input_history_index, Some(1));
+        assert_eq!(app.input, "second message");
+    }
+
+    #[test]
+    fn down_arrow_returns_to_empty() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        app.input_history.push("first message".to_string());
+        app.input_history.push("second message".to_string());
+        app.input_history_index = Some(1);
+        app.input = "second message".to_string();
+
+        // Simulate pressing Down arrow at last item
+        if let Some(idx) = app.input_history_index {
+            if idx < app.input_history.len() - 1 {
+                let new_idx = idx + 1;
+                app.input_history_index = Some(new_idx);
+                app.input = app.input_history[new_idx].clone();
+            } else {
+                app.input_history_index = None;
+                app.input.clear();
+            }
+        }
+
+        assert_eq!(app.input_history_index, None);
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn up_arrow_does_nothing_with_empty_history() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        assert_eq!(app.input_history.len(), 0);
+        assert_eq!(app.input_history_index, None);
+
+        // Simulate pressing Up arrow with empty history
+        if !app.input_history.is_empty() {
+            let new_index = if let Some(idx) = app.input_history_index {
+                if idx > 0 {
+                    Some(idx - 1)
+                } else {
+                    Some(idx)
+                }
+            } else {
+                Some(app.input_history.len() - 1)
+            };
+            if let Some(idx) = new_index {
+                app.input_history_index = Some(idx);
+                app.input = app.input_history[idx].clone();
+            }
+        }
+
+        // Should remain unchanged
+        assert_eq!(app.input_history_index, None);
+        assert_eq!(app.input, "");
     }
 }
