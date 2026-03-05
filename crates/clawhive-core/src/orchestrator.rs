@@ -169,6 +169,9 @@ impl Orchestrator {
         tool_registry.register(Box::new(WebFetchTool::new()));
         tool_registry.register(Box::new(ImageTool::new()));
         tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
+        tool_registry.register(Box::new(crate::skill_tool::SkillTool::new(
+            workspace_root.join("skills"),
+        )));
         tool_registry.register(Box::new(crate::message_tool::MessageTool::new(
             bus_for_tools.clone(),
         )));
