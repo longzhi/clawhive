@@ -99,6 +99,81 @@ impl CodeApp {
         bottom_pane::file_search::filter_paths(&self.file_search_paths, query)
     }
 
+    pub(crate) fn execute_slash_command(&mut self, command_name: &str) {
+        match command_name {
+            "/compact" => {
+                self.history.push(HistoryCell::AssistantText {
+                    text: "Conversation compacted. Context freed.".to_string(),
+                    is_streaming: false,
+                });
+            }
+            "/context" => {
+                let info = format!(
+                    "**Context Window Usage:** {}%\n\n- Tokens used: {}\n- Estimated cost: ${:.2}",
+                    self.context_used_pct, self.token_count, self.cost_usd
+                );
+                self.history.push(HistoryCell::AssistantText {
+                    text: info,
+                    is_streaming: false,
+                });
+            }
+            "/cost" => {
+                let info = format!(
+                    "**Token Usage:** {}\n**Estimated Cost:** ${:.2}",
+                    self.token_count, self.cost_usd
+                );
+                self.history.push(HistoryCell::AssistantText {
+                    text: info,
+                    is_streaming: false,
+                });
+            }
+            "/diff" => {
+                self.history.push(HistoryCell::AssistantText {
+                    text: "No file changes tracked in this session.".to_string(),
+                    is_streaming: false,
+                });
+            }
+            "/clear" => {
+                self.history.clear();
+            }
+            "/model" => {
+                let info = format!(
+                    "**Agent:** {}\n**Model:** {}",
+                    self.agent_id, self.model_name
+                );
+                self.history.push(HistoryCell::AssistantText {
+                    text: info,
+                    is_streaming: false,
+                });
+            }
+            "/help" => {
+                let help = [
+                    "**Available Commands:**",
+                    "",
+                    "- `/compact` — Compress conversation history",
+                    "- `/context` — Show context window usage",
+                    "- `/cost` — Show token usage and cost",
+                    "- `/diff` — Show files changed this session",
+                    "- `/clear` — Clear screen (keep history)",
+                    "- `/model` — Show current model info",
+                    "- `/help` — Show this help",
+                    "- `/exit` — Exit the TUI",
+                ]
+                .join("\n");
+                self.history.push(HistoryCell::AssistantText {
+                    text: help,
+                    is_streaming: false,
+                });
+            }
+            "/exit" => {
+                self.should_quit = true;
+            }
+            _ => {}
+        }
+
+        self.history_scroll.ensure_bottom(self.history.len(), 20);
+    }
+
     pub(crate) fn handle_bus_message(&mut self, msg: BusMessage, connector_id: &str) {
         match msg {
             BusMessage::MessageAccepted { .. } => {
@@ -434,13 +509,19 @@ fn handle_key_event(
         return Ok(());
     }
 
-    if let BottomPaneState::SlashCommand(filter) = &mut app.bottom_pane {
+    let slash_action = if let BottomPaneState::SlashCommand(filter) = &mut app.bottom_pane {
+        let mut switch_to_input = false;
+        let mut execute = None;
+
         match key.code {
             KeyCode::Esc => {
-                app.bottom_pane = BottomPaneState::Input;
+                switch_to_input = true;
             }
             KeyCode::Enter => {
-                app.bottom_pane = BottomPaneState::Input;
+                let filtered = bottom_pane::slash_command::filter_commands(&filter.query);
+                let idx = filter.selected.min(filtered.len().saturating_sub(1));
+                execute = filtered.get(idx).map(|command| command.name.to_string());
+                switch_to_input = true;
             }
             KeyCode::Up => {
                 filter.selected = filter.selected.saturating_sub(1);
@@ -454,10 +535,23 @@ fn handle_key_event(
             KeyCode::Backspace => {
                 filter.query.pop();
                 if filter.query.is_empty() {
-                    app.bottom_pane = BottomPaneState::Input;
+                    switch_to_input = true;
                 }
             }
             _ => {}
+        }
+
+        Some((switch_to_input, execute))
+    } else {
+        None
+    };
+
+    if let Some((switch_to_input, execute)) = slash_action {
+        if switch_to_input {
+            app.bottom_pane = BottomPaneState::Input;
+        }
+        if let Some(command_name) = execute {
+            app.execute_slash_command(&command_name);
         }
         return Ok(());
     }
@@ -657,6 +751,72 @@ mod tests {
                 assert!(*is_streaming);
             }
             _ => panic!("expected streaming assistant cell"),
+        }
+    }
+
+    #[test]
+    fn execute_slash_help_adds_assistant_text() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+
+        app.execute_slash_command("/help");
+
+        assert!(matches!(
+            app.history.last(),
+            Some(HistoryCell::AssistantText { .. })
+        ));
+    }
+
+    #[test]
+    fn execute_slash_clear_clears_history() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        app.history.push(HistoryCell::AssistantText {
+            text: "existing".to_string(),
+            is_streaming: false,
+        });
+
+        app.execute_slash_command("/clear");
+
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn execute_slash_exit_sets_should_quit() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+
+        app.execute_slash_command("/exit");
+
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn execute_slash_model_shows_agent_and_model() {
+        let mut app = CodeApp::new("agent-x".to_string(), "model-y".to_string());
+
+        app.execute_slash_command("/model");
+
+        match app.history.last() {
+            Some(HistoryCell::AssistantText { text, .. }) => {
+                assert!(text.contains("agent-x"));
+                assert!(text.contains("model-y"));
+            }
+            _ => panic!("expected assistant text"),
+        }
+    }
+
+    #[test]
+    fn execute_slash_cost_shows_token_and_cost() {
+        let mut app = CodeApp::new("agent".to_string(), "model".to_string());
+        app.token_count = 42;
+        app.cost_usd = 1.23;
+
+        app.execute_slash_command("/cost");
+
+        match app.history.last() {
+            Some(HistoryCell::AssistantText { text, .. }) => {
+                assert!(text.contains("42"));
+                assert!(text.contains("1.23"));
+            }
+            _ => panic!("expected assistant text"),
         }
     }
 }
