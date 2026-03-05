@@ -67,6 +67,7 @@ export interface WebSearchConfig {
   enabled: boolean;
   provider: string | null;
   api_key: string | null;
+  has_api_key?: boolean;
 }
 
 export interface ConnectorConfig {

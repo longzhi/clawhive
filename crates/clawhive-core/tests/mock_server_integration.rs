@@ -450,6 +450,43 @@ async fn mock_server_includes_session_history() {
 }
 
 #[tokio::test]
+async fn expired_session_keeps_jsonl_history() {
+    let server = MockServer::start().await;
+    mount_success(&server, "first reply").await;
+    mount_success(&server, "second reply").await;
+
+    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let bus = EventBus::new(16);
+    let (orch, tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
+
+    let key_str = "telegram:tg_main:chat:1:user:1";
+
+    let _ = orch
+        .handle_inbound(test_inbound("first turn"), "clawhive-main")
+        .await
+        .unwrap();
+
+    let mut record = memory.get_session(key_str).await.unwrap().unwrap();
+    record.ttl_seconds = 0;
+    memory.upsert_session(record).await.unwrap();
+
+    let _ = orch
+        .handle_inbound(test_inbound("second turn"), "clawhive-main")
+        .await
+        .unwrap();
+
+    let agent_ws = tmp.path().join("workspaces").join("clawhive-main");
+    let reader = SessionReader::new(&agent_ws);
+    let messages = reader.load_recent_messages(key_str, 20).await.unwrap();
+    assert_eq!(
+        messages.len(),
+        4,
+        "Expired session should keep prior JSONL history instead of deleting it"
+    );
+}
+
+#[tokio::test]
 async fn mock_server_tool_use_loop() {
     let server = MockServer::start().await;
 

@@ -108,6 +108,8 @@ pub struct WebSearchConfig {
     pub enabled: bool,
     pub provider: Option<String>,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub has_api_key: bool,
 }
 
 async fn get_web_search(
@@ -120,10 +122,12 @@ async fn get_web_search(
         .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
 
     let ws = &val["tools"]["web_search"];
+    let raw_key = ws["api_key"].as_str();
     Ok(Json(WebSearchConfig {
         enabled: ws["enabled"].as_bool().unwrap_or(false),
         provider: ws["provider"].as_str().map(|s| s.to_string()),
-        api_key: ws["api_key"].as_str().map(|s| s.to_string()),
+        api_key: redact_api_key_for_response(raw_key),
+        has_api_key: has_configured_api_key(raw_key),
     }))
 }
 
@@ -155,7 +159,22 @@ async fn put_web_search(
         serde_yaml::to_string(&doc).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(config))
+    let response = WebSearchConfig {
+        enabled: config.enabled,
+        provider: config.provider,
+        api_key: redact_api_key_for_response(config.api_key.as_deref()),
+        has_api_key: has_configured_api_key(config.api_key.as_deref()),
+    };
+
+    Ok(Json(response))
+}
+
+fn redact_api_key_for_response(_api_key: Option<&str>) -> Option<String> {
+    None
+}
+
+fn has_configured_api_key(api_key: Option<&str>) -> bool {
+    api_key.map(|k| !k.trim().is_empty()).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -220,4 +239,19 @@ async fn restart(State(state): State<AppState>) -> Json<RestartResponse> {
     });
 
     Json(RestartResponse { ok: true })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_search_get_response_redacts_api_key() {
+        assert_eq!(redact_api_key_for_response(Some("abc123")), None);
+        assert_eq!(redact_api_key_for_response(Some("")), None);
+        assert_eq!(redact_api_key_for_response(None), None);
+        assert!(has_configured_api_key(Some("abc123")));
+        assert!(!has_configured_api_key(Some("")));
+        assert!(!has_configured_api_key(None));
+    }
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::{anyhow, Result};
 use clawhive_bus::BusPublisher;
@@ -73,6 +74,7 @@ pub struct Orchestrator {
     default_workspace_root: std::path::PathBuf,
     default_access_gate: Arc<AccessGate>,
     skill_install_state: Arc<SkillInstallState>,
+    user_language_prefs: RwLock<HashMap<String, ResponseLanguage>>,
 }
 
 impl Orchestrator {
@@ -221,6 +223,7 @@ impl Orchestrator {
             default_workspace_root: effective_project_root,
             default_access_gate,
             skill_install_state: Arc::new(SkillInstallState::new(900)),
+            user_language_prefs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -541,6 +544,89 @@ impl Orchestrator {
         }
     }
 
+    fn has_tool_registered(&self, name: &str) -> bool {
+        self.tool_registry
+            .tool_defs()
+            .iter()
+            .any(|tool| tool.name == name)
+    }
+
+    fn get_preferred_language(&self, user_scope: &str) -> Option<ResponseLanguage> {
+        self.user_language_prefs
+            .read()
+            .ok()
+            .and_then(|prefs| prefs.get(user_scope).copied())
+    }
+
+    fn set_preferred_language(&self, user_scope: &str, language: ResponseLanguage) {
+        if let Ok(mut prefs) = self.user_language_prefs.write() {
+            prefs.insert(user_scope.to_string(), language);
+        }
+    }
+
+    fn resolve_target_language(
+        &self,
+        inbound: &InboundMessage,
+        history_messages: &[SessionMessage],
+    ) -> Option<ResponseLanguage> {
+        if let Some(explicit) = detect_explicit_language_preference(&inbound.text) {
+            self.set_preferred_language(&inbound.user_scope, explicit);
+            return Some(explicit);
+        }
+
+        if let Some(current) = detect_text_language(&inbound.text) {
+            self.set_preferred_language(&inbound.user_scope, current);
+            return Some(current);
+        }
+
+        self.get_preferred_language(&inbound.user_scope)
+            .or_else(|| detect_recent_user_language(history_messages))
+    }
+
+    fn apply_language_policy_prompt(
+        &self,
+        system_prompt: &mut String,
+        target_language: Option<ResponseLanguage>,
+    ) {
+        if let Some(language) = target_language {
+            system_prompt.push_str(&language_policy_prompt(language));
+        }
+    }
+
+    fn log_language_guard(
+        &self,
+        agent_id: &str,
+        inbound: &InboundMessage,
+        reply_text: &str,
+        target_language: Option<ResponseLanguage>,
+        is_streaming: bool,
+    ) {
+        if is_language_guard_exempt(&inbound.text) {
+            return;
+        }
+        let Some(target) = target_language else {
+            return;
+        };
+        let Some(detected) = detect_response_language(reply_text) else {
+            return;
+        };
+        if detected == target {
+            return;
+        }
+
+        tracing::warn!(
+            agent_id = %agent_id,
+            channel_type = %inbound.channel_type,
+            connector_id = %inbound.connector_id,
+            conversation_scope = %inbound.conversation_scope,
+            user_scope = %inbound.user_scope,
+            target_language = %target.as_str(),
+            detected_language = %detected.as_str(),
+            is_streaming,
+            "language_guard: response language mismatch"
+        );
+    }
+
     fn build_runtime_system_prompt(
         &self,
         agent_id: &str,
@@ -788,11 +874,6 @@ impl Orchestrator {
         if session_result.expired_previous {
             self.try_fallback_summary(agent_id, &session_key, agent)
                 .await;
-            // Clear stale JSONL so expired sessions start fresh
-            let _ = self
-                .session_writer_for(agent_id)
-                .clear_session(&session_key.0)
-                .await;
         }
 
         let inbound_text = inbound.text.clone();
@@ -866,7 +947,7 @@ impl Orchestrator {
             .await?;
 
         // Build system prompt with memory context injected (not fake dialogue)
-        let system_prompt = if memory_context.is_empty() {
+        let mut system_prompt = if memory_context.is_empty() {
             self.build_runtime_system_prompt(agent_id, &agent.model_policy.primary, system_prompt)
         } else {
             let base_prompt = self.build_runtime_system_prompt(
@@ -888,6 +969,9 @@ impl Orchestrator {
                 Vec::new()
             }
         };
+
+        let target_language = self.resolve_target_language(&inbound, &history_messages);
+        self.apply_language_policy_prompt(&mut system_prompt, target_language);
 
         // Build messages from history (no fake memory dialogue)
         let mut messages = build_messages_from_history(&history_messages);
@@ -921,6 +1005,14 @@ impl Orchestrator {
             }
         }
 
+        let must_use_web_search =
+            is_explicit_web_search_request(&inbound.text) && self.has_tool_registered("web_search");
+        if must_use_web_search {
+            system_prompt.push_str(
+                "\n\n## Tool Requirement\nThe user explicitly requested web search. You MUST call the web_search tool before your final answer.",
+            );
+        }
+
         let allowed = Self::forced_allowed_tools(
             forced_skills.as_deref(),
             agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
@@ -949,6 +1041,7 @@ impl Orchestrator {
                 agent.security.clone(),
                 private_network_overrides,
                 source_info,
+                must_use_web_search,
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
@@ -965,6 +1058,8 @@ impl Orchestrator {
                 "handle_inbound: final reply is empty"
             );
         }
+
+        self.log_language_guard(agent_id, &inbound, &reply_text, target_language, false);
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
@@ -1029,11 +1124,6 @@ impl Orchestrator {
         if session_result.expired_previous {
             self.try_fallback_summary(agent_id, &session_key, agent)
                 .await;
-            // Clear stale JSONL so expired sessions start fresh
-            let _ = self
-                .session_writer_for(agent_id)
-                .clear_session(&session_key.0)
-                .await;
         }
 
         let system_prompt = self
@@ -1094,7 +1184,7 @@ impl Orchestrator {
             .await?;
 
         // Build system prompt with memory context injected (stream variant)
-        let system_prompt = if memory_context.is_empty() {
+        let mut system_prompt = if memory_context.is_empty() {
             self.build_runtime_system_prompt(agent_id, &agent.model_policy.primary, system_prompt)
         } else {
             let base_prompt = self.build_runtime_system_prompt(
@@ -1116,6 +1206,9 @@ impl Orchestrator {
                 Vec::new()
             }
         };
+
+        let target_language = self.resolve_target_language(&inbound, &history_messages);
+        self.apply_language_policy_prompt(&mut system_prompt, target_language);
 
         // Build messages from history (no fake memory dialogue, stream variant)
         let mut messages = build_messages_from_history(&history_messages);
@@ -1149,6 +1242,14 @@ impl Orchestrator {
             }
         }
 
+        let must_use_web_search =
+            is_explicit_web_search_request(&inbound.text) && self.has_tool_registered("web_search");
+        if must_use_web_search {
+            system_prompt.push_str(
+                "\n\n## Tool Requirement\nThe user explicitly requested web search. You MUST call the web_search tool before your final answer.",
+            );
+        }
+
         let allowed_stream = Self::forced_allowed_tools(
             forced_skills.as_deref(),
             agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
@@ -1177,11 +1278,20 @@ impl Orchestrator {
                 agent.security.clone(),
                 private_network_overrides_stream,
                 source_info_stream,
+                must_use_web_search,
             )
             .await?;
 
         let trace_id = inbound.trace_id;
         let bus = self.bus.clone();
+        let agent_id_owned = agent_id.to_string();
+        let channel_type = inbound.channel_type.clone();
+        let connector_id = inbound.connector_id.clone();
+        let conversation_scope = inbound.conversation_scope.clone();
+        let user_scope = inbound.user_scope.clone();
+        let inbound_text_for_guard = inbound.text.clone();
+        let target_language_stream = target_language;
+        let mut stream_accumulator = String::new();
 
         let stream = self
             .router
@@ -1196,6 +1306,31 @@ impl Orchestrator {
 
         let mapped = tokio_stream::StreamExt::map(stream, move |chunk_result| {
             if let Ok(ref chunk) = chunk_result {
+                if !chunk.delta.is_empty() {
+                    stream_accumulator.push_str(&chunk.delta);
+                }
+
+                if chunk.is_final && !is_language_guard_exempt(&inbound_text_for_guard) {
+                    if let (Some(target), Some(detected)) = (
+                        target_language_stream,
+                        detect_response_language(&stream_accumulator),
+                    ) {
+                        if detected != target {
+                            tracing::warn!(
+                                agent_id = %agent_id_owned,
+                                channel_type = %channel_type,
+                                connector_id = %connector_id,
+                                conversation_scope = %conversation_scope,
+                                user_scope = %user_scope,
+                                target_language = %target.as_str(),
+                                detected_language = %detected.as_str(),
+                                is_streaming = true,
+                                "language_guard: response language mismatch"
+                            );
+                        }
+                    }
+                }
+
                 let bus = bus.clone();
                 let msg = BusMessage::StreamDelta {
                     trace_id,
@@ -1234,6 +1369,7 @@ impl Orchestrator {
         security_mode: SecurityMode,
         private_network_overrides: Vec<String>,
         source_info: Option<(String, String, String, String)>, // (channel_type, connector_id, conversation_scope, user_scope)
+        must_use_web_search: bool,
     ) -> Result<(clawhive_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
         let tool_defs: Vec<_> = match allowed_tools {
@@ -1247,8 +1383,21 @@ impl Orchestrator {
         };
         let max_iterations = 10;
         let mut continuation_injected = false;
+        let mut web_search_reminder_injected = false;
+        let mut web_search_called = false;
+        let loop_started = std::time::Instant::now();
 
-        for _iteration in 0..max_iterations {
+        for iteration in 0..max_iterations {
+            let iteration_no = iteration + 1;
+            tracing::debug!(
+                agent_id = %agent_id,
+                iteration = iteration_no,
+                max_iterations,
+                message_count = messages.len(),
+                tool_def_count = tool_defs.len(),
+                "tool_use_loop: iteration start"
+            );
+
             // Check if we need to compact context
             let (compacted_messages, compaction_result) = self
                 .context_manager
@@ -1272,9 +1421,23 @@ impl Orchestrator {
                 tools: tool_defs.clone(),
             };
 
+            let llm_started = std::time::Instant::now();
             let resp = self.router.chat_with_tools(primary, fallbacks, req).await?;
+            let llm_round_ms = llm_started.elapsed().as_millis() as u64;
+
+            if is_slow_latency_ms(llm_round_ms, SLOW_LLM_ROUND_WARN_MS) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    llm_round_ms,
+                    "tool_use_loop: slow LLM round"
+                );
+            }
 
             tracing::debug!(
+                agent_id = %agent_id,
+                iteration = iteration_no,
+                llm_round_ms,
                 text_len = resp.text.len(),
                 content_blocks = resp.content.len(),
                 stop_reason = ?resp.stop_reason,
@@ -1295,6 +1458,29 @@ impl Orchestrator {
                 .collect();
 
             if tool_uses.is_empty() || resp.stop_reason.as_deref() != Some("tool_use") {
+                if should_inject_web_search_reminder(
+                    must_use_web_search,
+                    web_search_reminder_injected,
+                    web_search_called,
+                    tool_uses.len(),
+                ) {
+                    web_search_reminder_injected = true;
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        iteration = iteration_no,
+                        llm_round_ms,
+                        "tool_use_loop: forcing web_search usage reminder"
+                    );
+                    messages.push(LlmMessage {
+                        role: "assistant".into(),
+                        content: resp.content.clone(),
+                    });
+                    messages.push(LlmMessage::user(
+                        "You must call the web_search tool now and then provide the answer based on the tool result.",
+                    ));
+                    continue;
+                }
+
                 // Continuation detection: if the LLM just acknowledged the user's
                 // confirmation without calling any tools, nudge it to continue.
                 // This prevents the "收到" + stop pattern.
@@ -1304,6 +1490,9 @@ impl Orchestrator {
                 {
                     continuation_injected = true;
                     tracing::info!(
+                        agent_id = %agent_id,
+                        iteration = iteration_no,
+                        llm_round_ms,
                         text_len = resp.text.len(),
                         "detected acknowledgment-without-action, injecting continuation"
                     );
@@ -1316,13 +1505,36 @@ impl Orchestrator {
                     ));
                     continue;
                 }
+
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    llm_round_ms,
+                    total_loop_ms = loop_started.elapsed().as_millis() as u64,
+                    stop_reason = ?resp.stop_reason,
+                    "tool_use_loop: returning final response"
+                );
                 return Ok((resp, messages));
             }
+
+            let tool_names: Vec<String> =
+                tool_uses.iter().map(|(_, name, _)| name.clone()).collect();
+            if tool_names.iter().any(|name| name == "web_search") {
+                web_search_called = true;
+            }
+            tracing::debug!(
+                agent_id = %agent_id,
+                iteration = iteration_no,
+                tool_use_count = tool_names.len(),
+                tool_names = ?tool_names,
+                "tool_use_loop: tool calls requested"
+            );
 
             messages.push(LlmMessage {
                 role: "assistant".into(),
                 content: resp.content.clone(),
             });
+            web_search_reminder_injected = false;
 
             let recent_messages = collect_recent_messages(&messages, 20);
             // Build tool context based on whether we have skill permissions
@@ -1353,27 +1565,81 @@ impl Orchestrator {
                 .map(|(id, name, input)| {
                     let ctx = ctx.clone();
                     let agent_id = agent_id.to_string();
+                    let tool_name = name.clone();
                     async move {
+                        let input_bytes = input.to_string().len();
+                        let tool_started = std::time::Instant::now();
                         match self
                             .execute_tool_for_agent(&agent_id, &name, input, &ctx)
                             .await
                         {
-                            Ok(output) => ContentBlock::ToolResult {
-                                tool_use_id: id,
-                                content: output.content,
-                                is_error: output.is_error,
-                            },
-                            Err(e) => ContentBlock::ToolResult {
-                                tool_use_id: id,
-                                content: format!("Tool execution error: {e}"),
-                                is_error: true,
-                            },
+                            Ok(output) => {
+                                let duration_ms = tool_started.elapsed().as_millis() as u64;
+                                if is_slow_latency_ms(duration_ms, SLOW_TOOL_EXEC_WARN_MS) {
+                                    tracing::warn!(
+                                        agent_id = %agent_id,
+                                        tool_name = %tool_name,
+                                        duration_ms,
+                                        input_bytes,
+                                        is_error = output.is_error,
+                                        "tool_use_loop: slow tool execution"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        agent_id = %agent_id,
+                                        tool_name = %tool_name,
+                                        duration_ms,
+                                        input_bytes,
+                                        is_error = output.is_error,
+                                        "tool_use_loop: tool execution completed"
+                                    );
+                                }
+                                ContentBlock::ToolResult {
+                                    tool_use_id: id,
+                                    content: output.content,
+                                    is_error: output.is_error,
+                                }
+                            }
+                            Err(e) => {
+                                let duration_ms = tool_started.elapsed().as_millis() as u64;
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    tool_name = %tool_name,
+                                    duration_ms,
+                                    input_bytes,
+                                    error = %e,
+                                    "tool_use_loop: tool execution failed"
+                                );
+                                ContentBlock::ToolResult {
+                                    tool_use_id: id,
+                                    content: format!("Tool execution error: {e}"),
+                                    is_error: true,
+                                }
+                            }
                         }
                     }
                 })
                 .collect();
 
+            let tools_started = std::time::Instant::now();
             let tool_results = futures::future::join_all(tool_futures).await;
+            let tools_round_ms = tools_started.elapsed().as_millis() as u64;
+
+            if is_slow_latency_ms(tools_round_ms, SLOW_LLM_ROUND_WARN_MS) {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    tools_round_ms,
+                    "tool_use_loop: slow tool result round"
+                );
+            } else {
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    tools_round_ms,
+                    "tool_use_loop: tool results collected"
+                );
+            }
 
             messages.push(LlmMessage {
                 role: "user".into(),
@@ -1384,7 +1650,12 @@ impl Orchestrator {
 
         // Loop exhausted — ask the LLM for a final answer without tools
         // so the user gets a response instead of an opaque error.
-        tracing::warn!("tool_use_loop exhausted {max_iterations} iterations, requesting final answer without tools");
+        tracing::warn!(
+            agent_id = %agent_id,
+            max_iterations,
+            total_loop_ms = loop_started.elapsed().as_millis() as u64,
+            "tool_use_loop exhausted iterations, requesting final answer without tools"
+        );
         let final_req = LlmRequest {
             model: primary.into(),
             system: system.clone(),
@@ -1559,6 +1830,7 @@ impl Orchestrator {
                     .map(|s| s.dangerous_allow_private.clone())
                     .unwrap_or_default(),
                 source_info,
+                false,
             )
             .await?;
 
@@ -1844,6 +2116,184 @@ fn filter_no_reply(text: &str) -> String {
         .trim();
 
     text.to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseLanguage {
+    Chinese,
+    English,
+}
+
+impl ResponseLanguage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Chinese => "zh",
+            Self::English => "en",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Chinese => "Chinese",
+            Self::English => "English",
+        }
+    }
+}
+
+fn detect_explicit_language_preference(text: &str) -> Option<ResponseLanguage> {
+    let lower = text.to_ascii_lowercase();
+    let wants_chinese = text.contains("用中文")
+        || text.contains("说中文")
+        || text.contains("中文回复")
+        || text.contains("回复中文")
+        || lower.contains("reply in chinese")
+        || lower.contains("respond in chinese")
+        || lower.contains("speak chinese")
+        || lower.contains("in chinese");
+    let wants_english = text.contains("用英文")
+        || text.contains("说英文")
+        || text.contains("英文回复")
+        || text.contains("回复英文")
+        || lower.contains("reply in english")
+        || lower.contains("respond in english")
+        || lower.contains("speak english")
+        || lower.contains("in english");
+
+    match (wants_chinese, wants_english) {
+        (true, false) => Some(ResponseLanguage::Chinese),
+        (false, true) => Some(ResponseLanguage::English),
+        _ => None,
+    }
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+    )
+}
+
+fn detect_text_language(text: &str) -> Option<ResponseLanguage> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let cjk_count = trimmed.chars().filter(|ch| is_cjk_char(*ch)).count();
+    if cjk_count >= 1 {
+        return Some(ResponseLanguage::Chinese);
+    }
+
+    let ascii_letters = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let alpha_words = trimmed
+        .split_whitespace()
+        .filter(|word| word.chars().all(|ch| ch.is_ascii_alphabetic()))
+        .count();
+    if ascii_letters >= 6 || alpha_words >= 2 {
+        return Some(ResponseLanguage::English);
+    }
+
+    None
+}
+
+fn detect_recent_user_language(history_messages: &[SessionMessage]) -> Option<ResponseLanguage> {
+    history_messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == "user")
+        .find_map(|message| detect_text_language(&message.content))
+}
+
+fn language_policy_prompt(target_language: ResponseLanguage) -> String {
+    format!(
+        "\n\n## Language Policy\nRespond in {} by default, matching the user's latest message language. Keep code blocks, file paths, command names, and URLs in their original form.",
+        target_language.display_name()
+    )
+}
+
+fn is_language_guard_exempt(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    user_text.contains("翻译")
+        || user_text.contains("双语")
+        || user_text.contains("中英")
+        || lower.contains("translate")
+        || lower.contains("translation")
+        || lower.contains("bilingual")
+}
+
+fn normalize_text_for_language_detection(text: &str) -> String {
+    let mut in_code_fence = false;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence {
+            continue;
+        }
+        lines.push(line.replace('`', " "));
+    }
+
+    let joined = lines.join("\n");
+    joined
+        .split_whitespace()
+        .filter(|token| {
+            !token.starts_with("http://")
+                && !token.starts_with("https://")
+                && !token.starts_with("www.")
+                && !token.contains("://")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn detect_response_language(text: &str) -> Option<ResponseLanguage> {
+    let normalized = normalize_text_for_language_detection(text);
+    detect_text_language(&normalized)
+}
+
+const SLOW_LLM_ROUND_WARN_MS: u64 = 30_000;
+const SLOW_TOOL_EXEC_WARN_MS: u64 = 10_000;
+
+fn is_slow_latency_ms(duration_ms: u64, threshold_ms: u64) -> bool {
+    duration_ms >= threshold_ms
+}
+
+fn is_explicit_web_search_request(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("web_search")
+        || lower.contains("web search")
+        || trimmed.contains("联网搜索")
+        || trimmed.contains("上网搜索")
+        || trimmed.contains("实时搜索")
+}
+
+fn should_inject_web_search_reminder(
+    must_use_web_search: bool,
+    web_search_reminder_injected: bool,
+    web_search_called: bool,
+    tool_use_count: usize,
+) -> bool {
+    must_use_web_search
+        && !web_search_reminder_injected
+        && !web_search_called
+        && tool_use_count == 0
 }
 
 fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {
@@ -2261,5 +2711,58 @@ Body"#,
         assert!(!Orchestrator::should_inject_continuation(
             &messages, response_2
         ));
+    }
+
+    #[test]
+    fn slow_latency_threshold_detects_warn_boundary() {
+        assert!(!is_slow_latency_ms(9_999, 10_000));
+        assert!(is_slow_latency_ms(10_000, 10_000));
+        assert!(is_slow_latency_ms(25_000, 10_000));
+    }
+
+    #[test]
+    fn explicit_web_search_request_detection() {
+        assert!(is_explicit_web_search_request(
+            "请使用 web_search 工具搜索 OpenAI 最新新闻"
+        ));
+        assert!(is_explicit_web_search_request(
+            "please use web search tool for this"
+        ));
+        assert!(!is_explicit_web_search_request("你觉得这个功能怎么样"));
+    }
+
+    #[test]
+    fn web_search_reminder_injection_predicate() {
+        assert!(should_inject_web_search_reminder(true, false, false, 0));
+        assert!(!should_inject_web_search_reminder(true, true, false, 0));
+        assert!(!should_inject_web_search_reminder(false, false, false, 0));
+        assert!(!should_inject_web_search_reminder(true, false, true, 0));
+        assert!(!should_inject_web_search_reminder(true, false, false, 1));
+    }
+
+    #[test]
+    fn detect_text_language_handles_cjk_and_english() {
+        assert_eq!(
+            detect_text_language("请你用中文回答我"),
+            Some(ResponseLanguage::Chinese)
+        );
+        assert_eq!(
+            detect_text_language("Please answer in English"),
+            Some(ResponseLanguage::English)
+        );
+    }
+
+    #[test]
+    fn detect_text_language_returns_none_for_ambiguous_short_input() {
+        assert_eq!(detect_text_language("ok"), None);
+        assert_eq!(detect_text_language("1"), None);
+    }
+
+    #[test]
+    fn language_policy_prompt_includes_target_language() {
+        let zh = language_policy_prompt(ResponseLanguage::Chinese);
+        assert!(zh.contains("Chinese"));
+        let en = language_policy_prompt(ResponseLanguage::English);
+        assert!(en.contains("English"));
     }
 }
