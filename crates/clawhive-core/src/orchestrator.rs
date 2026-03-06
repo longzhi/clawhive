@@ -1692,6 +1692,25 @@ impl Orchestrator {
             return false;
         };
 
+        let last_user = messages.iter().rev().find(|m| m.role == "user");
+        let Some(user_msg) = last_user else {
+            return false;
+        };
+
+        let user_text: String = user_msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        if !Self::is_confirmation_turn(&user_text) {
+            return false;
+        }
+
         // Extract assistant text
         let assistant_text: String = assistant_msg
             .content
@@ -1768,6 +1787,98 @@ impl Orchestrator {
             || response_text.chars().count() < 80;
 
         looks_like_ack
+    }
+
+    fn is_confirmation_turn(text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        if Self::is_greeting_turn(trimmed) {
+            return false;
+        }
+
+        let lower = trimmed.to_lowercase();
+        let short_enough = trimmed.chars().count() <= 32;
+        if !short_enough {
+            return false;
+        }
+
+        let exact_confirmations = [
+            // Chinese
+            "好",
+            "好的",
+            "嗯",
+            "行",
+            "可以",
+            "继续",
+            "是",
+            "同意",
+            "确认",
+            "要",
+            "要的",
+            "没问题",
+            "继续吧",
+            // English
+            "ok",
+            "okay",
+            "yes",
+            "y",
+            "sure",
+            "go ahead",
+            "continue",
+            "proceed",
+            "do it",
+        ];
+        if exact_confirmations
+            .iter()
+            .any(|candidate| lower == *candidate)
+        {
+            return true;
+        }
+
+        let confirmation_keywords = [
+            "继续",
+            "往下",
+            "下一步",
+            "同意",
+            "确认",
+            "可以",
+            "没问题",
+            "go ahead",
+            "continue",
+            "proceed",
+        ];
+        confirmation_keywords
+            .iter()
+            .any(|keyword| lower.contains(keyword))
+    }
+
+    fn is_greeting_turn(text: &str) -> bool {
+        let lower = text.trim().to_lowercase();
+        let greetings = [
+            "早上好",
+            "早安",
+            "中午好",
+            "下午好",
+            "晚上好",
+            "你好",
+            "嗨",
+            "hello",
+            "hi",
+            "good morning",
+            "good afternoon",
+            "good evening",
+        ];
+
+        greetings.iter().any(|g| {
+            lower == *g
+                || lower.starts_with(&format!("{g}，"))
+                || lower.starts_with(&format!("{g},"))
+                || lower.starts_with(&format!("{g}！"))
+                || lower.starts_with(&format!("{g}!"))
+        })
     }
 
     /// Handle the flow after a /reset or /new command.
@@ -2554,6 +2665,31 @@ Body"#,
 
         // No question/confirmation in assistant message, should not inject
         let response_text = "OK";
+
+        assert!(!Orchestrator::should_inject_continuation(
+            &messages,
+            response_text
+        ));
+    }
+
+    #[test]
+    fn should_inject_continuation_ignores_greeting_turns() {
+        let messages = vec![
+            LlmMessage {
+                role: "assistant".into(),
+                content: vec![ContentBlock::Text {
+                    text: "要不要我继续给你下一步？".into(),
+                }],
+            },
+            LlmMessage {
+                role: "user".into(),
+                content: vec![ContentBlock::Text {
+                    text: "早上好".into(),
+                }],
+            },
+        ];
+
+        let response_text = "好的，早上好。";
 
         assert!(!Orchestrator::should_inject_continuation(
             &messages,
