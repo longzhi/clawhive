@@ -22,13 +22,17 @@ impl ToolExecutor for SkillTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "skill".into(),
-            description: "Read the full instructions for an available skill. Pass the skill name from the Available Skills list in the system prompt to get its complete SKILL.md content.".into(),
+            description: "Read a skill's instructions or reference files. Pass the skill name to get its SKILL.md content. Optionally pass a file path to read a specific reference file within the skill.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Name of the skill to read (from Available Skills list)"
+                        "description": "Name of the skill (from Available Skills list)"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Optional: path to a reference file within the skill (e.g. 'references/commands.md'). If omitted, returns the main SKILL.md content."
                     }
                 },
                 "required": ["name"]
@@ -38,6 +42,10 @@ impl ToolExecutor for SkillTool {
 
     async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let name = input["name"].as_str().unwrap_or("").trim();
+        let file = input["file"]
+            .as_str()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
 
         if name.is_empty() {
             return Ok(ToolOutput {
@@ -48,10 +56,46 @@ impl ToolExecutor for SkillTool {
 
         let registry = SkillRegistry::load_from_dir(&self.skills_root).unwrap_or_default();
         match registry.get(name) {
-            Some(skill) => Ok(ToolOutput {
-                content: skill.content.clone(),
-                is_error: false,
-            }),
+            Some(skill) => {
+                if let Some(file_path) = file {
+                    match skill.read_reference_file(file_path) {
+                        Ok(content) => Ok(ToolOutput {
+                            content,
+                            is_error: false,
+                        }),
+                        Err(e) => {
+                            let available = skill.list_reference_files();
+                            let list = if available.is_empty() {
+                                "This skill has no reference files.".to_string()
+                            } else {
+                                format!("Available files: {}", available.join(", "))
+                            };
+                            Ok(ToolOutput {
+                                content: format!("Error reading '{file_path}': {e}\n{list}"),
+                                is_error: true,
+                            })
+                        }
+                    }
+                } else {
+                    let refs = skill.list_reference_files();
+                    let content = if refs.is_empty() {
+                        skill.content.clone()
+                    } else {
+                        format!(
+                            "{}\n\n---\n**Reference files available** (use `skill` tool with `file` parameter to read):\n{}",
+                            skill.content,
+                            refs.iter()
+                                .map(|f| format!("- `{f}`"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        )
+                    };
+                    Ok(ToolOutput {
+                        content,
+                        is_error: false,
+                    })
+                }
+            }
             None => {
                 let available: Vec<_> = registry
                     .available()
@@ -123,5 +167,51 @@ mod tests {
         assert!(def.description.contains("skill"));
         let required = def.input_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "name"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_file_returns_reference_content() {
+        let dir = create_test_skills_dir();
+        let refs_dir = dir.path().join("weather/references");
+        fs::create_dir_all(&refs_dir).unwrap();
+        fs::write(refs_dir.join("api.md"), "# Weather API\nEndpoint docs here").unwrap();
+
+        let tool = SkillTool::new(dir.path().to_path_buf());
+        let ctx = ToolContext::builtin();
+        let input = serde_json::json!({"name": "weather", "file": "references/api.md"});
+        let output = tool.execute(input, &ctx).await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("# Weather API"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_missing_file_lists_available() {
+        let dir = create_test_skills_dir();
+        let refs_dir = dir.path().join("weather/references");
+        fs::create_dir_all(&refs_dir).unwrap();
+        fs::write(refs_dir.join("api.md"), "docs").unwrap();
+
+        let tool = SkillTool::new(dir.path().to_path_buf());
+        let ctx = ToolContext::builtin();
+        let input = serde_json::json!({"name": "weather", "file": "nonexistent.md"});
+        let output = tool.execute(input, &ctx).await.unwrap();
+        assert!(output.is_error);
+        assert!(output.content.contains("references/api.md"));
+    }
+
+    #[tokio::test]
+    async fn execute_without_file_mentions_available_references() {
+        let dir = create_test_skills_dir();
+        let refs_dir = dir.path().join("weather/references");
+        fs::create_dir_all(&refs_dir).unwrap();
+        fs::write(refs_dir.join("api.md"), "docs").unwrap();
+
+        let tool = SkillTool::new(dir.path().to_path_buf());
+        let ctx = ToolContext::builtin();
+        let input = serde_json::json!({"name": "weather"});
+        let output = tool.execute(input, &ctx).await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("Reference files available"));
+        assert!(output.content.contains("references/api.md"));
     }
 }

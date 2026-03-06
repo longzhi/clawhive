@@ -124,6 +124,72 @@ impl Skill {
     pub fn corral_permissions(&self) -> Option<corral_core::Permissions> {
         self.permissions.as_ref().map(|p| p.to_corral_permissions())
     }
+
+    /// Read a reference file relative to this skill's directory.
+    /// Only allows safe relative paths within the skill directory.
+    pub fn read_reference_file(&self, relative_path: &str) -> Result<String> {
+        let rel = Path::new(relative_path);
+
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!("invalid reference file path: must be relative without '..'");
+        }
+
+        let skill_dir = self
+            .path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("skill has no parent directory"))?;
+        let target = skill_dir.join(rel);
+
+        let canonical_dir = skill_dir
+            .canonicalize()
+            .with_context(|| format!("canonicalizing skill dir {}", skill_dir.display()))?;
+        let canonical_target = target
+            .canonicalize()
+            .with_context(|| format!("reference file not found: {relative_path}"))?;
+        if !canonical_target.starts_with(&canonical_dir) {
+            anyhow::bail!("reference file path escapes skill directory");
+        }
+
+        std::fs::read_to_string(&canonical_target)
+            .with_context(|| format!("reading reference file: {relative_path}"))
+    }
+
+    /// List available reference files in this skill's directory
+    /// (excluding SKILL.md and hidden files).
+    pub fn list_reference_files(&self) -> Vec<String> {
+        let skill_dir = match self.path.parent() {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+        let mut files = Vec::new();
+        collect_reference_files(skill_dir, skill_dir, &mut files);
+        files.sort();
+        files
+    }
+}
+
+fn collect_reference_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_reference_files(root, &path, out);
+        } else if name != "SKILL.md" {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
 }
 
 fn bin_exists(name: &str) -> bool {
@@ -494,5 +560,85 @@ Body"#,
         let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
         let perms = registry.merged_permissions().unwrap();
         assert_eq!(perms.exec.iter().filter(|e| *e == "sh").count(), 1);
+    }
+
+    #[test]
+    fn read_reference_file_returns_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nContent",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("references/commands.md"),
+            "# Commands\nSome commands here",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let skill = registry.get("my-skill").unwrap();
+        let content = skill.read_reference_file("references/commands.md").unwrap();
+        assert!(content.contains("# Commands"));
+        assert!(content.contains("Some commands here"));
+    }
+
+    #[test]
+    fn read_reference_file_blocks_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nContent",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let skill = registry.get("my-skill").unwrap();
+        assert!(skill.read_reference_file("../../etc/passwd").is_err());
+        assert!(skill.read_reference_file("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn read_reference_file_returns_error_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nContent",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let skill = registry.get("my-skill").unwrap();
+        assert!(skill.read_reference_file("nonexistent.md").is_err());
+    }
+
+    #[test]
+    fn list_reference_files_finds_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nContent",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("references/commands.md"), "commands").unwrap();
+        fs::write(skill_dir.join("references/selectors.md"), "selectors").unwrap();
+        fs::write(skill_dir.join("scripts/fetch.sh"), "#!/bin/bash").unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let skill = registry.get("my-skill").unwrap();
+        let files = skill.list_reference_files();
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&"references/commands.md".to_string()));
+        assert!(files.contains(&"references/selectors.md".to_string()));
+        assert!(files.contains(&"scripts/fetch.sh".to_string()));
     }
 }
