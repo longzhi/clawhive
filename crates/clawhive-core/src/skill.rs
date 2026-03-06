@@ -192,7 +192,7 @@ fn collect_reference_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     }
 }
 
-fn bin_exists(name: &str) -> bool {
+pub fn bin_exists(name: &str) -> bool {
     std::process::Command::new("which")
         .arg(name)
         .stdout(std::process::Stdio::null())

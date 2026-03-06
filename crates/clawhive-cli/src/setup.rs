@@ -192,9 +192,14 @@ fn build_action_labels(state: &ConfigState) -> Vec<(SetupAction, String)> {
         (
             SetupAction::ConfigureTools,
             format!(
-                "{} Configure Tools (web_search: {})",
+                "{} Configure Tools (web_search: {}, browser: {})",
                 ARROW,
                 if state.tools.web_search_enabled {
+                    "on"
+                } else {
+                    "off"
+                },
+                if state.tools.actionbook_enabled {
                     "on"
                 } else {
                     "off"
@@ -474,6 +479,7 @@ fn handle_add_channel(
 }
 
 fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<()> {
+    let term = Term::stdout();
     let main_path = config_root.join("config/main.yaml");
 
     let enable_ws = Confirm::with_theme(theme)
@@ -522,6 +528,66 @@ fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<(
     let mut tools_map = serde_yaml::Mapping::new();
     tools_map.insert("web_search".into(), serde_yaml::Value::Mapping(ws_map));
     doc["tools"] = serde_yaml::Value::Mapping(tools_map);
+
+    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+
+    let ab_installed = clawhive_core::bin_exists("actionbook");
+    let ab_prompt = if ab_installed {
+        "Enable browser automation? (actionbook is installed)"
+    } else {
+        "Enable browser automation? (actionbook NOT installed)"
+    };
+
+    let enable_ab = Confirm::with_theme(theme)
+        .with_prompt(ab_prompt)
+        .default(ab_installed)
+        .interact()?;
+
+    if enable_ab && !ab_installed {
+        term.write_line("")?;
+        term.write_line(&format!(
+            "  {} Actionbook CLI is required for browser automation.",
+            ARROW
+        ))?;
+        term.write_line("  Install with one of:")?;
+        term.write_line("")?;
+        term.write_line("    curl -fsSL https://actionbook.dev/install.sh | bash")?;
+        term.write_line("    npm install -g @actionbookdev/cli")?;
+        term.write_line("")?;
+
+        let install_now = Confirm::with_theme(theme)
+            .with_prompt("Install actionbook now? (uses curl)")
+            .default(true)
+            .interact()?;
+
+        if install_now {
+            term.write_line("  Installing actionbook...")?;
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("curl -fsSL https://actionbook.dev/install.sh | bash")
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    print_done(&term, "actionbook installed successfully.");
+                }
+                _ => {
+                    term.write_line(&format!(
+                        "  {} Installation failed. Install manually later.",
+                        ARROW
+                    ))?;
+                }
+            }
+        }
+    }
+
+    let content = fs::read_to_string(&main_path)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
+    if !doc["tools"].is_mapping() {
+        doc["tools"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let mut ab_map = serde_yaml::Mapping::new();
+    ab_map.insert("enabled".into(), serde_yaml::Value::Bool(enable_ab));
+    doc["tools"]["actionbook"] = serde_yaml::Value::Mapping(ab_map);
 
     fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
     print_done(
@@ -1494,6 +1560,8 @@ mod tests {
             tools: crate::setup_scan::ToolsState {
                 web_search_enabled: false,
                 web_search_provider: None,
+                actionbook_enabled: false,
+                actionbook_installed: false,
             },
         });
 
@@ -1505,6 +1573,7 @@ mod tests {
         assert!(matches!(labels[4].0, SetupAction::Modify));
         assert!(matches!(labels[5].0, SetupAction::Remove));
         assert!(matches!(labels[6].0, SetupAction::Done));
+        assert!(labels[3].1.contains("browser:"));
     }
 
     #[test]

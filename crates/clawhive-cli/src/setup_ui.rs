@@ -105,6 +105,17 @@ pub fn render_dashboard(term: &Term, state: &ConfigState) {
         let _ = term.write_line("   web_search: off");
     }
 
+    let ab_status = if state.tools.actionbook_enabled {
+        if state.tools.actionbook_installed {
+            "on (installed)"
+        } else {
+            "on (binary not found!)"
+        }
+    } else {
+        "off"
+    };
+    let _ = term.write_line(&format!("   browser_automation: {ab_status}"));
+
     let routing_marker = if state.default_agent.is_some() {
         CHECKMARK
     } else {

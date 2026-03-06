@@ -33,6 +33,8 @@ pub struct ChannelInfo {
 pub struct ToolsState {
     pub web_search_enabled: bool,
     pub web_search_provider: Option<String>,
+    pub actionbook_enabled: bool,
+    pub actionbook_installed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +149,8 @@ fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>
     let mut tools = ToolsState {
         web_search_enabled: false,
         web_search_provider: None,
+        actionbook_enabled: false,
+        actionbook_installed: clawhive_core::bin_exists("actionbook"),
     };
 
     let main_path = config_dir.join("main.yaml");
@@ -173,6 +177,12 @@ fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>
             if let Some(ws) = &main.tools.web_search {
                 tools.web_search_enabled = ws.enabled;
                 tools.web_search_provider = ws.provider.clone();
+            }
+
+            if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                tools.actionbook_enabled = val["tools"]["actionbook"]["enabled"]
+                    .as_bool()
+                    .unwrap_or(false);
             }
         }
     }
@@ -303,5 +313,22 @@ mod tests {
         let state = scan_config(temp.path());
 
         assert_eq!(state.default_agent.as_deref(), Some("clawhive-main"));
+    }
+
+    #[test]
+    fn scan_reads_actionbook_enabled_from_main_yaml_tools() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let main_yaml = base_main_yaml(
+            "  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n",
+        )
+        .replace(
+            "tools: {}",
+            "tools:\n  actionbook:\n    enabled: true\n  web_search:\n    enabled: false\n",
+        );
+        write(&temp.path().join("config/main.yaml"), &main_yaml);
+
+        let state = scan_config(temp.path());
+
+        assert!(state.tools.actionbook_enabled);
     }
 }
