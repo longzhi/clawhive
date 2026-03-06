@@ -35,3 +35,4 @@ wacore = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main"
 whatsapp-rust-sqlite-storage = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
 waproto = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
 base64 = "0.22.1"
+reqwest.workspace = true
