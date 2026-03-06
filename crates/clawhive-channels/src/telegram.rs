@@ -180,6 +180,13 @@ impl TelegramBot {
 
                 // Group chat filtering: skip non-mention messages when require_mention is true
                 if chat_id.0 < 0 && require_mention && !is_mention {
+                    tracing::info!(
+                        chat_id = chat_id.0,
+                        user_id,
+                        message_id,
+                        require_mention,
+                        "telegram inbound skipped: group message without mention"
+                    );
                     return Ok::<(), teloxide::RequestError>(());
                 }
 
@@ -187,6 +194,7 @@ impl TelegramBot {
                 inbound.is_mention = is_mention;
                 inbound.mention_target = mention_target;
                 inbound.thread_id = msg.thread_id.map(|thread| thread.0.to_string());
+                let trace_id = inbound.trace_id;
 
                 // Download photo if present
                 if let Some(photos) = msg.photo() {
@@ -237,20 +245,71 @@ impl TelegramBot {
 
                     match result {
                         Ok(outbound) => {
-                            if outbound.text.is_empty() {
-                                tracing::warn!("outbound text is empty, skipping send");
+                            if outbound.text.trim().is_empty() {
+                                tracing::warn!(
+                                    trace_id = %trace_id,
+                                    chat_id = chat_id.0,
+                                    user_id,
+                                    message_id,
+                                    "telegram outbound text is empty"
+                                );
+
+                                if let Some(fallback_text) = empty_outbound_fallback_text(chat_id.0)
+                                {
+                                    if let Err(send_err) =
+                                        bot.send_message(chat_id, fallback_text).await
+                                    {
+                                        tracing::error!(
+                                            trace_id = %trace_id,
+                                            chat_id = chat_id.0,
+                                            user_id,
+                                            message_id,
+                                            error = %send_err,
+                                            "failed to send telegram empty-outbound fallback"
+                                        );
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        trace_id = %trace_id,
+                                        chat_id = chat_id.0,
+                                        user_id,
+                                        message_id,
+                                        "telegram empty outbound suppressed for non-DM chat"
+                                    );
+                                }
                             } else {
                                 let html = md_to_telegram_html(&outbound.text);
                                 if let Err(err) = send_long_html(&bot, chat_id, &html).await {
-                                    tracing::error!("failed to send reply: {err}");
+                                    tracing::error!(
+                                        trace_id = %trace_id,
+                                        chat_id = chat_id.0,
+                                        user_id,
+                                        message_id,
+                                        error = %err,
+                                        "failed to send telegram reply"
+                                    );
                                 }
                             }
                         }
                         Err(err) => {
-                            tracing::error!("gateway error: {err}");
+                            tracing::error!(
+                                trace_id = %trace_id,
+                                chat_id = chat_id.0,
+                                user_id,
+                                message_id,
+                                error = %err,
+                                "telegram gateway error"
+                            );
                             let user_msg = format!("Error: {err}");
                             if let Err(send_err) = bot.send_message(chat_id, &user_msg).await {
-                                tracing::error!("failed to send error message: {send_err}");
+                                tracing::error!(
+                                    trace_id = %trace_id,
+                                    chat_id = chat_id.0,
+                                    user_id,
+                                    message_id,
+                                    error = %send_err,
+                                    "failed to send telegram error message"
+                                );
                             }
                         }
                     }
@@ -1002,6 +1061,14 @@ fn parse_chat_id(conversation_scope: &str) -> Option<i64> {
     }
 }
 
+fn empty_outbound_fallback_text(chat_id: i64) -> Option<&'static str> {
+    if chat_id > 0 {
+        Some("Sorry, I got an empty response. Please try again.")
+    } else {
+        None
+    }
+}
+
 fn compose_inbound_text(user_text: &str, quoted_text: Option<&str>) -> String {
     let trimmed_user = user_text.trim();
     if trimmed_user.starts_with('/') {
@@ -1244,5 +1311,18 @@ mod tests {
         assert!(html.contains("&lt;'PY'"));
         assert!(html.contains("&lt;tag&gt;"));
         assert!(!html.contains("<'PY'"));
+    }
+
+    #[test]
+    fn empty_outbound_fallback_is_enabled_for_dm() {
+        assert_eq!(
+            empty_outbound_fallback_text(12345),
+            Some("Sorry, I got an empty response. Please try again.")
+        );
+    }
+
+    #[test]
+    fn empty_outbound_fallback_is_disabled_for_group() {
+        assert_eq!(empty_outbound_fallback_text(-10012345), None);
     }
 }
