@@ -3,7 +3,10 @@ use std::sync::Arc;
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
-use clawhive_schema::{BusMessage, GroupContext, GroupMember, InboundMessage, OutboundMessage};
+use clawhive_schema::{
+    Attachment, AttachmentKind, BusMessage, GroupContext, GroupMember, InboundMessage,
+    OutboundMessage,
+};
 use serenity::all::{
     ButtonStyle, ChannelId, Client, Command, CommandInteraction, CommandOptionType,
     ComponentInteraction, Context, CreateActionRow, CreateButton, CreateCommand,
@@ -258,7 +261,7 @@ impl EventHandler for DiscordHandler {
         }
 
         let text = msg.content.trim();
-        if text.is_empty() {
+        if text.is_empty() && msg.attachments.is_empty() {
             return;
         }
 
@@ -300,6 +303,23 @@ impl EventHandler for DiscordHandler {
         } else {
             None
         };
+
+        // Extract attachments (images, files, etc.)
+        for att in &msg.attachments {
+            let kind = match att.content_type.as_deref() {
+                Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
+                Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
+                Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
+                _ => AttachmentKind::Other,
+            };
+            inbound.attachments.push(Attachment {
+                kind,
+                url: att.url.clone(),
+                mime_type: att.content_type.clone(),
+                file_name: Some(att.filename.clone()),
+                size: Some(att.size as u64),
+            });
+        }
 
         // Populate group context for guild channels
         if let Some(gid) = msg.guild_id {
