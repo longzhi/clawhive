@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{TimeZone, Utc};
-use clawhive_scheduler::{RunStatus, ScheduleManager, ScheduleType, SessionMode};
+use clawhive_scheduler::{RunStatus, ScheduleConfig, ScheduleManager, ScheduleType, SessionMode};
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
@@ -48,10 +48,16 @@ pub struct HistoryParams {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", get(list_schedules))
+        .route("/", get(list_schedules).post(create_schedule))
         .route("/{id}/run", post(run_schedule))
-        .route("/{id}", patch(toggle_schedule))
+        .route(
+            "/{id}",
+            patch(toggle_schedule)
+                .put(update_schedule)
+                .delete(delete_schedule),
+        )
         .route("/{id}/history", get(schedule_history))
+        .route("/{id}/detail", get(get_schedule_detail))
 }
 
 pub async fn list_schedules(
@@ -138,6 +144,37 @@ pub async fn schedule_history(
     ))
 }
 
+pub async fn get_schedule_detail(
+    State(state): State<AppState>,
+    Path(schedule_id): Path<String>,
+) -> Result<Json<ScheduleConfig>, StatusCode> {
+    let path = state
+        .root
+        .join(format!("config/schedules.d/{schedule_id}.yaml"));
+    let content = std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let config: ScheduleConfig =
+        serde_yaml::from_str(&content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(config))
+}
+
+pub async fn update_schedule(
+    State(state): State<AppState>,
+    Path(schedule_id): Path<String>,
+    Json(mut config): Json<ScheduleConfig>,
+) -> Result<StatusCode, StatusCode> {
+    let path = state
+        .root
+        .join(format!("config/schedules.d/{schedule_id}.yaml"));
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Ensure schedule_id matches the path
+    config.schedule_id = schedule_id;
+    let yaml = serde_yaml::to_string(&config).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    std::fs::write(&path, yaml).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn make_manager(state: &AppState) -> Result<ScheduleManager, StatusCode> {
     ScheduleManager::new(
         &state.root.join("config/schedules.d"),
@@ -154,6 +191,40 @@ fn schedule_error_status(error: anyhow::Error) -> StatusCode {
     } else {
         StatusCode::BAD_REQUEST
     }
+}
+
+async fn create_schedule(
+    State(state): State<AppState>,
+    Json(config): Json<ScheduleConfig>,
+) -> Result<(StatusCode, Json<ScheduleConfig>), StatusCode> {
+    if config.schedule_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let schedules_dir = state.root.join("config/schedules.d");
+    std::fs::create_dir_all(&schedules_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let path = schedules_dir.join(format!("{}.yaml", config.schedule_id));
+    if path.exists() {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let yaml = serde_yaml::to_string(&config).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    std::fs::write(&path, yaml).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((StatusCode::CREATED, Json(config)))
+}
+
+async fn delete_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let path = state.root.join(format!("config/schedules.d/{id}.yaml"));
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    std::fs::remove_file(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -190,6 +261,8 @@ mod tests {
                 root: root.to_path_buf(),
                 bus: Arc::new(EventBus::new(16)),
                 gateway: None,
+                web_password_hash: None,
+                session_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
                 daemon_mode: false,
                 port: 3000,
             },
@@ -243,6 +316,111 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/missing/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_schedule_returns_201() {
+        let (state, _tmp) = setup_state();
+        let app = router().with_state(state.clone());
+
+        let body = r#"{
+  "schedule_id": "test-sched",
+  "name": "Test Schedule",
+  "enabled": true,
+  "schedule": { "kind": "every", "interval_ms": 60000 },
+  "agent_id": "clawhive-main",
+  "session_mode": "isolated",
+  "task": "test task"
+}"#;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        assert!(state
+            .root
+            .join("config/schedules.d/test-sched.yaml")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn create_duplicate_schedule_returns_409() {
+        let (state, _tmp) = setup_state();
+
+        let body = r#"{
+  "schedule_id": "daily",
+  "name": "Daily Duplicate",
+  "enabled": true,
+  "schedule": { "kind": "every", "interval_ms": 60000 },
+  "agent_id": "clawhive-main",
+  "session_mode": "isolated",
+  "task": "test task"
+}"#;
+
+        let app = router().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn delete_schedule_returns_204() {
+        let (state, _tmp) = setup_state();
+        let schedule_path = state.root.join("config/schedules.d/daily.yaml");
+        assert!(schedule_path.exists());
+
+        let app = router().with_state(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/daily")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+        assert!(!schedule_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_schedule_returns_404() {
+        let (state, _tmp) = setup_state();
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/nonexistent")
                     .body(Body::empty())
                     .unwrap(),
             )

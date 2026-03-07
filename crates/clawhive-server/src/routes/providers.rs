@@ -52,7 +52,12 @@ pub struct SetKeyResult {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_providers).post(create_provider))
-        .route("/{id}", get(get_provider).put(update_provider))
+        .route(
+            "/{id}",
+            get(get_provider)
+                .put(update_provider)
+                .delete(delete_provider),
+        )
         .route("/{id}/key", post(set_api_key))
         .route("/{id}/test", post(test_provider))
 }
@@ -227,4 +232,99 @@ async fn test_provider(State(state): State<AppState>, Path(id): Path<String>) ->
         ok: true,
         message: "API key configured".to_string(),
     })
+}
+
+async fn delete_provider(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::http::StatusCode, axum::http::StatusCode> {
+    let path = state.root.join(format!("config/providers.d/{id}.yaml"));
+    if !path.exists() {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+    std::fs::remove_file(&path).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{body::Body, http::Request};
+    use clawhive_bus::EventBus;
+    use tower::ServiceExt;
+
+    use super::router;
+    use crate::state::AppState;
+
+    fn write_file(path: &std::path::Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn setup_state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        write_file(
+            &root.join("config/providers.d/openai.yaml"),
+            "provider_id: openai\nenabled: true\napi_base: https://api.openai.com/v1\nmodels:\n  - gpt-4o\n",
+        );
+
+        (
+            AppState {
+                root: root.to_path_buf(),
+                bus: Arc::new(EventBus::new(16)),
+                gateway: None,
+                web_password_hash: None,
+                session_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+                daemon_mode: false,
+                port: 3000,
+            },
+            tmp,
+        )
+    }
+
+    #[tokio::test]
+    async fn delete_provider_returns_204() {
+        let (state, _tmp) = setup_state();
+        let provider_path = state.root.join("config/providers.d/openai.yaml");
+        assert!(provider_path.exists());
+
+        let app = router().with_state(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/openai")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+        assert!(!provider_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_provider_returns_404() {
+        let (state, _tmp) = setup_state();
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 }
