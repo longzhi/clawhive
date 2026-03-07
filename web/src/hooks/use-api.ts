@@ -25,7 +25,6 @@ export interface ProviderSummary {
   provider_id: string;
   enabled: boolean;
   api_base: string;
-  api_key_env: string;
   key_configured: boolean;
   models: string[];
 }
@@ -348,6 +347,69 @@ export function useScheduleHistory(scheduleId: string, limit = 10) {
   });
 }
 
+export interface ScheduleDetail {
+  schedule_id: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  schedule: {
+    kind: "cron" | "at" | "every";
+    expr?: string;
+    tz?: string;
+    at?: string;
+    interval_ms?: number;
+    anchor_ms?: number;
+  };
+  agent_id: string;
+  session_mode: "main" | "isolated";
+  task: string;
+  payload: {
+    kind: string;
+    text?: string;
+    message?: string;
+    model?: string;
+    thinking?: string;
+    timeout_seconds?: number;
+    light_context?: boolean;
+  } | null;
+  timeout_seconds: number;
+  delete_after_run: boolean;
+  delivery: {
+    mode: "none" | "announce" | "webhook";
+    channel?: string | null;
+    connector_id?: string | null;
+    source_channel_type?: string | null;
+    source_connector_id?: string | null;
+    source_conversation_scope?: string | null;
+    source_user_scope?: string | null;
+    webhook_url?: string | null;
+    best_effort: boolean;
+    failure_destination?: { channel?: string; connector_id?: string; conversation_scope?: string } | null;
+  };
+}
+
+export function useScheduleDetail(scheduleId: string) {
+  return useQuery({
+    queryKey: ["schedules", scheduleId, "detail"],
+    queryFn: () => apiFetch<ScheduleDetail>(`/api/schedules/${scheduleId}/detail`),
+    enabled: !!scheduleId,
+  });
+}
+
+export function useUpdateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: ScheduleDetail }) =>
+      apiFetch<void>(`/api/schedules/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["schedules"] });
+    },
+  });
+}
+
 export function useWebSearchConfig() {
   return useQuery({
     queryKey: ["web-search-config"],
@@ -400,5 +462,160 @@ export function useUpdateActionbook() {
         body: JSON.stringify(data),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["actionbook-config"] }),
+  });
+}
+
+export function useUpdateAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: AgentDetail }) =>
+      apiFetch<AgentDetail>(`/api/agents/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["agents"] }),
+  });
+}
+
+// Skills types
+export interface InstalledSkillSummary {
+  name: string;
+  description: string;
+  has_permissions: boolean;
+  path: string;
+}
+
+export interface AnalyzeFinding {
+  severity: string;
+  file: string;
+  line: number;
+  pattern: string;
+  reason: string;
+}
+
+export interface AnalyzeSkillResponse {
+  skill_name: string;
+  description: string;
+  findings: AnalyzeFinding[];
+  has_high_risk: boolean;
+  rendered_report: string;
+}
+
+export interface InstallSkillResponse {
+  skill_name: string;
+  target_path: string;
+  findings_count: number;
+  high_risk: boolean;
+}
+
+// Skills hooks
+export function useSkills() {
+  return useQuery({
+    queryKey: ["skills"],
+    queryFn: () => apiFetch<InstalledSkillSummary[]>("/api/skills"),
+  });
+}
+
+export function useAnalyzeSkill() {
+  return useMutation({
+    mutationFn: (source: string) =>
+      apiFetch<AnalyzeSkillResponse>("/api/skills/analyze", {
+        method: "POST",
+        body: JSON.stringify({ source }),
+      }),
+  });
+}
+
+export function useCreateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Record<string, unknown>) =>
+      apiFetch<Record<string, unknown>>("/api/schedules", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+  });
+}
+
+export function useDeleteSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiFetch<void>(`/api/schedules/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+  });
+}
+
+export function useInstallSkill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ source, allowHighRisk }: { source: string; allowHighRisk: boolean }) =>
+      apiFetch<InstallSkillResponse>("/api/skills/install", {
+        method: "POST",
+        body: JSON.stringify({ source, allow_high_risk: allowHighRisk }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["skills"] }),
+  });
+}
+
+
+export function useUpdateProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
+      apiFetch<Record<string, unknown>>(`/api/providers/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useDeleteProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiFetch<void>(`/api/providers/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+// Auth hooks
+export function useAuthCheck() {
+  return useQuery({
+    queryKey: ["auth-check"],
+    queryFn: () => apiFetch<{ authenticated: boolean }>("/api/auth/check"),
+    retry: false,
+  });
+}
+
+export function useLogin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (password: string) =>
+      apiFetch<void>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth-check"] }),
+  });
+}
+
+export function useLogout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<void>("/api/auth/logout", { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth-check"] }),
+  });
+}
+
+export function useSetPassword() {
+  return useMutation({
+    mutationFn: (password: string) =>
+      apiFetch<void>("/api/auth/set-password", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      }),
   });
 }

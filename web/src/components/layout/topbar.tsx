@@ -4,6 +4,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/s
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import { Sidebar } from './sidebar';
 import { useLocation } from 'react-router-dom';
+import { Breadcrumbs } from './breadcrumbs';
 
 export function Topbar() {
   const { pathname } = useLocation();
@@ -16,6 +17,7 @@ export function Topbar() {
     if (path.startsWith('/channels')) return 'Channels';
     if (path.startsWith('/providers')) return 'Providers';
     if (path.startsWith('/routing')) return 'Routing';
+    if (path.startsWith('/skills')) return 'Skills';
     if (path.startsWith('/settings')) return 'Settings';
     return 'Clawhive';
   };
@@ -36,10 +38,16 @@ export function Topbar() {
           </SheetContent>
         </Sheet>
         
-        <h1 className="text-lg font-semibold md:text-xl">
-          <span className="md:hidden">Clawhive</span>
-          <span className="hidden md:inline-block">{getPageTitle(pathname)}</span>
-        </h1>
+        <div className="flex items-center">
+          <span className="text-lg font-semibold md:hidden">Clawhive</span>
+          <div className="hidden md:block">
+            {pathname === "/" ? (
+              <h1 className="text-lg font-semibold md:text-xl">Dashboard</h1>
+            ) : (
+              <Breadcrumbs />
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="flex items-center gap-2">
