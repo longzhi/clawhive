@@ -327,7 +327,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = reqwest::Client::new();
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let token = exchange_code_for_tokens(
             &http,
             &format!("{}/oauth/token", server.uri()),
@@ -361,7 +361,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = reqwest::Client::new();
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let api_key = exchange_id_token_for_api_key(
             &http,
             &format!("{}/oauth/token", server.uri()),

@@ -257,9 +257,10 @@ mod tests {
             .mount(&server)
             .await;
 
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let updated = manager
             .refresh_if_needed(
-                &reqwest::Client::new(),
+                &http,
                 "openai-main",
                 &OpenAiRefreshConfig {
                     token_endpoint: format!("{}/oauth/token", server.uri()),

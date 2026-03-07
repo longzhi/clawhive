@@ -16,6 +16,9 @@ web/.env*.local
 # Sisyphus plans
 .sisyphus/
 
+# Coverage
+lcov.info
+
 # Build artifacts
 /clawhive
 /clawhive-server

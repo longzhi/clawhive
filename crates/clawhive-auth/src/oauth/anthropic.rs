@@ -90,13 +90,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let ok = validate_setup_token(
-            &reqwest::Client::new(),
-            "sk-ant-oat01-test-token-abc123",
-            &server.uri(),
-        )
-        .await
-        .expect("request should succeed");
+
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build http client");
+        let ok = validate_setup_token(&http, "sk-ant-oat01-test-token-abc123", &server.uri())
+            .await
+            .expect("request should succeed");
 
         assert!(ok);
     }
