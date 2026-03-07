@@ -10,7 +10,80 @@ interface Event {
   type: string;
   trace_id: string;
   timestamp: string;
+  summary: string;
   data?: any;
+}
+
+function truncateText(value: string | undefined, max = 40): string {
+  if (!value) return "—";
+  return value.length > max ? `${value.slice(0, max)}...` : value;
+}
+
+function getEventTypeAndPayload(data: Record<string, any>) {
+  const eventType = Object.keys(data)[0] || "Unknown";
+  const payload = eventType ? data[eventType] : undefined;
+  return { eventType, payload };
+}
+
+function extractTraceId(eventType: string, payload: any): string {
+  if (eventType === "HandleIncomingMessage") {
+    return payload?.inbound?.trace_id || "—";
+  }
+  return payload?.trace_id || "—";
+}
+
+function buildSummary(eventType: string, payload: any, traceId: string): string {
+  switch (eventType) {
+    case "HandleIncomingMessage":
+      return `→ ${payload?.resolved_agent_id || "—"}`;
+    case "ReplyReady":
+      return truncateText(payload?.outbound?.text, 40);
+    case "TaskFailed":
+      return truncateText(payload?.error, 40);
+    case "StreamDelta":
+      return "streaming...";
+    case "MemoryWriteRequested":
+      return `write: ${payload?.speaker || "—"}`;
+    case "MemoryReadRequested":
+      return `search: ${truncateText(payload?.query, 40)}`;
+    case "ConsolidationCompleted":
+      return `concepts: +${payload?.concepts_created ?? 0} ↑${payload?.concepts_updated ?? 0}`;
+    case "ToolCallStarted":
+      return payload?.tool_name || "—";
+    case "ToolCallCompleted":
+      return `${payload?.tool_name || "—"} (${payload?.duration_ms ?? "—"}ms)`;
+    case "ScheduledTaskTriggered":
+      return payload?.schedule_id || "—";
+    case "ScheduledTaskCompleted":
+      return `${payload?.schedule_id || "—"}: ${payload?.status || "—"}`;
+    default:
+      return traceId !== "—" ? traceId.slice(0, 8) : "—";
+  }
+}
+
+function getEventBadgeClass(eventType: string): string {
+  if (eventType === "HandleIncomingMessage" || eventType === "MessageAccepted") {
+    return "border-blue-300 bg-blue-50 text-blue-700";
+  }
+  if (eventType === "ReplyReady") {
+    return "border-green-300 bg-green-50 text-green-700";
+  }
+  if (eventType === "TaskFailed") {
+    return "border-red-300 bg-red-50 text-red-700";
+  }
+  if (eventType === "StreamDelta") {
+    return "border-slate-300 bg-slate-50 text-slate-700";
+  }
+  if (eventType.startsWith("Memory")) {
+    return "border-fuchsia-300 bg-fuchsia-50 text-fuchsia-700";
+  }
+  if (eventType.startsWith("Tool")) {
+    return "border-orange-300 bg-orange-50 text-orange-700";
+  }
+  if (eventType.startsWith("Scheduled")) {
+    return "border-amber-300 bg-amber-50 text-amber-700";
+  }
+  return "";
 }
 
 export function EventStream() {
@@ -35,11 +108,14 @@ export function EventStream() {
       es.onmessage = (msg) => {
         if (isPaused) return;
         try {
-          const data = JSON.parse(msg.data);
+          const data = JSON.parse(msg.data) as Record<string, any>;
+          const { eventType, payload } = getEventTypeAndPayload(data);
+          const traceId = extractTraceId(eventType, payload);
           const newEvent: Event = {
-            type: data.type || "unknown",
-            trace_id: data.trace_id || "n/a",
+            type: eventType,
+            trace_id: traceId,
             timestamp: new Date().toISOString(),
+            summary: buildSummary(eventType, payload, traceId),
             data: data
           };
           
@@ -99,11 +175,17 @@ export function EventStream() {
                 <span className="text-muted-foreground w-16 shrink-0">
                   {new Date(event.timestamp).toLocaleTimeString()}
                 </span>
-                <Badge variant="outline" className="uppercase text-[10px] h-5 px-1">
+                <Badge
+                  variant="outline"
+                  className={cn("uppercase text-[10px] h-5 px-1", getEventBadgeClass(event.type))}
+                >
                   {event.type}
                 </Badge>
                 <span className="font-mono text-muted-foreground truncate" title={event.trace_id}>
                   {event.trace_id.substring(0, 8)}
+                </span>
+                <span className="text-muted-foreground truncate" title={event.summary}>
+                  {event.summary}
                 </span>
               </div>
             ))}

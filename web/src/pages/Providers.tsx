@@ -3,10 +3,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Brain, Loader2, CheckCircle, Key, ShieldCheck, Plus, ChevronDown, X } from "lucide-react";
-import { useAuthStatus, useProviders, useTestProvider, useSetProviderKey, useCreateProvider, useProviderPresets } from "@/hooks/use-api";
-import type { ProviderPreset } from "@/hooks/use-api";
+import { Brain, Loader2, CheckCircle, Key, ShieldCheck, Plus, ChevronDown, X, Pencil, Trash2 } from "lucide-react";
+import { useAuthStatus, useProviders, useTestProvider, useSetProviderKey, useCreateProvider, useProviderPresets, useUpdateProvider, useDeleteProvider } from "@/hooks/use-api";
+import type { ProviderPreset, ProviderSummary } from "@/hooks/use-api";
 import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/ui/error-state";
 import {
   Dialog,
   DialogContent,
@@ -308,14 +311,159 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
 }
 
 // ---------------------------------------------------------------------------
+// Edit Provider Dialog
+// ---------------------------------------------------------------------------
+function EditProviderDialog({
+  provider,
+  presets,
+}: {
+  provider: ProviderSummary;
+  presets: ProviderPreset[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [apiBase, setApiBase] = useState(provider.api_base);
+  const preset = presets.find((p) => p.id === provider.provider_id);
+  const defaultModels = preset?.models ?? [];
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set(provider.models));
+  const [customModels, setCustomModels] = useState<string[]>(
+    provider.models.filter((m) => !defaultModels.includes(m))
+  );
+  const updateProvider = useUpdateProvider();
+
+  const reset = () => {
+    setApiBase(provider.api_base);
+    setSelectedModels(new Set(provider.models));
+    setCustomModels(provider.models.filter((m) => !defaultModels.includes(m)));
+  };
+
+  const toggleModel = (model: string) => {
+    setSelectedModels((prev) => {
+      const next = new Set(prev);
+      if (next.has(model)) next.delete(model);
+      else next.add(model);
+      return next;
+    });
+  };
+
+  const handleSave = async () => {
+    try {
+      await updateProvider.mutateAsync({
+        id: provider.provider_id,
+        data: {
+          api_base: apiBase,
+          models: Array.from(selectedModels),
+        },
+      });
+      toast.success(`Provider ${provider.provider_id} updated`);
+      setOpen(false);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      toast.error(`Failed to update provider: ${msg}`);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset(); }}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" className="flex-1 gap-1.5">
+          <Pencil className="h-4 w-4" />
+          Edit
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit Provider: {provider.provider_id}</DialogTitle>
+          <DialogDescription>Update provider configuration.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 rounded-lg border p-4">
+          <div>
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Provider ID
+            </label>
+            <div className="mt-1">
+              <Badge variant="outline" className="font-mono">{provider.provider_id}</Badge>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              API Base
+            </label>
+            <Input
+              value={apiBase}
+              onChange={(e) => setApiBase(e.target.value)}
+              className="mt-1"
+            />
+          </div>
+          <ModelMultiSelect
+            defaultModels={defaultModels}
+            selectedModels={selectedModels}
+            customModels={customModels}
+            onToggle={toggleModel}
+            onAddCustom={(model) => {
+              if (selectedModels.has(model) || customModels.includes(model)) return;
+              setCustomModels((prev) => [...prev, model]);
+              setSelectedModels((prev) => new Set([...prev, model]));
+            }}
+            onRemoveCustom={(model) => {
+              setCustomModels((prev) => prev.filter((m) => m !== model));
+              setSelectedModels((prev) => { const next = new Set(prev); next.delete(model); return next; });
+            }}
+          />
+        </div>
+        <DialogFooter>
+          <Button onClick={handleSave} disabled={updateProvider.isPending}>
+            {updateProvider.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save Changes"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Providers Skeleton
+// ---------------------------------------------------------------------------
+function ProvidersSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <Skeleton className="h-5 w-24" />
+          <Skeleton className="h-4 w-48 mt-1" />
+        </div>
+        <Skeleton className="h-9 w-32" />
+      </div>
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i}>
+            <CardHeader>
+              <Skeleton className="h-5 w-28" />
+              <Skeleton className="h-3 w-40 mt-1" />
+            </CardHeader>
+            <CardContent className="grid gap-4 pt-4">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-3/4" />
+              <Skeleton className="h-9 w-full" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function ProvidersPage() {
-  const { data: providers, isLoading } = useProviders();
+  const { data: providers, isLoading, isError, error, refetch } = useProviders();
   const { data: authStatus } = useAuthStatus();
+  const { data: presets } = useProviderPresets();
   const testProvider = useTestProvider();
   const setProviderKey = useSetProviderKey();
+  const deleteProvider = useDeleteProvider();
   const [keys, setKeys] = useState<Record<string, string>>({});
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const existingIds = new Set(providers?.map((p) => p.provider_id) ?? []);
 
@@ -355,16 +503,23 @@ export default function ProvidersPage() {
     toast.message(`Use CLI: ${loginHint(providerId)}`);
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex justify-center p-8">
-        <Loader2 className="h-8 w-8 animate-spin" />
-      </div>
-    );
-  }
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await deleteProvider.mutateAsync(deleteTarget);
+      toast.success(`Provider ${deleteTarget} deleted`);
+    } catch (e) {
+      toast.error("Failed to delete provider");
+    } finally {
+      setDeleteTarget(null);
+    }
+  };
+
+  if (isLoading) return <ProvidersSkeleton />;
+  if (isError) return <ErrorState message={error?.message} onRetry={refetch} />;
 
   return (
-    <div className="space-y-6">
+    <><div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold">Providers</h2>
@@ -436,9 +591,6 @@ export default function ProvidersPage() {
                     Save
                   </Button>
                 </div>
-                {provider.api_key_env && (
-                  <span className="text-xs text-muted-foreground">Sets {provider.api_key_env}</span>
-                )}
               </div>
 
               <div className="flex flex-col gap-2">
@@ -466,6 +618,18 @@ export default function ProvidersPage() {
                 )}
                 Test Connection
               </Button>
+              <div className="flex gap-2 mt-2">
+                <EditProviderDialog provider={provider} presets={presets ?? []} />
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="flex-1 gap-1.5"
+                  onClick={() => setDeleteTarget(provider.provider_id)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </Button>
+              </div>
             </CardContent>
           </Card>
         ))}
@@ -477,5 +641,15 @@ export default function ProvidersPage() {
         )}
       </div>
     </div>
-  );
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        title={`Delete provider '${deleteTarget ?? ""}'?`}
+        description="Agents using this provider's models will lose access."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={handleDelete}
+        loading={deleteProvider.isPending}
+      />
+  </>  );
 }

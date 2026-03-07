@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -6,6 +7,21 @@ import { useRunSchedule, useSchedules, useToggleSchedule } from "@/hooks/use-api
 import { formatDistanceToNow } from "date-fns";
 import { AlertTriangle, Clock3, Loader2, Play } from "lucide-react";
 import { toast } from "sonner";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/ui/error-state";
+
+function UpdatedAgo({ dataUpdatedAt }: { dataUpdatedAt: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 5000);
+    return () => clearInterval(id);
+  }, []);
+  
+  if (!dataUpdatedAt) return null;
+  const seconds = Math.floor((Date.now() - dataUpdatedAt) / 1000);
+  const text = seconds < 5 ? "just now" : seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`;
+  return <span className="text-xs text-muted-foreground">Updated {text}</span>;
+}
 
 function formatSchedule(schedule: {
   kind: "cron" | "at" | "every";
@@ -33,21 +49,62 @@ function statusVariant(status: "ok" | "error" | "skipped" | null) {
   return "";
 }
 
+// ---------------------------------------------------------------------------
+// Schedules Skeleton
+// ---------------------------------------------------------------------------
+function SchedulesSkeleton() {
+  return (
+    <>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <Skeleton className="h-6 w-28" />
+          <Skeleton className="h-4 w-48 mt-1" />
+        </div>
+        <Skeleton className="h-4 w-24" />
+      </div>
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i}>
+            <CardHeader className="space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <Skeleton className="h-5 w-32" />
+                  <Skeleton className="h-3 w-24 mt-1" />
+                </div>
+                <Skeleton className="h-5 w-10" />
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-3/4" />
+              <Skeleton className="h-9 w-full mt-2" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </>
+  );
+}
+
 export default function SchedulesPage() {
-  const { data: schedules, isLoading } = useSchedules();
+  const { data: schedules, dataUpdatedAt: schedulesUpdatedAt, isLoading, isError, error, refetch } = useSchedules();
   const runMutation = useRunSchedule();
   const toggleMutation = useToggleSchedule();
 
-  if (isLoading) {
-    return (
-      <div className="flex justify-center p-8">
-        <Loader2 className="h-8 w-8 animate-spin" />
-      </div>
-    );
-  }
+  if (isLoading) return <SchedulesSkeleton />;
+  if (isError) return <ErrorState message={error?.message} onRetry={refetch} />
 
   return (
-    <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+    <>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-xl font-semibold">Schedules</h1>
+          <p className="text-sm text-muted-foreground">Manage your scheduled tasks</p>
+        </div>
+        <UpdatedAgo dataUpdatedAt={schedulesUpdatedAt} />
+      </div>
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+
       {(schedules ?? []).map((item) => {
         const nextRunText = item.next_run_at
           ? formatDistanceToNow(new Date(item.next_run_at), { addSuffix: true })
@@ -121,6 +178,8 @@ export default function SchedulesPage() {
           </Card>
         );
       })}
-    </div>
+      </div>
+    </>
   );
+
 }
