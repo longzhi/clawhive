@@ -74,6 +74,17 @@ enum Commands {
         #[arg(long)]
         no_security: bool,
     },
+    #[command(about = "Start clawhive as a background daemon (alias for `start -d`)")]
+    Up {
+        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        port: u16,
+        /// Override security mode (overrides agent config)
+        #[arg(long, value_name = "MODE")]
+        security: Option<SecurityMode>,
+        /// Shorthand for --security off
+        #[arg(long)]
+        no_security: bool,
+    },
     #[command(about = "Stop a running clawhive process")]
     Stop,
     #[command(about = "Restart clawhive (stop + start)")]
@@ -153,6 +164,16 @@ enum Commands {
         version: Option<String>,
         #[arg(long, short = 'y', help = "Skip confirmation prompt")]
         yes: bool,
+    },
+    #[command(about = "Tail the latest clawhive log file")]
+    Logs {
+        #[arg(
+            long,
+            short = 'n',
+            default_value = "50",
+            help = "Number of lines to show before following"
+        )]
+        lines: usize,
     },
 }
 
@@ -354,10 +375,12 @@ async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    // Suppress stderr logs when running TUI modes to avoid corrupting the terminal.
+    // Suppress stderr logs when running TUI modes or Logs to avoid corrupting the terminal.
     let is_tui_mode = matches!(
         cli.command,
-        Some(Commands::Code { .. }) | Some(Commands::Dashboard { .. })
+        Some(Commands::Code { .. })
+            | Some(Commands::Dashboard { .. })
+            | Some(Commands::Logs { .. })
     );
 
     if is_tui_mode {
@@ -411,6 +434,15 @@ async fn main() -> Result<()> {
             } else {
                 start_bot(&cli.config_root, tui, port, security_override).await?;
             }
+        }
+        Commands::Up {
+            port,
+            security,
+            no_security,
+        } => {
+            ensure_skeleton_config(&cli.config_root, port)?;
+            let security_override = resolve_security_override(security, no_security);
+            daemonize(&cli.config_root, false, port, security_override)?;
         }
         Commands::Stop => {
             stop_process(&cli.config_root)?;
@@ -1054,6 +1086,49 @@ async fn main() -> Result<()> {
             yes,
         } => {
             commands::update::handle_update(check, channel, version, yes).await?;
+        }
+        Commands::Logs { lines } => {
+            let log_dir = cli.config_root.join("logs");
+            if !log_dir.exists() {
+                anyhow::bail!(
+                    "Log directory not found: {}. Has clawhive been started yet?",
+                    log_dir.display()
+                );
+            }
+
+            // Collect all files that start with "clawhive.log"
+            let mut log_files: Vec<PathBuf> = std::fs::read_dir(&log_dir)?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("clawhive.log"))
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            if log_files.is_empty() {
+                anyhow::bail!("No log files found in {}", log_dir.display());
+            }
+
+            // Daily rolling files are named "clawhive.log.YYYY-MM-DD",
+            // so lexicographic sort gives us the latest file last.
+            log_files.sort();
+            let latest = log_files.last().unwrap();
+
+            eprintln!("Following: {}", latest.display());
+
+            let status = std::process::Command::new("tail")
+                .arg(format!("-n{lines}"))
+                .arg("-f")
+                .arg(latest)
+                .status()
+                .context("Failed to run `tail`. Make sure it is installed.")?;
+
+            if !status.success() {
+                anyhow::bail!("`tail` exited with status: {status}");
+            }
         }
     }
 
