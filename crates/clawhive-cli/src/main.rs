@@ -43,6 +43,9 @@ use commands::auth::{handle_auth_command, AuthCommands};
 use setup::run_setup;
 use tokio::time::sleep;
 
+/// Default HTTP API server port.
+const DEFAULT_PORT: u16 = 8848;
+
 #[derive(Parser)]
 #[command(name = "clawhive", version, about = "clawhive AI agent framework")]
 struct Cli {
@@ -65,7 +68,7 @@ enum Commands {
         daemon: bool,
         #[arg(long, help = "Run TUI dashboard in the same process")]
         tui: bool,
-        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        #[arg(long, default_value_t = DEFAULT_PORT, help = "HTTP API server port")]
         port: u16,
         /// Override security mode (overrides agent config)
         #[arg(long, value_name = "MODE")]
@@ -76,7 +79,7 @@ enum Commands {
     },
     #[command(about = "Start clawhive as a background daemon (alias for `start -d`)")]
     Up {
-        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        #[arg(long, default_value_t = DEFAULT_PORT, help = "HTTP API server port")]
         port: u16,
         /// Override security mode (overrides agent config)
         #[arg(long, value_name = "MODE")]
@@ -91,7 +94,7 @@ enum Commands {
     Stop,
     #[command(about = "Restart clawhive (stop + start as daemon)")]
     Restart {
-        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        #[arg(long, default_value_t = DEFAULT_PORT, help = "HTTP API server port")]
         port: u16,
         /// Override security mode (overrides agent config)
         #[arg(long, value_name = "MODE")]
@@ -102,7 +105,7 @@ enum Commands {
     },
     #[command(about = "Code mode: open developer TUI")]
     Code {
-        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        #[arg(long, default_value_t = DEFAULT_PORT, help = "HTTP API server port")]
         port: u16,
         /// Override security mode (overrides agent config)
         #[arg(long, value_name = "MODE")]
@@ -113,7 +116,7 @@ enum Commands {
     },
     #[command(about = "Dashboard mode: attach TUI observability panel to running gateway")]
     Dashboard {
-        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        #[arg(long, default_value_t = DEFAULT_PORT, help = "HTTP API server port")]
         port: u16,
     },
     #[command(about = "Local REPL for testing (no Telegram needed)")]
@@ -127,6 +130,8 @@ enum Commands {
         #[arg(long)]
         no_security: bool,
     },
+    #[command(about = "Show current configuration (tokens masked)")]
+    Config,
     #[command(about = "Validate config files")]
     Validate,
     #[command(about = "Run memory consolidation manually")]
@@ -409,6 +414,9 @@ async fn main() -> Result<()> {
     };
 
     match command {
+        Commands::Config => {
+            commands::config::print_config(&cli.config_root)?;
+        }
         Commands::Validate => {
             let config = load_config(&cli.config_root.join("config"))?;
             println!(

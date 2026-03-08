@@ -50,7 +50,7 @@ fn render_table(title: &str, rows: &[(&str, String)]) {
             println!("{sep}");
         }
         let val_visible = visible_len(value);
-        let val_pad = (vw - 1).saturating_sub(val_visible);
+        let val_pad = vw.saturating_sub(val_visible + 2);
         println!(
             "│ {:<width$}│ {}{} │",
             label,

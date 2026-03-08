@@ -115,9 +115,17 @@ pub struct WebSearchConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActionbookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolsConfig {
     #[serde(default)]
     pub web_search: Option<WebSearchConfig>,
+    #[serde(default)]
+    pub actionbook: Option<ActionbookConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +138,32 @@ pub struct MainConfig {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_password_hash: Option<String>,
+}
+
+impl Default for MainConfig {
+    fn default() -> Self {
+        Self {
+            app: AppConfig {
+                name: "clawhive".to_string(),
+            },
+            runtime: RuntimeConfig { max_concurrent: 4 },
+            features: FeaturesConfig {
+                multi_agent: true,
+                sub_agent: true,
+                tui: true,
+                cli: true,
+            },
+            channels: ChannelsConfig {
+                telegram: None,
+                discord: None,
+            },
+            embedding: EmbeddingConfig::default(),
+            tools: ToolsConfig::default(),
+            web_password_hash: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -778,6 +812,7 @@ mod tests {
                 },
                 embedding: EmbeddingConfig::default(),
                 tools: ToolsConfig::default(),
+                web_password_hash: None,
             },
             routing: RoutingConfig {
                 default_agent_id: "nonexistent".into(),

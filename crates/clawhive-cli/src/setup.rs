@@ -11,6 +11,11 @@ use clawhive_auth::{AuthProfile, TokenManager};
 use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
+use clawhive_core::config::{
+    ActionbookConfig, DiscordChannelConfig, DiscordConnectorConfig, MainConfig,
+    TelegramChannelConfig, TelegramConnectorConfig, WebSearchConfig,
+};
+
 use crate::setup_scan::{scan_config, ConfigState};
 use crate::setup_ui::{print_done, print_logo, render_dashboard, ARROW, CRAB};
 
@@ -246,12 +251,9 @@ fn handle_set_web_password(config_root: &Path, theme: &ColorfulTheme, term: &Ter
             .map_err(|e| anyhow!("Failed to hash password: {e}"))?;
 
         // Write hash to main.yaml
-        let content = fs::read_to_string(&main_yaml_path).unwrap_or_default();
-        let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)
-            .unwrap_or_else(|_| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-        doc["web_password_hash"] = serde_yaml::Value::String(hash);
-        let yaml = serde_yaml::to_string(&doc)?;
-        fs::write(&main_yaml_path, yaml)?;
+        let mut cfg = load_main_config(config_root)?;
+        cfg.web_password_hash = Some(hash);
+        save_main_config(config_root, &cfg)?;
 
         term.write_line(&format!(
             "    {} {}",
@@ -331,16 +333,35 @@ async fn handle_add_provider(
             .any(|item| item.provider_id == provider.as_str())
     };
     if fully_configured && !force {
-        let should_reconfigure = Confirm::with_theme(theme)
-            .with_prompt(format!(
-                "{} already configured. Reconfigure?",
-                provider.as_str()
-            ))
-            .default(false)
+        let actions = ["Reconfigure", "Remove", "Cancel"];
+        let selected = Select::with_theme(theme)
+            .with_prompt(format!("{} already configured", provider.as_str()))
+            .items(&actions)
+            .default(2)
             .interact()?;
-        if !should_reconfigure {
-            term.write_line("Provider unchanged.")?;
-            return Ok(());
+        match selected {
+            0 => { /* continue to reconfigure below */ }
+            1 => {
+                if Confirm::with_theme(theme)
+                    .with_prompt(format!(
+                        "Are you sure you want to remove {}?",
+                        provider.as_str()
+                    ))
+                    .default(false)
+                    .interact()?
+                {
+                    let path =
+                        config_root.join(format!("config/providers.d/{}.yaml", provider.as_str()));
+                    if path.exists() {
+                        fs::remove_file(&path)?;
+                    }
+                    print_done(term, &format!("Provider {} removed.", provider.as_str()));
+                }
+                return Ok(());
+            }
+            _ => {
+                return Ok(());
+            }
         }
     }
 
@@ -402,12 +423,31 @@ fn handle_add_agent(
 
     let existing = state.agents.iter().any(|a| a.agent_id == agent_id);
     if existing && !force {
-        let reconfigure = Confirm::with_theme(theme)
-            .with_prompt(format!("{agent_id} already configured. Reconfigure?"))
-            .default(false)
+        let actions = ["Reconfigure", "Remove", "Cancel"];
+        let selected = Select::with_theme(theme)
+            .with_prompt(format!("{agent_id} already configured"))
+            .items(&actions)
+            .default(2)
             .interact()?;
-        if !reconfigure {
-            return Ok(());
+        match selected {
+            0 => { /* continue to reconfigure below */ }
+            1 => {
+                if Confirm::with_theme(theme)
+                    .with_prompt(format!("Are you sure you want to remove {agent_id}?"))
+                    .default(false)
+                    .interact()?
+                {
+                    let path = config_root.join(format!("config/agents.d/{agent_id}.yaml"));
+                    if path.exists() {
+                        fs::remove_file(&path)?;
+                    }
+                    print_done(&Term::stdout(), &format!("Agent {agent_id} removed."));
+                }
+                return Ok(());
+            }
+            _ => {
+                return Ok(());
+            }
         }
     }
 
@@ -568,7 +608,6 @@ fn handle_add_channel(
 
 fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<()> {
     let term = Term::stdout();
-    let main_path = config_root.join("config/main.yaml");
 
     let enable_ws = Confirm::with_theme(theme)
         .with_prompt("Enable web search?")
@@ -596,28 +635,13 @@ fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<(
         (None, None)
     };
 
-    if !main_path.exists() {
-        let yaml = generate_main_yaml("clawhive", None, None);
-        fs::write(&main_path, yaml)?;
-    }
-
-    let content = fs::read_to_string(&main_path)?;
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
-
-    let mut ws_map = serde_yaml::Mapping::new();
-    ws_map.insert("enabled".into(), serde_yaml::Value::Bool(enable_ws));
-    if let Some(p) = &provider {
-        ws_map.insert("provider".into(), serde_yaml::Value::String(p.clone()));
-    }
-    if let Some(k) = &api_key {
-        ws_map.insert("api_key".into(), serde_yaml::Value::String(k.clone()));
-    }
-
-    let mut tools_map = serde_yaml::Mapping::new();
-    tools_map.insert("web_search".into(), serde_yaml::Value::Mapping(ws_map));
-    doc["tools"] = serde_yaml::Value::Mapping(tools_map);
-
-    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+    let mut cfg = load_main_config(config_root)?;
+    cfg.tools.web_search = Some(WebSearchConfig {
+        enabled: enable_ws,
+        provider: provider.clone(),
+        api_key: api_key.clone(),
+    });
+    save_main_config(config_root, &cfg)?;
 
     let ab_installed = clawhive_core::bin_exists("actionbook");
     let ab_prompt = if ab_installed {
@@ -668,16 +692,9 @@ fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<(
         }
     }
 
-    let content = fs::read_to_string(&main_path)?;
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
-    if !doc["tools"].is_mapping() {
-        doc["tools"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    let mut ab_map = serde_yaml::Mapping::new();
-    ab_map.insert("enabled".into(), serde_yaml::Value::Bool(enable_ab));
-    doc["tools"]["actionbook"] = serde_yaml::Value::Mapping(ab_map);
-
-    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+    let mut cfg = load_main_config(config_root)?;
+    cfg.tools.actionbook = Some(ActionbookConfig { enabled: enable_ab });
+    save_main_config(config_root, &cfg)?;
     print_done(
         &Term::stdout(),
         &format!(
@@ -825,125 +842,54 @@ fn add_channel_to_config(
     channel_type: &str,
     cfg: &ChannelConfig,
 ) -> Result<()> {
-    let main_path = config_root.join("config/main.yaml");
-    if !main_path.exists() {
-        let tg = if channel_type == "telegram" {
-            Some(cfg.clone())
-        } else {
-            None
-        };
-        let dc = if channel_type == "discord" {
-            Some(cfg.clone())
-        } else {
-            None
-        };
-        let yaml = generate_main_yaml("clawhive", tg, dc);
-        fs::write(&main_path, yaml)?;
-        return Ok(());
-    }
+    let mut main_cfg = load_main_config(config_root)?;
 
-    let content = fs::read_to_string(&main_path)?;
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
-
-    // Ensure required top-level sections exist with defaults
-    if doc.get("app").is_none() {
-        doc["app"] = serde_yaml::to_value(serde_yaml::Mapping::from_iter([(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String("clawhive".into()),
-        )]))?;
-    }
-    if doc.get("runtime").is_none() {
-        doc["runtime"] = serde_yaml::to_value(serde_yaml::Mapping::from_iter([(
-            serde_yaml::Value::String("max_concurrent".into()),
-            serde_yaml::Value::Number(4.into()),
-        )]))?;
-    }
-    if doc.get("features").is_none() {
-        doc["features"] = serde_yaml::to_value(serde_yaml::Mapping::from_iter([
-            (
-                serde_yaml::Value::String("multi_agent".into()),
-                serde_yaml::Value::Bool(true),
-            ),
-            (
-                serde_yaml::Value::String("sub_agent".into()),
-                serde_yaml::Value::Bool(true),
-            ),
-            (
-                serde_yaml::Value::String("tui".into()),
-                serde_yaml::Value::Bool(true),
-            ),
-            (
-                serde_yaml::Value::String("cli".into()),
-                serde_yaml::Value::Bool(true),
-            ),
-        ]))?;
-    }
-    if doc.get("channels").is_none() {
-        doc["channels"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-
-    let channels = doc
-        .get_mut("channels")
-        .and_then(|c| c.as_mapping_mut())
-        .ok_or_else(|| anyhow!("main.yaml missing channels section"))?;
-
-    let mut connector_map = serde_yaml::Mapping::new();
-    connector_map.insert(
-        serde_yaml::Value::String("connector_id".into()),
-        serde_yaml::Value::String(cfg.connector_id.clone()),
-    );
-    connector_map.insert(
-        serde_yaml::Value::String("token".into()),
-        serde_yaml::Value::String(cfg.token.clone()),
-    );
-    if channel_type == "discord" && !cfg.groups.is_empty() {
-        let groups_seq: Vec<serde_yaml::Value> = cfg
-            .groups
-            .iter()
-            .map(|g| serde_yaml::Value::String(g.clone()))
-            .collect();
-        connector_map.insert(
-            serde_yaml::Value::String("groups".into()),
-            serde_yaml::Value::Sequence(groups_seq),
-        );
-    }
-    if !cfg.require_mention {
-        connector_map.insert(
-            serde_yaml::Value::String("require_mention".into()),
-            serde_yaml::Value::Bool(false),
-        );
-    }
-    let connector_value = serde_yaml::Value::Mapping(connector_map);
-
-    let channel_key = serde_yaml::Value::String(channel_type.to_string());
-    match channels.get_mut(&channel_key) {
-        Some(section) => {
-            section["enabled"] = serde_yaml::Value::Bool(true);
-            if let Some(seq) = section
-                .get_mut("connectors")
-                .and_then(|connectors| connectors.as_sequence_mut())
-            {
-                seq.retain(|connector| {
-                    connector.get("connector_id").and_then(|v| v.as_str())
-                        != Some(&cfg.connector_id)
-                });
-                seq.push(connector_value);
-            } else {
-                section["connectors"] = serde_yaml::Value::Sequence(vec![connector_value]);
+    match channel_type {
+        "telegram" => {
+            let connector = TelegramConnectorConfig {
+                connector_id: cfg.connector_id.clone(),
+                token: cfg.token.clone(),
+                require_mention: cfg.require_mention,
+            };
+            match main_cfg.channels.telegram.as_mut() {
+                Some(tg) => {
+                    tg.enabled = true;
+                    tg.connectors.retain(|c| c.connector_id != cfg.connector_id);
+                    tg.connectors.push(connector);
+                }
+                None => {
+                    main_cfg.channels.telegram = Some(TelegramChannelConfig {
+                        enabled: true,
+                        connectors: vec![connector],
+                    });
+                }
             }
         }
-        None => {
-            let mut section = serde_yaml::Mapping::new();
-            section.insert("enabled".into(), serde_yaml::Value::Bool(true));
-            section.insert(
-                "connectors".into(),
-                serde_yaml::Value::Sequence(vec![connector_value]),
-            );
-            channels.insert(channel_key, serde_yaml::Value::Mapping(section));
+        "discord" => {
+            let connector = DiscordConnectorConfig {
+                connector_id: cfg.connector_id.clone(),
+                token: cfg.token.clone(),
+                groups: cfg.groups.clone(),
+                require_mention: cfg.require_mention,
+            };
+            match main_cfg.channels.discord.as_mut() {
+                Some(dc) => {
+                    dc.enabled = true;
+                    dc.connectors.retain(|c| c.connector_id != cfg.connector_id);
+                    dc.connectors.push(connector);
+                }
+                None => {
+                    main_cfg.channels.discord = Some(DiscordChannelConfig {
+                        enabled: true,
+                        connectors: vec![connector],
+                    });
+                }
+            }
         }
+        _ => return Err(anyhow!("unsupported channel type: {channel_type}")),
     }
 
-    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+    save_main_config(config_root, &main_cfg)?;
     Ok(())
 }
 
@@ -1011,28 +957,14 @@ fn remove_channel_from_config(config_root: &Path, connector_id: &str) -> Result<
         return Ok(());
     }
 
-    let content = fs::read_to_string(&main_path)?;
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
-    if let Some(channels) = doc
-        .get_mut("channels")
-        .and_then(|channels| channels.as_mapping_mut())
-    {
-        for (_channel, section) in channels.iter_mut() {
-            if let Some(connectors) = section
-                .get_mut("connectors")
-                .and_then(|connectors| connectors.as_sequence_mut())
-            {
-                connectors.retain(|connector| {
-                    connector
-                        .get("connector_id")
-                        .and_then(|value| value.as_str())
-                        != Some(connector_id)
-                });
-            }
-        }
+    let mut cfg = load_main_config(config_root)?;
+    if let Some(tg) = cfg.channels.telegram.as_mut() {
+        tg.connectors.retain(|c| c.connector_id != connector_id);
     }
-
-    fs::write(&main_path, serde_yaml::to_string(&doc)?)?;
+    if let Some(dc) = cfg.channels.discord.as_mut() {
+        dc.connectors.retain(|c| c.connector_id != connector_id);
+    }
+    save_main_config(config_root, &cfg)?;
     Ok(())
 }
 
@@ -1340,59 +1272,68 @@ fn generate_agent_yaml(agent_id: &str, name: &str, emoji: &str, primary_model: &
     )
 }
 
+/// Load `main.yaml` as a typed `MainConfig`, falling back to defaults if the
+/// file is missing or incomplete.
+fn load_main_config(config_root: &Path) -> Result<MainConfig> {
+    let main_path = config_root.join("config/main.yaml");
+    if !main_path.exists() {
+        return Ok(MainConfig::default());
+    }
+    let content = fs::read_to_string(&main_path)?;
+    // If the file exists but can't parse (e.g. only has web_password_hash),
+    // merge the raw value into a default config.
+    match serde_yaml::from_str::<MainConfig>(&content) {
+        Ok(cfg) => Ok(cfg),
+        Err(_) => {
+            // Parse as raw value and try to preserve web_password_hash
+            let raw: serde_yaml::Value = serde_yaml::from_str(&content)
+                .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            let mut cfg = MainConfig::default();
+            if let Some(hash) = raw.get("web_password_hash").and_then(|v| v.as_str()) {
+                cfg.web_password_hash = Some(hash.to_string());
+            }
+            Ok(cfg)
+        }
+    }
+}
+
+/// Save `MainConfig` to `config/main.yaml`.
+fn save_main_config(config_root: &Path, config: &MainConfig) -> Result<()> {
+    let main_path = config_root.join("config/main.yaml");
+    let yaml = serde_yaml::to_string(config)?;
+    fs::write(&main_path, yaml)?;
+    Ok(())
+}
+
+#[cfg(test)]
 fn generate_main_yaml(
-    app_name: &str,
+    _app_name: &str,
     telegram: Option<ChannelConfig>,
     discord: Option<ChannelConfig>,
 ) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "app:\n  name: {app_name}\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n"
-    ));
-
-    match telegram {
-        Some(cfg) => {
-            out.push_str("  telegram:\n    enabled: true\n    connectors:\n");
-            out.push_str(&format!(
-                "      - connector_id: {}\n        token: \"{}\"\n",
-                cfg.connector_id, cfg.token
-            ));
-            if !cfg.require_mention {
-                out.push_str("        require_mention: false\n");
-            }
-        }
-        None => {
-            out.push_str("  telegram:\n    enabled: false\n    connectors: []\n");
-        }
+    let mut cfg = MainConfig::default();
+    if let Some(tg) = telegram {
+        cfg.channels.telegram = Some(TelegramChannelConfig {
+            enabled: true,
+            connectors: vec![TelegramConnectorConfig {
+                connector_id: tg.connector_id,
+                token: tg.token,
+                require_mention: tg.require_mention,
+            }],
+        });
     }
-
-    match discord {
-        Some(cfg) => {
-            out.push_str("  discord:\n    enabled: true\n    connectors:\n");
-            out.push_str(&format!(
-                "      - connector_id: {}\n        token: \"{}\"\n",
-                cfg.connector_id, cfg.token
-            ));
-            if !cfg.groups.is_empty() {
-                out.push_str("        groups:\n");
-                for g in &cfg.groups {
-                    out.push_str(&format!("          - \"{g}\"\n"));
-                }
-            }
-            if !cfg.require_mention {
-                out.push_str("        require_mention: false\n");
-            }
-        }
-        None => {
-            out.push_str("  discord:\n    enabled: false\n    connectors: []\n");
-        }
+    if let Some(dc) = discord {
+        cfg.channels.discord = Some(DiscordChannelConfig {
+            enabled: true,
+            connectors: vec![DiscordConnectorConfig {
+                connector_id: dc.connector_id,
+                token: dc.token,
+                groups: dc.groups,
+                require_mention: dc.require_mention,
+            }],
+        });
     }
-
-    out.push_str(
-        "\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
-    );
-
-    out
+    serde_yaml::to_string(&cfg).expect("failed to serialize MainConfig")
 }
 
 fn generate_routing_yaml(
@@ -1542,8 +1483,9 @@ mod tests {
             }),
         );
 
-        assert!(yaml.contains("token: \"123:telegram-token\""));
-        assert!(yaml.contains("token: \"discord-token\""));
+        // Tokens must appear as plaintext (not env-var references)
+        assert!(yaml.contains("123:telegram-token"));
+        assert!(yaml.contains("discord-token"));
         assert!(!yaml.contains("${"));
     }
 
