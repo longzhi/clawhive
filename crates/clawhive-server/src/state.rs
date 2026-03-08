@@ -13,7 +13,7 @@ pub struct AppState {
     pub bus: Arc<clawhive_bus::EventBus>,
     /// Optional gateway handle for routes that need to inject inbound messages.
     pub gateway: Option<Arc<Gateway>>,
-    pub web_password_hash: Option<String>,
+    pub web_password_hash: Arc<RwLock<Option<String>>>,
     pub session_store: Arc<RwLock<HashMap<String, Instant>>>,
     /// Whether the server was started in daemon mode (for restart).
     pub daemon_mode: bool,

@@ -11,9 +11,10 @@ import {
   useUpdateWebSearch,
   useActionbookConfig,
   useUpdateActionbook,
+  useSetPassword,
 } from "@/hooks/use-api";
 import { useThemeStore } from "@/stores/theme";
-import { Loader2, Search, BookOpen, Check, Sun, Moon, Monitor } from "lucide-react";
+import { Loader2, Search, BookOpen, Check, Sun, Moon, Monitor, Lock } from "lucide-react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
@@ -37,6 +38,79 @@ function SettingsSkeleton() {
         </Card>
       ))}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Security Card — change console password
+// ---------------------------------------------------------------------------
+function SecurityCard() {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const setPasswordMutation = useSetPassword();
+
+  const handleSave = async () => {
+    setError("");
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match");
+      return;
+    }
+    try {
+      await setPasswordMutation.mutateAsync(password);
+      setPassword("");
+      setConfirm("");
+      toast.success("Password updated");
+    } catch {
+      toast.error("Failed to update password");
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <Lock className="h-5 w-5 text-muted-foreground" />
+          <div>
+            <CardTitle className="text-base">Security</CardTitle>
+            <CardDescription className="mt-1">Manage console access</CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-2">
+          <Label htmlFor="sec-password">New Password</Label>
+          <Input
+            id="sec-password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Enter new password (min 6 characters)"
+          />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="sec-confirm">Confirm Password</Label>
+          <Input
+            id="sec-confirm"
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="Confirm new password"
+          />
+        </div>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <Button
+          disabled={setPasswordMutation.isPending || !password || !confirm}
+          onClick={handleSave}
+        >
+          {setPasswordMutation.isPending ? "Saving..." : "Update Password"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -208,6 +282,9 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Security */}
+      <SecurityCard />
 
       {/* Appearance */}
       <Card>

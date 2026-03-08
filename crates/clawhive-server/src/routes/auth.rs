@@ -74,7 +74,8 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<PasswordRequest>,
 ) -> impl IntoResponse {
-    let Some(password_hash) = state.web_password_hash.as_deref() else {
+    let password_hash = state.web_password_hash.read().unwrap();
+    let Some(ref hash_str) = *password_hash else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Password not configured" })),
@@ -82,7 +83,7 @@ async fn login(
             .into_response();
     };
 
-    let Ok(valid) = verify(&body.password, password_hash) else {
+    let Ok(valid) = verify(&body.password, hash_str) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "Password verification failed" })),
@@ -110,7 +111,7 @@ async fn login(
 }
 
 async fn check(State(state): State<AppState>, headers: HeaderMap) -> Json<CheckResponse> {
-    let auth_required = state.web_password_hash.is_some();
+    let auth_required = state.web_password_hash.read().unwrap().is_some();
     if !auth_required {
         return Json(CheckResponse {
             authenticated: false,
@@ -154,7 +155,7 @@ async fn set_password(
             .into_response();
     }
 
-    if state.web_password_hash.is_some() {
+    if state.web_password_hash.read().unwrap().is_some() {
         let authenticated = extract_session_token(&headers)
             .as_deref()
             .is_some_and(|token| is_valid_session(&state, token));
@@ -183,7 +184,21 @@ async fn set_password(
             .into_response();
     };
 
-    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    // Update in-memory state so auth takes effect immediately without restart
+    if let Ok(mut guard) = state.web_password_hash.write() {
+        *guard = Some(password_hash.clone());
+    }
+
+    // Auto-login: create session and return cookie
+    let token = create_session(&state);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, make_set_cookie(&token));
+    (
+        StatusCode::OK,
+        headers,
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
 }
 
 async fn status(_state: State<AppState>) -> Json<AuthStatusResponse> {

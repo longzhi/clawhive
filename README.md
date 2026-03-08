@@ -219,6 +219,11 @@ Note: JSONL files are NOT indexed. Only Markdown memory files participate in sea
 
 </details>
 
+```bash
+clawhive start
+# Open http://localhost:8848/setup in your browser
+```
+
 <details>
 <summary><strong>Technical Comparison (vs OpenClaw)</strong></summary>
 
@@ -233,8 +238,112 @@ Note: JSONL files are NOT indexed. Only Markdown memory files participate in sea
 
 </details>
 
-<details>
-<summary><strong>Configuration</strong></summary>
+### Run
+
+```bash
+# Setup / config
+clawhive setup
+clawhive validate
+
+# Chat mode (local REPL)
+clawhive chat
+
+# Service lifecycle
+clawhive start
+clawhive start --daemon  # alias: -d
+clawhive restart
+clawhive restart --daemon  # alias: -d
+clawhive stop
+
+# Dashboard mode (observability TUI)
+clawhive dashboard
+clawhive dashboard --port 8848
+
+# Code mode (developer TUI)
+clawhive code
+clawhive code --port 8848
+
+# Agents / sessions
+clawhive agent list
+clawhive agent show clawhive-main
+clawhive session reset <session_key>
+
+# Schedules / tasks
+clawhive schedule list
+clawhive schedule run <schedule_id>
+clawhive task trigger clawhive-main "summarize today's work"
+
+# Auth
+clawhive auth status
+clawhive auth login openai
+```
+
+## Quick Start (Developers)
+
+Prerequisites: Rust 1.92+
+
+```bash
+# Clone and build
+git clone https://github.com/longzhi/clawhive.git
+cd clawhive
+cargo build --workspace
+
+# Interactive setup (configure providers, agents, channels)
+cargo run -- setup
+
+# Chat mode (local REPL)
+cargo run -- chat
+
+# Start all configured channel bots
+cargo run -- start
+
+# Start as background daemon
+cargo run -- start --daemon  # alias: -d
+
+# Restart / stop
+cargo run -- restart
+cargo run -- restart --daemon
+cargo run -- stop
+
+# Dashboard mode (observability TUI)
+cargo run -- dashboard
+cargo run -- dashboard --port 8848
+
+# Coding agent mode (attach local TUI channel to running gateway)
+cargo run -- code
+cargo run -- code --port 8848
+```
+
+## Developer Workflow
+
+Use local quality gates before pushing:
+
+```bash
+# One-time: install repo-managed git hooks
+just install-hooks
+
+# Run all CI-equivalent checks locally
+just check
+
+# Release flow: check -> push main -> replace tag and push tag
+just release v0.1.0-alpha.15
+```
+
+If you don't use `just`, use scripts directly:
+
+```bash
+bash scripts/install-git-hooks.sh
+bash scripts/check.sh
+bash scripts/release.sh v0.1.0-alpha.15
+```
+
+`just check` runs:
+
+1. `cargo fmt --all -- --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo test --workspace`
+
+## Configuration
 
 Configuration is managed through `clawhive setup`, which interactively generates YAML files under `~/.clawhive/config/`:
 

@@ -41,7 +41,7 @@ fn is_exempt_path(path: &str, state: &AppState) -> bool {
     path.starts_with("/api/setup")
         || path == "/api/auth/login"
         || path == "/api/auth/check"
-        || (path == "/api/auth/set-password" && state.web_password_hash.is_none())
+        || (path == "/api/auth/set-password" && state.web_password_hash.read().unwrap().is_none())
 }
 
 fn unauthorized_response() -> Response {
@@ -100,7 +100,7 @@ async fn auth_middleware(State(state): State<AppState>, request: Request, next: 
 
     if !path.starts_with("/api/")
         || is_exempt_path(path, &state)
-        || state.web_password_hash.is_none()
+        || state.web_password_hash.read().unwrap().is_none()
     {
         return next.run(request).await;
     }
@@ -148,7 +148,7 @@ mod tests {
                 root: root.to_path_buf(),
                 bus: Arc::new(EventBus::new(16)),
                 gateway: None,
-                web_password_hash,
+                web_password_hash: Arc::new(std::sync::RwLock::new(web_password_hash)),
                 session_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
                 daemon_mode: false,
                 port: 3000,

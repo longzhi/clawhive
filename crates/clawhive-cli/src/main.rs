@@ -2101,7 +2101,7 @@ async fn start_bot(
         root: root.to_path_buf(),
         bus: Arc::clone(&bus),
         gateway: Some(gateway.clone()),
-        web_password_hash,
+        web_password_hash: Arc::new(RwLock::new(web_password_hash)),
         session_store: Arc::new(RwLock::new(HashMap::<String, Instant>::new())),
         daemon_mode: false,
         port,

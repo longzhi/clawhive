@@ -226,7 +226,7 @@ mod tests {
             root,
             bus: Arc::new(clawhive_bus::EventBus::new(16)),
             gateway: None,
-            web_password_hash: None,
+            web_password_hash: Arc::new(std::sync::RwLock::new(None)),
             session_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             daemon_mode: false,
             port: 3000,

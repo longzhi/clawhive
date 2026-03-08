@@ -585,7 +585,7 @@ export function useDeleteProvider() {
 export function useAuthCheck() {
   return useQuery({
     queryKey: ["auth-check"],
-    queryFn: () => apiFetch<{ authenticated: boolean }>("/api/auth/check"),
+    queryFn: () => apiFetch<{ authenticated: boolean; auth_required: boolean }>("/api/auth/check"),
     retry: false,
   });
 }
