@@ -55,10 +55,9 @@ clawhive validate
 clawhive chat
 
 # 服务生命周期
-clawhive up                  # 后台守护进程启动（等效于 start -d）
 clawhive start               # 前台启动
-clawhive start --daemon      # 后台守护进程启动（别名：-d）
-clawhive restart              # 停止 + 后台守护进程重启
+clawhive up                  # 若未运行则启动（始终后台守护进程）
+clawhive restart
 clawhive stop
 
 # 仪表板模式（可观测性 TUI）

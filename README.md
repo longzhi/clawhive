@@ -55,10 +55,9 @@ clawhive validate
 clawhive chat
 
 # Service lifecycle
-clawhive up                  # start as background daemon (alias for start -d)
 clawhive start               # start in foreground
-clawhive start --daemon      # start as background daemon (alias: -d)
-clawhive restart              # stop + start as daemon
+clawhive up                  # start if not already running (always daemon)
+clawhive restart
 clawhive stop
 
 # Dashboard mode (observability TUI)
@@ -250,8 +249,8 @@ clawhive chat
 
 # Service lifecycle
 clawhive start
-clawhive start --daemon  # alias: -d
-clawhive restart               # stop + start as daemon
+clawhive up                 # start if not already running (always daemon)
+clawhive restart
 clawhive stop
 
 # Dashboard mode (observability TUI)
@@ -296,11 +295,11 @@ cargo run -- chat
 # Start all configured channel bots
 cargo run -- start
 
-# Start as background daemon
-cargo run -- start --daemon  # alias: -d
+# Start if not already running (always daemon)
+cargo run -- up
 
 # Restart / stop
-cargo run -- restart              # stop + start as daemon
+cargo run -- restart
 cargo run -- stop
 
 # Dashboard mode (observability TUI)
