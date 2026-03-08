@@ -85,6 +85,8 @@ enum Commands {
         #[arg(long)]
         no_security: bool,
     },
+    #[command(about = "Show clawhive status")]
+    Status,
     #[command(about = "Stop a running clawhive process")]
     Stop,
     #[command(about = "Restart clawhive (stop + start)")]
@@ -443,6 +445,12 @@ async fn main() -> Result<()> {
             ensure_skeleton_config(&cli.config_root, port)?;
             let security_override = resolve_security_override(security, no_security);
             daemonize(&cli.config_root, false, port, security_override)?;
+            // Brief pause to let the daemon start and write its PID file
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            commands::status::print_status(&cli.config_root);
+        }
+        Commands::Status => {
+            commands::status::print_status(&cli.config_root);
         }
         Commands::Stop => {
             stop_process(&cli.config_root)?;
@@ -1765,7 +1773,7 @@ fn write_pid_file(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_pid_file(root: &Path) -> Result<Option<u32>> {
+pub(crate) fn read_pid_file(root: &Path) -> Result<Option<u32>> {
     let path = pid_file_path(root);
     match std::fs::read_to_string(&path) {
         Ok(content) => {
@@ -1781,7 +1789,7 @@ fn remove_pid_file(root: &Path) {
     let _ = std::fs::remove_file(pid_file_path(root));
 }
 
-fn is_process_running(pid: u32) -> bool {
+pub(crate) fn is_process_running(pid: u32) -> bool {
     // kill(pid, 0) checks if process exists without sending a signal
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
