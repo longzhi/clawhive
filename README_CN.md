@@ -35,7 +35,7 @@ source ~/.zshrc  # 或 ~/.bashrc
 
 ```bash
 clawhive start
-# 在浏览器中打开 http://localhost:3000/setup
+# 在浏览器中打开 http://localhost:8848/setup
 ```
 
 **方式 B：CLI 配置向导** — 运行交互式终端向导：

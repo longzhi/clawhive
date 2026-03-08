@@ -84,6 +84,6 @@ clawhive --version 2>/dev/null || true
 echo ""
 echo "Next steps:"
 echo "  clawhive setup    Interactive terminal wizard to configure providers, agents, and channels"
-echo "  clawhive start    Start the server and configure via http://localhost:3000/setup"
+echo "  clawhive start    Start the server and configure via http://localhost:8848/setup"
 echo ""
 echo "Docs: https://github.com/longzhi/clawhive"

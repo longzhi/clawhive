@@ -35,7 +35,7 @@ Configure providers, agents, and channels using either method:
 
 ```bash
 clawhive start
-# Open http://localhost:3000/setup in your browser
+# Open http://localhost:8848/setup in your browser
 ```
 
 **Option B: CLI Setup Wizard** — Run the interactive terminal wizard:
