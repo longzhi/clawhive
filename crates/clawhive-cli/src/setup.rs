@@ -157,6 +157,10 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
                         style(format!("Config validation warning: {err}")).yellow()
                     ))?;
                 }
+
+                // Offer to set web console password (skippable)
+                handle_set_web_password(config_root, &theme, &term)?;
+
                 term.write_line(&format!(
                     "{} {}",
                     CRAB,
@@ -171,6 +175,90 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+fn handle_set_web_password(config_root: &Path, theme: &ColorfulTheme, term: &Term) -> Result<()> {
+    // Check if password is already configured
+    let main_yaml_path = config_root.join("config/main.yaml");
+    let already_set = fs::read_to_string(&main_yaml_path)
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
+        .and_then(|val| val["web_password_hash"].as_str().map(|_| ()))
+        .is_some();
+
+    if already_set {
+        return Ok(());
+    }
+
+    term.write_line("")?;
+    term.write_line(&format!(
+        "  {} {}",
+        ARROW,
+        style("Web Console Password").bold()
+    ))?;
+    term.write_line("    Set a password to protect your web console.")?;
+    term.write_line("    Without a password, anyone with network access can control your agents.")?;
+    term.write_line("")?;
+
+    let set_now = Confirm::with_theme(theme)
+        .with_prompt("Set a web console password now? (recommended)")
+        .default(true)
+        .interact()?;
+
+    if !set_now {
+        term.write_line(&format!(
+            "    {} {}",
+            ARROW,
+            style("Skipped. You can set a password later via the web console.").dim()
+        ))?;
+        return Ok(());
+    }
+
+    loop {
+        let password: String = Input::with_theme(theme)
+            .with_prompt("  Password (min 6 chars)")
+            .validate_with(|input: &String| {
+                if input.trim().len() >= 6 {
+                    Ok(())
+                } else {
+                    Err("Password must be at least 6 characters")
+                }
+            })
+            .interact_text()?;
+
+        let confirm: String = Input::with_theme(theme)
+            .with_prompt("  Confirm password")
+            .interact_text()?;
+
+        if password != confirm {
+            term.write_line(&format!(
+                "    {} {}",
+                ARROW,
+                style("Passwords do not match. Try again.").red()
+            ))?;
+            continue;
+        }
+
+        let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST)
+            .map_err(|e| anyhow!("Failed to hash password: {e}"))?;
+
+        // Write hash to main.yaml
+        let content = fs::read_to_string(&main_yaml_path).unwrap_or_default();
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)
+            .unwrap_or_else(|_| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        doc["web_password_hash"] = serde_yaml::Value::String(hash);
+        let yaml = serde_yaml::to_string(&doc)?;
+        fs::write(&main_yaml_path, yaml)?;
+
+        term.write_line(&format!(
+            "    {} {}",
+            ARROW,
+            style("Password set successfully.").green()
+        ))?;
+        break;
     }
 
     Ok(())

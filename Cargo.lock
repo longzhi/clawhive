@@ -682,6 +682,7 @@ name = "clawhive-cli"
 version = "0.1.0-alpha.19"
 dependencies = [
  "anyhow",
+ "bcrypt",
  "chrono",
  "clap",
  "clawhive-auth",
