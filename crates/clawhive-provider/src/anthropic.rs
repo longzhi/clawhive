@@ -53,11 +53,21 @@ impl AnthropicProvider {
         api_base: impl Into<String>,
         auth_profile: Option<AuthProfile>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+        Self::with_client(client, api_key, api_base, auth_profile)
+    }
+
+    pub fn with_client(
+        client: reqwest::Client,
+        api_key: impl Into<String>,
+        api_base: impl Into<String>,
+        auth_profile: Option<AuthProfile>,
+    ) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .unwrap_or_default(),
+            client,
             api_key: api_key.into(),
             api_base: api_base.into().trim_end_matches('/').to_string(),
             auth_profile,

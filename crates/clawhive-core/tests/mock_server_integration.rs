@@ -14,6 +14,14 @@ use clawhive_schema::{BusMessage, InboundMessage, SessionKey};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn no_proxy_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap()
+}
+
 fn test_inbound(text: &str) -> InboundMessage {
     InboundMessage {
         trace_id: uuid::Uuid::new_v4(),
@@ -146,7 +154,12 @@ async fn mock_server_e2e_chat() {
         .mount(&server)
         .await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
@@ -163,7 +176,12 @@ async fn mock_server_records_sessions() {
     let server = MockServer::start().await;
     mount_success(&server, "session reply").await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
@@ -180,7 +198,12 @@ async fn mock_server_creates_session() {
     let server = MockServer::start().await;
     mount_success(&server, "session reply").await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
@@ -199,7 +222,12 @@ async fn mock_server_publishes_bus_events() {
     let server = MockServer::start().await;
     mount_success(&server, "bus reply").await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe(Topic::ReplyReady).await;
@@ -231,7 +259,12 @@ async fn mock_server_handles_api_error() {
         .mount(&server)
         .await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);
@@ -267,7 +300,12 @@ async fn mock_server_handles_rate_limit() {
     let mut registry = ProviderRegistry::new();
     registry.register(
         "anthropic",
-        Arc::new(AnthropicProvider::new("test-key", server.uri())),
+        Arc::new(AnthropicProvider::with_client(
+            no_proxy_client(),
+            "test-key",
+            server.uri(),
+            None,
+        )),
     );
     let aliases = HashMap::from([(
         "sonnet".to_string(),
@@ -312,11 +350,21 @@ async fn mock_server_fallback_on_failure() {
     let mut registry = ProviderRegistry::new();
     registry.register(
         "primary",
-        Arc::new(AnthropicProvider::new("test-key", primary.uri())),
+        Arc::new(AnthropicProvider::with_client(
+            no_proxy_client(),
+            "test-key",
+            primary.uri(),
+            None,
+        )),
     );
     registry.register(
         "fallback",
-        Arc::new(AnthropicProvider::new("test-key", fallback.uri())),
+        Arc::new(AnthropicProvider::with_client(
+            no_proxy_client(),
+            "test-key",
+            fallback.uri(),
+            None,
+        )),
     );
 
     let agent = AgentConfig {
@@ -349,7 +397,8 @@ async fn mock_server_validates_request_headers() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new("test-key", server.uri());
+    let provider =
+        AnthropicProvider::with_client(no_proxy_client(), "test-key", server.uri(), None);
     let resp = provider
         .chat(LlmRequest {
             model: "claude-sonnet-4-5".into(),
@@ -366,7 +415,8 @@ async fn mock_server_validates_request_headers() {
 
 #[tokio::test]
 async fn mock_server_handles_connection_error() {
-    let provider = AnthropicProvider::new("test-key", "http://127.0.0.1:9");
+    let provider =
+        AnthropicProvider::with_client(no_proxy_client(), "test-key", "http://127.0.0.1:9", None);
     let err = provider
         .chat(LlmRequest {
             model: "claude-sonnet-4-5".into(),
@@ -395,7 +445,12 @@ async fn mock_server_multi_turn_session() {
         .mount(&server)
         .await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
@@ -423,7 +478,12 @@ async fn mock_server_includes_session_history() {
         .mount(&server)
         .await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
@@ -455,7 +515,12 @@ async fn expired_session_keeps_jsonl_history() {
     mount_success(&server, "first reply").await;
     mount_success(&server, "second reply").await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, tmp) = make_orchestrator_with_provider(provider, memory.clone(), &bus);
@@ -518,7 +583,12 @@ async fn mock_server_tool_use_loop() {
         .mount(&server)
         .await;
 
-    let provider = Arc::new(AnthropicProvider::new("test-key", server.uri()));
+    let provider = Arc::new(AnthropicProvider::with_client(
+        no_proxy_client(),
+        "test-key",
+        server.uri(),
+        None,
+    ));
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus);

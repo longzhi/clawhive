@@ -9,6 +9,14 @@ use tokio_stream::StreamExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn no_proxy_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap()
+}
+
 fn mock_openai_response(text: &str) -> serde_json::Value {
     serde_json::json!({
         "choices": [{
@@ -63,7 +71,7 @@ async fn openai_basic_chat_with_header_verification() {
         .mount(&server)
         .await;
 
-    let provider = OpenAiProvider::new("test-key", server.uri());
+    let provider = OpenAiProvider::with_client(no_proxy_client(), "test-key", server.uri(), None);
     let resp = provider
         .chat(LlmRequest {
             model: "gpt-4o".into(),
@@ -97,7 +105,7 @@ async fn openai_tool_calling_with_stop_reason_normalization() {
         .mount(&server)
         .await;
 
-    let provider = OpenAiProvider::new("test-key", server.uri());
+    let provider = OpenAiProvider::with_client(no_proxy_client(), "test-key", server.uri(), None);
     let resp = provider
         .chat(LlmRequest {
             model: "gpt-4o".into(),
@@ -144,7 +152,7 @@ async fn openai_streaming_text_with_deltas() {
         .mount(&server)
         .await;
 
-    let provider = OpenAiProvider::new("test-key", server.uri());
+    let provider = OpenAiProvider::with_client(no_proxy_client(), "test-key", server.uri(), None);
     let mut stream = provider
         .stream(LlmRequest {
             model: "gpt-4o".into(),
@@ -190,7 +198,7 @@ async fn openai_streaming_tool_calls_with_accumulated_blocks() {
         .mount(&server)
         .await;
 
-    let provider = OpenAiProvider::new("test-key", server.uri());
+    let provider = OpenAiProvider::with_client(no_proxy_client(), "test-key", server.uri(), None);
     let mut stream = provider
         .stream(LlmRequest {
             model: "gpt-4o".into(),
@@ -235,7 +243,7 @@ async fn openai_error_handling_401_not_retryable() {
         .mount(&server)
         .await;
 
-    let provider = OpenAiProvider::new("test-key", server.uri());
+    let provider = OpenAiProvider::with_client(no_proxy_client(), "test-key", server.uri(), None);
     let err = provider
         .chat(LlmRequest {
             model: "gpt-4o".into(),
@@ -275,7 +283,12 @@ async fn openai_rate_limit_429_retry_via_router() {
     let mut registry = ProviderRegistry::new();
     registry.register(
         "openai",
-        Arc::new(OpenAiProvider::new("test-key", server.uri())),
+        Arc::new(OpenAiProvider::with_client(
+            no_proxy_client(),
+            "test-key",
+            server.uri(),
+            None,
+        )),
     );
     let aliases = HashMap::from([("gpt4o".to_string(), "openai/gpt-4o".to_string())]);
     let router = LlmRouter::new(registry, aliases, vec![]);
@@ -296,7 +309,8 @@ async fn openai_rate_limit_429_retry_via_router() {
 
 #[tokio::test]
 async fn openai_connection_error_retryable() {
-    let provider = OpenAiProvider::new("test-key", "http://127.0.0.1:9");
+    let provider =
+        OpenAiProvider::with_client(no_proxy_client(), "test-key", "http://127.0.0.1:9", None);
     let err = provider
         .chat(LlmRequest {
             model: "gpt-4o".into(),
