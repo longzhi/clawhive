@@ -4,7 +4,7 @@ use clawhive_core::config::SecurityMode;
 use clawhive_core::load_config;
 use console::style;
 
-use crate::{is_process_running, read_pid_file};
+use crate::runtime::pid::{is_process_running, read_pid_file};
 
 pub fn print_status(root: &Path) {
     print_status_ex(root, false);
