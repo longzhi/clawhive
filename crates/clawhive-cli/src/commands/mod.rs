@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod allowlist;
 pub mod auth;
 pub mod config;
 pub mod logs;
