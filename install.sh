@@ -80,16 +80,10 @@ if ! echo "$PATH" | grep -q '\.clawhive/bin'; then
 fi
 
 echo "clawhive ${VERSION} installed to ${INSTALL_DIR}/clawhive"
-"$INSTALL_DIR/clawhive" --version 2>/dev/null || true
-echo ""
-echo "To start using clawhive now, run:"
-echo ""
-echo "  source <(\"$INSTALL_DIR/clawhive\" env)"
-echo ""
-echo "Or open a new terminal."
+clawhive --version 2>/dev/null || true
 echo ""
 echo "Next steps:"
 echo "  clawhive setup    Interactive terminal wizard to configure providers, agents, and channels"
-echo "  clawhive start    Start the server and configure via http://localhost:8848/setup"
+echo "  clawhive start    Start the server and configure via http://localhost:3000/setup"
 echo ""
 echo "Docs: https://github.com/longzhi/clawhive"

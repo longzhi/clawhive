@@ -19,10 +19,10 @@ curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | 
 
 自动检测操作系统和架构，下载最新版本，将二进制文件和 Skill 安装到 `~/.clawhive/`。
 
-安装后在当前终端激活：
+安装后重启终端或执行：
 
 ```bash
-source <(~/.clawhive/bin/clawhive env)
+source ~/.zshrc  # 或 ~/.bashrc
 ```
 
 也可以从 [GitHub Releases](https://github.com/longzhi/clawhive/releases) 手动下载。
