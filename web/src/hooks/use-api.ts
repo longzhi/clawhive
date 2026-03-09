@@ -429,6 +429,7 @@ export interface ProviderPreset {
   name: string;
   api_base: string;
   needs_key: boolean;
+  needs_base_url: boolean;
   default_model: string;
   models: string[];
 }

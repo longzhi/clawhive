@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[pre-push] running checks..."
-bash scripts/check.sh
+echo "[pre-push] cargo test --workspace"
+cargo test --workspace

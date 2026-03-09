@@ -93,6 +93,7 @@ async fn get_provider_presets() -> Json<Vec<serde_json::Value>> {
                 "name": p.name,
                 "api_base": p.api_base,
                 "needs_key": p.needs_key,
+                "needs_base_url": p.needs_base_url,
                 "default_model": p.default_model,
                 "models": p.models,
             })

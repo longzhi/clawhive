@@ -7,6 +7,7 @@ pub struct ProviderPreset {
     pub name: &'static str,
     pub api_base: &'static str,
     pub needs_key: bool,
+    pub needs_base_url: bool,
     pub default_model: &'static str,
     pub models: &'static [&'static str],
 }
@@ -17,6 +18,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Anthropic",
         api_base: "https://api.anthropic.com/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "claude-opus-4-6",
         models: &[
             "claude-opus-4-6",
@@ -31,6 +33,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "OpenAI",
         api_base: "https://api.openai.com/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "gpt-5.2",
         models: &[
             "gpt-5.2",
@@ -46,6 +49,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Azure OpenAI",
         api_base: "https://<your-resource>.openai.azure.com/openai/v1",
         needs_key: true,
+        needs_base_url: true,
         default_model: "gpt-5.3-codex",
         models: &[
             "gpt-5.3-codex",
@@ -60,6 +64,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Google Gemini",
         api_base: "https://generativelanguage.googleapis.com/v1beta",
         needs_key: true,
+        needs_base_url: false,
         default_model: "gemini-2.5-pro",
         models: &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
     },
@@ -68,6 +73,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "DeepSeek",
         api_base: "https://api.deepseek.com/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "deepseek-chat",
         models: &["deepseek-chat", "deepseek-reasoner"],
     },
@@ -76,6 +82,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Groq",
         api_base: "https://api.groq.com/openai/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "llama-3.3-70b-versatile",
         models: &["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
     },
@@ -84,6 +91,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Ollama",
         api_base: "http://localhost:11434/v1",
         needs_key: false,
+        needs_base_url: false,
         default_model: "llama3.2",
         models: &["llama3.2", "qwen2.5-coder", "mistral"],
     },
@@ -92,6 +100,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "OpenRouter",
         api_base: "https://openrouter.ai/api/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "anthropic/claude-sonnet-4-6",
         models: &[
             "openai/gpt-5.3-codex",
@@ -105,6 +114,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Together AI",
         api_base: "https://api.together.xyz/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         models: &[
             "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -116,6 +126,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         name: "Fireworks AI",
         api_base: "https://api.fireworks.ai/inference/v1",
         needs_key: true,
+        needs_base_url: false,
         default_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
         models: &[
             "accounts/fireworks/models/llama-v3p3-70b-instruct",

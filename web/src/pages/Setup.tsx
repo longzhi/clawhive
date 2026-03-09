@@ -40,8 +40,8 @@ function SecuritySetup() {
       toast.error("Passwords do not match");
       return;
     }
-    if (password.length < 4) {
-      toast.error("Password must be at least 4 characters");
+    if (password.length < 6) {
+      toast.error("Password must be at least 6 characters");
       return;
     }
     setPasswordMutation.mutate(password, {
@@ -126,9 +126,10 @@ export default function SetupPage() {
 
   // Step 2: Agent
   const [agentName, setAgentName] = useState("Clawhive");
-  const [agentEmoji, setAgentEmoji] = useState("\u{1F41D}");
+  const [agentEmoji, setAgentEmoji] = useState("\u{1F980}");
   const [selectedModel, setSelectedModel] = useState("");
   const [agentCreated, setAgentCreated] = useState(false);
+  const [agentId, setAgentId] = useState("clawhive-main");
 
   // Step 3: Channel
   const [channelKind, setChannelKind] = useState<"telegram" | "discord" | null>(null);
@@ -204,7 +205,7 @@ export default function SetupPage() {
         provider_id: selectedProvider.id,
         api_base: apiBase || selectedProvider.api_base,
         api_key: selectedProvider.needs_key ? apiKey : undefined,
-        models: selectedProvider.models,
+        models: [selectedProvider.default_model],
       });
       setProviderCreated(true);
     } catch {
@@ -216,9 +217,9 @@ export default function SetupPage() {
     if (!selectedModel) return;
     try {
       await createAgent.mutateAsync({
-        agent_id: "clawhive-main",
+        agent_id: agentId,
         name: agentName || "Clawhive",
-        emoji: agentEmoji || "\u{1F41D}",
+        emoji: agentEmoji || "\u{1F980}",
         primary_model: selectedModel,
       });
       setAgentCreated(true);
@@ -244,7 +245,7 @@ export default function SetupPage() {
       });
 
       // Auto-create routing bindings
-      const agentId = "clawhive-main";
+      const routeAgentId = agentId;
       const existing = (routingData as { default_agent_id?: string; bindings?: Array<Record<string, unknown>> }) ?? {};
       const bindings = [...(existing.bindings ?? [])];
       for (const kind of channelRoutingKinds) {
@@ -252,11 +253,11 @@ export default function SetupPage() {
           channel_type: channelKind,
           connector_id: channelConnectorId,
           match: { kind },
-          agent_id: agentId,
+          agent_id: routeAgentId,
         });
       }
       await updateRouting.mutateAsync({
-        default_agent_id: existing.default_agent_id ?? agentId,
+        default_agent_id: existing.default_agent_id ?? routeAgentId,
         bindings,
       });
 
@@ -395,6 +396,8 @@ export default function SetupPage() {
           )}
           {step === 1 && (
             <StepAgent
+              agentId={agentId}
+              onAgentIdChange={setAgentId}
               name={agentName}
               onNameChange={setAgentName}
               emoji={agentEmoji}
@@ -560,7 +563,7 @@ export default function SetupPage() {
               disabled={!canAdvance()}
             >
               {(step === 2 || step === 3) ? (
-                (step === 2 && channelCreated) || (step === 3 && wsSaved && abSaved) ? "Next" : "Skip"
+                (step === 2 && channelCreated) || (step === 3 && (wsSaved || !wsEnabled) && (abSaved || !abEnabled)) ? "Next" : "Skip"
               ) : "Next"}
               <ChevronRight className="h-4 w-4" />
             </Button>
@@ -644,18 +647,21 @@ function StepProvider({
               </div>
             )}
 
-            {selected.id === "ollama" && (
+            {(selected.id === "ollama" || selected.needs_base_url) && (
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                  API URL
+                  {selected.needs_base_url ? "API Endpoint URL" : "API URL"}
                 </label>
                 <Input
-                  placeholder="http://localhost:11434/v1"
+                  placeholder={selected.needs_base_url ? "https://your-resource.openai.azure.com/openai/v1" : "http://localhost:11434/v1"}
                   value={apiBase}
                   onChange={(e) => onApiBaseChange(e.target.value)}
                   disabled={isCreated}
-                  className="mt-1.5"
+                  className="mt-1.5 font-mono"
                 />
+                {selected.needs_base_url && (
+                  <p className="text-xs text-muted-foreground mt-1">Your Azure OpenAI resource endpoint URL</p>
+                )}
               </div>
             )}
 
@@ -672,7 +678,7 @@ function StepProvider({
                 <Button
                   size="sm"
                   onClick={onSubmit}
-                  disabled={isCreating || (selected.needs_key && !apiKey)}
+                  disabled={isCreating || (selected.needs_key && !apiKey) || (selected.needs_base_url && (!apiBase || apiBase.includes('<your-resource>')))}
                 >
                   {isCreating ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -695,9 +701,11 @@ function StepProvider({
 // ---------------------------------------------------------------------------
 // Step 2: Agent
 // ---------------------------------------------------------------------------
-const EMOJI_OPTIONS = ["\u{1F41D}", "\u{1F916}", "\u{1F9E0}", "\u{26A1}", "\u{1F680}", "\u{1F4A1}", "\u{1F33F}", "\u{1F525}"];
+const EMOJI_OPTIONS = ["\u{1F980}", "\u{1F916}", "\u{1F9E0}", "\u{26A1}", "\u{1F680}", "\u{1F4A1}", "\u{1F33F}", "\u{1F525}"];
 
 function StepAgent({
+  agentId,
+  onAgentIdChange,
   name,
   onNameChange,
   emoji,
@@ -710,6 +718,8 @@ function StepAgent({
   isCreated,
   error,
 }: {
+  agentId: string;
+  onAgentIdChange: (v: string) => void;
   name: string;
   onNameChange: (v: string) => void;
   emoji: string;
@@ -722,6 +732,7 @@ function StepAgent({
   isCreated: boolean;
   error?: string;
 }) {
+  const [customModel, setCustomModel] = useState(false);
   return (
     <div className="space-y-6">
       <div>
@@ -732,6 +743,20 @@ function StepAgent({
       </div>
 
       <div className="space-y-4">
+        <div>
+          <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Agent ID
+          </label>
+          <Input
+            placeholder="clawhive-main"
+            value={agentId}
+            onChange={(e) => onAgentIdChange(e.target.value.replace(/\s/g, '-').toLowerCase())}
+            disabled={isCreated}
+            className="mt-1.5 font-mono"
+          />
+          <p className="text-xs text-muted-foreground mt-1">Unique identifier for this agent (no spaces)</p>
+        </div>
+
         <div>
           <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
             Agent Name
@@ -775,10 +800,10 @@ function StepAgent({
             {models.map((m) => (
               <button
                 key={m}
-                onClick={() => { if (!isCreated) onModelChange(m); }}
+                onClick={() => { if (!isCreated) { setCustomModel(false); onModelChange(m); } }}
                 disabled={isCreated}
                 className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
-                  selectedModel === m
+                  selectedModel === m && !customModel
                     ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
                     : "border-border hover:border-primary/40"
                 } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
@@ -786,7 +811,27 @@ function StepAgent({
                 {m}
               </button>
             ))}
+            <button
+              onClick={() => { if (!isCreated) { setCustomModel(true); onModelChange(""); } }}
+              disabled={isCreated}
+              className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
+                customModel
+                  ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
+                  : "border-border hover:border-primary/40"
+              } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
+            >
+              Custom\u2026
+            </button>
           </div>
+          {customModel && (
+            <Input
+              placeholder="provider/model-name (e.g. openai/gpt-5)"
+              value={selectedModel}
+              onChange={(e) => onModelChange(e.target.value)}
+              disabled={isCreated}
+              className="mt-2 font-mono"
+            />
+          )}
         </div>
 
         <div className="flex items-center justify-between pt-2">
