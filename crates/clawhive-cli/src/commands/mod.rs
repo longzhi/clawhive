@@ -8,3 +8,4 @@ pub mod skill;
 pub mod status;
 pub mod update;
 pub mod validate;
+pub mod wait;
