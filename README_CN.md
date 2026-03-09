@@ -118,7 +118,7 @@ clawhive auth login openai
 - 三层记忆系统：会话 JSONL → 每日文件 → MEMORY.md（长期记忆）
 - 混合搜索：sqlite-vec 向量相似度 + FTS5 BM25
 - 海马体整合：LLM 定期将每日观察提炼为长期记忆
-- 渠道适配：Telegram、Discord、Slack、WhatsApp、iMessage（多 Bot、多连接器）
+- 渠道适配：Telegram、Discord、Slack、WhatsApp、iMessage、Feishu、DingTalk、WeCom（多 Bot、多连接器）
 - ReAct 推理循环 + 防空转保护、子 Agent 生成
 - Skill 系统（SKILL.md frontmatter + 权限声明）
 - 按用户 Token 桶限流
@@ -242,7 +242,7 @@ permissions:
 - `providers.d/<provider>.yaml` — 提供商类型、API 地址、认证方式
 - `routing.yaml` — 默认 Agent ID、渠道到 Agent 的路由绑定
 
-支持的提供商：Anthropic、OpenAI、Gemini、DeepSeek、Groq、Ollama、OpenRouter、Together、Fireworks，以及任何 OpenAI 兼容端点。
+支持的提供商：Anthropic、OpenAI、Gemini、DeepSeek、Qwen、Moonshot、Zhipu GLM、MiniMax、Volcengine、Qianfan、Groq、Ollama、OpenRouter、Together、Fireworks，以及任何 OpenAI 兼容端点。
 
 </details>
 
@@ -290,8 +290,8 @@ just release v0.1.0-alpha.15
 | 组件 | 技术 |
 |------|------|
 | 语言 | Rust（2021 edition） |
-| LLM 提供商 | Anthropic、OpenAI、Gemini、DeepSeek、Groq、Ollama、OpenRouter、Together、Fireworks |
-| 渠道 | Telegram、Discord、Slack、WhatsApp、iMessage、CLI |
+| LLM 提供商 | Anthropic、OpenAI、Gemini、DeepSeek、Qwen、Moonshot、Zhipu GLM、MiniMax、Volcengine、Qianfan、Groq、Ollama、OpenRouter、Together、Fireworks |
+| 渠道 | Telegram、Discord、Slack、WhatsApp、iMessage、Feishu、DingTalk、WeCom、CLI |
 | 数据库 | SQLite（rusqlite，bundled） |
 | 向量搜索 | sqlite-vec |
 | 全文搜索 | FTS5 |
