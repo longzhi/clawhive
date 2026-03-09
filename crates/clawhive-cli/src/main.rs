@@ -17,8 +17,11 @@ mod setup_ui;
 
 use clawhive_auth::{AuthProfile, TokenManager};
 use clawhive_bus::EventBus;
+use clawhive_channels::dingtalk::DingTalkBot;
 use clawhive_channels::discord::DiscordBot;
+use clawhive_channels::feishu::FeishuBot;
 use clawhive_channels::telegram::TelegramBot;
+use clawhive_channels::wecom::WeComBot;
 use clawhive_channels::ChannelBot;
 use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
 use clawhive_core::*;
@@ -2242,6 +2245,53 @@ async fn start_bot(
                         .with_groups(connector.groups.clone())
                         .with_require_mention(connector.require_mention),
                 ));
+            }
+        }
+    }
+    // Feishu
+    if let Some(feishu_config) = &config.main.channels.feishu {
+        if feishu_config.enabled {
+            for connector in &feishu_config.connectors {
+                tracing::info!("Registering Feishu bot: {}", connector.connector_id);
+                bots.push(Box::new(FeishuBot::new(
+                    connector.app_id.clone(),
+                    connector.app_secret.clone(),
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                    bus.clone(),
+                )));
+            }
+        }
+    }
+
+    // DingTalk
+    if let Some(dingtalk_config) = &config.main.channels.dingtalk {
+        if dingtalk_config.enabled {
+            for connector in &dingtalk_config.connectors {
+                tracing::info!("Registering DingTalk bot: {}", connector.connector_id);
+                bots.push(Box::new(DingTalkBot::new(
+                    connector.client_id.clone(),
+                    connector.client_secret.clone(),
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                    bus.clone(),
+                )));
+            }
+        }
+    }
+
+    // WeCom
+    if let Some(wecom_config) = &config.main.channels.wecom {
+        if wecom_config.enabled {
+            for connector in &wecom_config.connectors {
+                tracing::info!("Registering WeCom bot: {}", connector.connector_id);
+                bots.push(Box::new(WeComBot::new(
+                    connector.bot_id.clone(),
+                    connector.secret.clone(),
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                    bus.clone(),
+                )));
             }
         }
     }
