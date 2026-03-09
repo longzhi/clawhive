@@ -113,6 +113,8 @@ fn test_agent(primary: &str, fallbacks: Vec<&str>) -> AgentConfig {
         model_policy: ModelPolicy {
             primary: primary.to_string(),
             fallbacks: fallbacks.into_iter().map(|s| s.to_string()).collect(),
+            thinking_level: None,
+            context_window: None,
         },
     }
 }
@@ -126,6 +128,8 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
         model_policy: ModelPolicy {
             primary: primary.to_string(),
             fallbacks: fallbacks.into_iter().map(|s| s.to_string()).collect(),
+            thinking_level: None,
+            context_window: None,
         },
         tool_policy: None,
         memory_policy: None,

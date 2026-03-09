@@ -55,6 +55,12 @@ impl OpenAiChatGptProvider {
             )
         };
 
+        let reasoning = request.thinking_level.map(|level| {
+            serde_json::json!({
+                "effort": level.openai_reasoning_effort()
+            })
+        });
+
         ResponsesRequest {
             model: to_responses_model(&request.model),
             input: to_responses_input(request.messages),
@@ -67,6 +73,7 @@ impl OpenAiChatGptProvider {
             },
             store: false,
             stream,
+            reasoning,
         }
     }
 }
@@ -510,6 +517,8 @@ pub(crate) struct ResponsesRequest {
     pub store: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -802,6 +811,7 @@ mod tests {
             ],
             max_tokens: 128,
             tools: vec![],
+            thinking_level: None,
         };
 
         let payload = OpenAiChatGptProvider::to_responses_request(request, true);
@@ -832,6 +842,7 @@ mod tests {
                     "required": ["location"]
                 }),
             }],
+            thinking_level: None,
         };
 
         let payload = OpenAiChatGptProvider::to_responses_request(request, true);
@@ -984,5 +995,35 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("failed"));
+    }
+
+    #[test]
+    fn to_responses_request_includes_reasoning_when_set() {
+        let request = LlmRequest {
+            model: "gpt-4o".into(),
+            system: None,
+            messages: vec![LlmMessage::user("test")],
+            max_tokens: 128,
+            tools: vec![],
+            thinking_level: Some(crate::ThinkingLevel::Medium),
+        };
+        let payload = OpenAiChatGptProvider::to_responses_request(request, false);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn to_responses_request_no_reasoning_when_none() {
+        let request = LlmRequest {
+            model: "gpt-4o".into(),
+            system: None,
+            messages: vec![LlmMessage::user("test")],
+            max_tokens: 128,
+            tools: vec![],
+            thinking_level: None,
+        };
+        let payload = OpenAiChatGptProvider::to_responses_request(request, false);
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("reasoning").is_none());
     }
 }

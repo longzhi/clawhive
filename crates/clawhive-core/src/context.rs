@@ -298,6 +298,15 @@ impl ContextManager {
         Self { config, router }
     }
 
+    /// Return a new ContextManager with config adjusted for the given context window.
+    /// Used to get per-model context limits in multi-agent scenarios.
+    pub fn for_context_window(&self, context_window: usize) -> Self {
+        Self {
+            config: ContextConfig::for_model(context_window),
+            router: self.router.clone(),
+        }
+    }
+
     /// Check context state and determine what action is needed.
     /// Does NOT perform compaction - caller should handle based on result.
     pub fn check_context(&self, messages: &[LlmMessage]) -> ContextCheckResult {

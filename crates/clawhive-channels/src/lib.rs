@@ -19,3 +19,12 @@ pub mod imessage;
 
 #[cfg(feature = "whatsapp")]
 pub mod whatsapp;
+
+#[cfg(feature = "feishu")]
+pub mod feishu;
+
+#[cfg(feature = "dingtalk")]
+pub mod dingtalk;
+
+#[cfg(feature = "wecom")]
+pub mod wecom;

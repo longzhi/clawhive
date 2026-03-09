@@ -41,6 +41,9 @@ const CHANNEL_META: Record<string, { label: string; description: string; color: 
   slack: { label: "Slack", description: "Workspace bot", color: "text-purple-500", tokenLink: "https://api.slack.com/apps" },
   whatsapp: { label: "WhatsApp", description: "Business API", color: "text-green-500", tokenLink: "https://developers.facebook.com/apps/" },
   imessage: { label: "iMessage", description: "Apple Messages", color: "text-sky-500", tokenLink: "" },
+  feishu: { label: "Feishu", description: "Feishu Bot (WebSocket)", color: "text-cyan-500", tokenLink: "https://open.feishu.cn/app" },
+  dingtalk: { label: "DingTalk", description: "DingTalk Bot (Stream)", color: "text-orange-500", tokenLink: "https://open-dev.dingtalk.com/" },
+  wecom: { label: "WeCom", description: "WeCom AI Bot", color: "text-green-600", tokenLink: "https://developer.work.weixin.qq.com/" },
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +60,12 @@ function AddChannelDialog({
   const [selectedKind, setSelectedKind] = useState<string | null>(null);
   const [connectorId, setConnectorId] = useState("");
   const [token, setToken] = useState("");
+  const [appId, setAppId] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [botIdField, setBotIdField] = useState("");
+  const [secretField, setSecretField] = useState("");
   const updateChannels = useUpdateChannels();
   const addConnector = useAddConnector();
   const { data: channels } = useChannels();
@@ -66,20 +75,33 @@ function AddChannelDialog({
     setSelectedKind(null);
     setConnectorId("");
     setToken("");
+    setAppId("");
+    setAppSecret("");
+    setClientId("");
+    setClientSecret("");
+    setBotIdField("");
+    setSecretField("");
   };
 
   const handleSubmit = async () => {
-    if (!selectedKind || !connectorId || !token) return;
+    if (!selectedKind || !connectorId) return;
+    const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(selectedKind);
+    if (!isChineseChannel && !token) return;
     setSubmitting(true);
     try {
-      // Step 1: Ensure the channel kind exists via PUT /api/channels
       const current = channels ?? {};
       if (!current[selectedKind]) {
         const merged = { ...current, [selectedKind]: { enabled: true, connectors: [] } };
         await updateChannels.mutateAsync(merged);
       }
-      // Step 2: Add the connector
-      await addConnector.mutateAsync({ kind: selectedKind, connectorId, token });
+      await addConnector.mutateAsync({
+        kind: selectedKind,
+        connectorId,
+        ...(token ? { token } : {}),
+        ...(selectedKind === "feishu" ? { appId, appSecret } : {}),
+        ...(selectedKind === "dingtalk" ? { clientId, clientSecret } : {}),
+        ...(selectedKind === "wecom" ? { botId: botIdField, secret: secretField } : {}),
+      });
       toast.success(`${CHANNEL_META[selectedKind]?.label ?? selectedKind} channel added`);
       onDone();
       reset();
@@ -138,33 +160,57 @@ function AddChannelDialog({
                 Bot Name
               </label>
               <Input
-                placeholder={selectedKind === "telegram" ? "my_telegram_bot" : selectedKind === "discord" ? "my_discord_bot" : `my_${selectedKind}_bot`}
+                placeholder={`my_${selectedKind}_bot`}
                 value={connectorId}
                 onChange={(e) => setConnectorId(e.target.value)}
                 className="mt-1"
               />
-              <p className="text-xs text-muted-foreground mt-1">A unique name to identify this bot, no spaces (e.g. support_bot, main_bot)</p>
+              <p className="text-xs text-muted-foreground mt-1">A unique name to identify this bot, no spaces</p>
             </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Bot Token
-              </label>
-              <Input
-                type="password"
-                placeholder={selectedKind === "telegram" ? "123456:ABC-DEF..." : "Bot token from Developer Portal"}
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                className="mt-1"
-              />
-            </div>
+
+            {selectedKind === "feishu" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">App ID</label>
+                  <Input placeholder="cli_xxx" value={appId} onChange={(e) => setAppId(e.target.value)} className="mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">App Secret</label>
+                  <Input type="password" placeholder="App secret from Feishu Developer Console" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} className="mt-1" />
+                </div>
+              </>
+            ) : selectedKind === "dingtalk" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Client ID</label>
+                  <Input placeholder="AppKey from DingTalk" value={clientId} onChange={(e) => setClientId(e.target.value)} className="mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Client Secret</label>
+                  <Input type="password" placeholder="AppSecret from DingTalk" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} className="mt-1" />
+                </div>
+              </>
+            ) : selectedKind === "wecom" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Bot ID</label>
+                  <Input placeholder="Bot ID from WeCom Admin" value={botIdField} onChange={(e) => setBotIdField(e.target.value)} className="mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Secret</label>
+                  <Input type="password" placeholder="Bot secret" value={secretField} onChange={(e) => setSecretField(e.target.value)} className="mt-1" />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Bot Token</label>
+                <Input type="password" placeholder={selectedKind === "telegram" ? "123456:ABC-DEF..." : "Bot token from Developer Portal"} value={token} onChange={(e) => setToken(e.target.value)} className="mt-1" />
+              </div>
+            )}
+
             {meta.tokenLink && (
-              <a
-                href={meta.tokenLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-xs text-primary hover:underline"
-              >
-                Get a bot token <ExternalLink className="h-3 w-3" />
+              <a href={meta.tokenLink} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs text-primary hover:underline">
+                Get credentials <ExternalLink className="h-3 w-3" />
               </a>
             )}
           </div>
@@ -173,7 +219,12 @@ function AddChannelDialog({
         <DialogFooter>
           <Button
             onClick={handleSubmit}
-            disabled={!selectedKind || !connectorId || !token || submitting}
+            disabled={!selectedKind || !connectorId || submitting || (() => {
+              if (selectedKind === "feishu") return !appId || !appSecret;
+              if (selectedKind === "dingtalk") return !clientId || !clientSecret;
+              if (selectedKind === "wecom") return !botIdField || !secretField;
+              return !token;
+            })()}
           >
             {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add Channel"}
           </Button>

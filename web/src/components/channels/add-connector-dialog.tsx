@@ -27,6 +27,12 @@ import { Input } from "@/components/ui/input";
 type AddConnectorFormValues = {
   connectorId: string;
   token: string;
+  appId: string;
+  appSecret: string;
+  clientId: string;
+  clientSecret: string;
+  botId: string;
+  secret: string;
 };
 
 interface AddConnectorDialogProps {
@@ -42,15 +48,26 @@ export function AddConnectorDialog({ kind, label, onAdded }: AddConnectorDialogP
     defaultValues: {
       connectorId: "",
       token: "",
+      appId: "",
+      appSecret: "",
+      clientId: "",
+      clientSecret: "",
+      botId: "",
+      secret: "",
     },
   });
+
+  const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(kind);
 
   const onSubmit = async (values: AddConnectorFormValues) => {
     try {
       await addConnector.mutateAsync({
         kind,
         connectorId: values.connectorId,
-        token: values.token,
+        ...(values.token ? { token: values.token } : {}),
+        ...(kind === "feishu" ? { appId: values.appId, appSecret: values.appSecret } : {}),
+        ...(kind === "dingtalk" ? { clientId: values.clientId, clientSecret: values.clientSecret } : {}),
+        ...(kind === "wecom" ? { botId: values.botId, secret: values.secret } : {}),
       });
       toast.success(`${label} connector added`);
       onAdded?.();
@@ -90,20 +107,115 @@ export function AddConnectorDialog({ kind, label, onAdded }: AddConnectorDialogP
                 </FormItem>
               )}
             />
-            <FormField
-              control={form.control}
-              name="token"
-              rules={{ required: "Token is required" }}
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Bot Token</FormLabel>
-                  <FormControl>
-                    <Input type="password" placeholder="123456:ABC..." {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            {kind === "feishu" ? (
+              <>
+                <FormField
+                  control={form.control}
+                  name="appId"
+                  rules={{ required: "App ID is required" }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>App ID</FormLabel>
+                      <FormControl>
+                        <Input placeholder="cli_xxx" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="appSecret"
+                  rules={{ required: "App Secret is required" }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>App Secret</FormLabel>
+                      <FormControl>
+                        <Input type="password" placeholder="App secret from Feishu" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            ) : kind === "dingtalk" ? (
+              <>
+                <FormField
+                  control={form.control}
+                  name="clientId"
+                  rules={{ required: "Client ID is required" }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Client ID</FormLabel>
+                      <FormControl>
+                        <Input placeholder="AppKey from DingTalk" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="clientSecret"
+                  rules={{ required: "Client Secret is required" }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Client Secret</FormLabel>
+                      <FormControl>
+                        <Input type="password" placeholder="AppSecret from DingTalk" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            ) : kind === "wecom" ? (
+              <>
+                <FormField
+                  control={form.control}
+                  name="botId"
+                  rules={{ required: "Bot ID is required" }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot ID</FormLabel>
+                      <FormControl>
+                        <Input placeholder="Bot ID from WeCom Admin" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="secret"
+                  rules={{ required: "Secret is required" }}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Secret</FormLabel>
+                      <FormControl>
+                        <Input type="password" placeholder="Bot secret" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            ) : (
+              <FormField
+                control={form.control}
+                name="token"
+                rules={{ required: isChineseChannel ? false : "Token is required" }}
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Bot Token</FormLabel>
+                    <FormControl>
+                      <Input type="password" placeholder="123456:ABC..." {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
             <DialogFooter>
               <Button type="submit" disabled={addConnector.isPending}>
                 Add Connector

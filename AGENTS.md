@@ -123,7 +123,7 @@ Three tiers: (1) Session JSONL for working memory, (2) Daily Markdown for short-
 
 ### Channel Adapters
 
-Feature-gated in `clawhive-channels`: `telegram` and `discord` enabled by default; `slack` and `whatsapp` are optional features. Each implements the `ChannelBot` trait.
+Feature-gated in `clawhive-channels`: `telegram`, `discord`, `feishu`, `dingtalk`, and `wecom` enabled by default; `slack`, `whatsapp`, and `imessage` are optional features. Each implements the `ChannelBot` trait.
 
 ## Security Architecture
 

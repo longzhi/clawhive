@@ -174,6 +174,33 @@ fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>
                 }
             }
 
+            if let Some(feishu) = main.channels.feishu {
+                for connector in feishu.connectors {
+                    channels.push(ChannelInfo {
+                        channel_type: "feishu".to_string(),
+                        connector_id: connector.connector_id,
+                    });
+                }
+            }
+
+            if let Some(dingtalk) = main.channels.dingtalk {
+                for connector in dingtalk.connectors {
+                    channels.push(ChannelInfo {
+                        channel_type: "dingtalk".to_string(),
+                        connector_id: connector.connector_id,
+                    });
+                }
+            }
+
+            if let Some(wecom) = main.channels.wecom {
+                for connector in wecom.connectors {
+                    channels.push(ChannelInfo {
+                        channel_type: "wecom".to_string(),
+                        connector_id: connector.connector_id,
+                    });
+                }
+            }
+
             if let Some(ws) = &main.tools.web_search {
                 tools.web_search_enabled = ws.enabled;
                 tools.web_search_provider = ws.provider.clone();

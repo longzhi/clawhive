@@ -118,7 +118,7 @@ clawhive auth login openai
 - Three-layer memory system: Session JSONL → Daily files → MEMORY.md (long-term)
 - Hybrid search: sqlite-vec vector similarity + FTS5 BM25 over memory chunks
 - Hippocampus consolidation: periodic LLM-driven synthesis into long-term memory
-- Channel adapters: Telegram, Discord, Slack, WhatsApp, iMessage (multi-bot, multi-connector)
+- Channel adapters: Telegram, Discord, Slack, WhatsApp, iMessage, Feishu, DingTalk, WeCom (multi-bot, multi-connector)
 - ReAct reasoning loop with repeat guard and sub-agent spawning
 - Skill system (SKILL.md with frontmatter + permission declarations)
 - Token-bucket rate limiting per user
@@ -349,7 +349,7 @@ Configuration is managed through `clawhive setup`, which interactively generates
 - `providers.d/<provider>.yaml` — provider type, API base URL, authentication
 - `routing.yaml` — default agent ID, channel-to-agent routing bindings
 
-Supported providers: Anthropic, OpenAI, Gemini, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint.
+Supported providers: Anthropic, OpenAI, Gemini, DeepSeek, Qwen, Moonshot, Zhipu GLM, MiniMax, Volcengine, Qianfan, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint.
 
 </details>
 
@@ -397,8 +397,8 @@ just release v0.1.0-alpha.15
 | Component | Technology |
 |-----------|-----------|
 | Language | Rust (2021 edition) |
-| LLM Providers | Anthropic, OpenAI, Gemini, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks |
-| Channels | Telegram, Discord, Slack, WhatsApp, iMessage, CLI |
+| LLM Providers | Anthropic, OpenAI, Gemini, DeepSeek, Qwen, Moonshot, Zhipu GLM, MiniMax, Volcengine, Qianfan, Groq, Ollama, OpenRouter, Together, Fireworks |
+| Channels | Telegram, Discord, Slack, WhatsApp, iMessage, Feishu, DingTalk, WeCom, CLI |
 | Database | SQLite (rusqlite, bundled) |
 | Vector Search | sqlite-vec |
 | Full-Text Search | FTS5 |

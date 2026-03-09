@@ -99,9 +99,66 @@ pub struct DiscordChannelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuConnectorConfig {
+    pub connector_id: String,
+    /// Feishu app ID (from Developer Console)
+    pub app_id: String,
+    /// Feishu app secret
+    pub app_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<FeishuConnectorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DingTalkConnectorConfig {
+    pub connector_id: String,
+    /// DingTalk OAuth ClientID (AppKey)
+    pub client_id: String,
+    /// DingTalk OAuth ClientSecret (AppSecret)
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DingTalkChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<DingTalkConnectorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeComConnectorConfig {
+    pub connector_id: String,
+    /// WeCom AI Bot ID (from admin console)
+    pub bot_id: String,
+    /// WeCom AI Bot secret
+    pub secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeComChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<WeComConnectorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelsConfig {
     pub telegram: Option<TelegramChannelConfig>,
     pub discord: Option<DiscordChannelConfig>,
+    #[serde(default)]
+    pub feishu: Option<FeishuChannelConfig>,
+    #[serde(default)]
+    pub dingtalk: Option<DingTalkChannelConfig>,
+    #[serde(default)]
+    pub wecom: Option<WeComChannelConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -158,6 +215,9 @@ impl Default for MainConfig {
             channels: ChannelsConfig {
                 telegram: None,
                 discord: None,
+                feishu: None,
+                dingtalk: None,
+                wecom: None,
             },
             embedding: EmbeddingConfig::default(),
             tools: ToolsConfig::default(),
@@ -609,6 +669,30 @@ fn resolve_main_env(main: &mut MainConfig) {
         }
     }
 
+    if let Some(feishu) = &mut main.channels.feishu {
+        for connector in &mut feishu.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.app_id = resolve_env_var(&connector.app_id);
+            connector.app_secret = resolve_env_var(&connector.app_secret);
+        }
+    }
+
+    if let Some(dingtalk) = &mut main.channels.dingtalk {
+        for connector in &mut dingtalk.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.client_id = resolve_env_var(&connector.client_id);
+            connector.client_secret = resolve_env_var(&connector.client_secret);
+        }
+    }
+
+    if let Some(wecom) = &mut main.channels.wecom {
+        for connector in &mut wecom.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.bot_id = resolve_env_var(&connector.bot_id);
+            connector.secret = resolve_env_var(&connector.secret);
+        }
+    }
+
     main.embedding.api_key = resolve_env_var(&main.embedding.api_key);
     main.embedding.base_url = resolve_env_var(&main.embedding.base_url);
     main.embedding.model = resolve_env_var(&main.embedding.model);
@@ -809,6 +893,9 @@ mod tests {
                 channels: ChannelsConfig {
                     telegram: None,
                     discord: None,
+                    feishu: None,
+                    dingtalk: None,
+                    wecom: None,
                 },
                 embedding: EmbeddingConfig::default(),
                 tools: ToolsConfig::default(),
@@ -827,6 +914,8 @@ mod tests {
                 model_policy: super::super::ModelPolicy {
                     primary: "m".into(),
                     fallbacks: vec![],
+                    thinking_level: None,
+                    context_window: None,
                 },
                 tool_policy: None,
                 memory_policy: None,

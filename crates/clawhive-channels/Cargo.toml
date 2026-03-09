@@ -5,12 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["telegram", "discord"]
+default = ["telegram", "discord", "feishu", "dingtalk", "wecom"]
 telegram = ["dep:teloxide", "dep:log"]
 discord = ["dep:serenity"]
 slack = ["dep:slack-morphism"]
 imessage = []
 whatsapp = ["dep:whatsapp-rust", "dep:whatsapp-rust-tokio-transport", "dep:whatsapp-rust-ureq-http-client", "dep:wacore", "dep:whatsapp-rust-sqlite-storage", "dep:waproto"]
+feishu = ["dep:tokio-tungstenite", "dep:prost", "dep:futures-util", "dep:url"]
+dingtalk = ["dep:tokio-tungstenite", "dep:futures-util"]
+wecom = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
 anyhow.workspace = true
@@ -36,3 +39,8 @@ whatsapp-rust-sqlite-storage = { git = "https://github.com/longzhi/whatsapp-rust
 waproto = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
 base64 = "0.22.1"
 reqwest.workspace = true
+serde_json.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+url = { workspace = true, optional = true }

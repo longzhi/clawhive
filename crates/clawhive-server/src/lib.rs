@@ -38,10 +38,64 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 fn is_exempt_path(path: &str, state: &AppState) -> bool {
-    path.starts_with("/api/setup")
+    // Setup status and auth endpoints are always exempt
+    if path.starts_with("/api/setup")
         || path == "/api/auth/login"
         || path == "/api/auth/check"
         || (path == "/api/auth/set-password" && state.web_password_hash.read().unwrap().is_none())
+    {
+        return true;
+    }
+
+    // During initial setup (no providers or no active agents), allow the
+    // write endpoints that the setup wizard needs so users can complete
+    // configuration before authentication is possible.
+    if is_needs_setup(state) {
+        let setup_paths = [
+            "/api/providers",
+            "/api/agents",
+            "/api/channels/",
+            "/api/routing",
+        ];
+        if setup_paths.iter().any(|p| path.starts_with(p)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Quick check: system needs setup if no provider yaml or no enabled agent.
+fn is_needs_setup(state: &AppState) -> bool {
+    let providers_dir = state.root.join("config/providers.d");
+    let has_providers = std::fs::read_dir(&providers_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("yaml"))
+        })
+        .unwrap_or(false);
+    if !has_providers {
+        return true;
+    }
+
+    let agents_dir = state.root.join("config/agents.d");
+    let has_active_agents = std::fs::read_dir(&agents_dir)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                let path = e.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("yaml") {
+                    return false;
+                }
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(&c).ok())
+                    .map(|v| v["enabled"].as_bool().unwrap_or(false))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    !has_active_agents
 }
 
 fn unauthorized_response() -> Response {

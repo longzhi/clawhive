@@ -313,6 +313,7 @@ impl LlmRouter {
                     messages: messages.clone(),
                     max_tokens,
                     tools: vec![],
+                    thinking_level: None,
                 };
 
                 match provider.chat(req).await {
@@ -459,6 +460,7 @@ impl LlmRouter {
                     messages: request.messages.clone(),
                     max_tokens: request.max_tokens,
                     tools: request.tools.clone(),
+                    thinking_level: request.thinking_level,
                 };
 
                 match provider.chat(req).await {
@@ -527,6 +529,7 @@ impl LlmRouter {
         system: Option<String>,
         messages: Vec<LlmMessage>,
         max_tokens: u32,
+        thinking_level: Option<clawhive_provider::ThinkingLevel>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         let mut candidates = vec![primary.to_string()];
         candidates.extend(fallbacks.iter().cloned());
@@ -566,6 +569,7 @@ impl LlmRouter {
                 messages: messages.clone(),
                 max_tokens,
                 tools: vec![],
+                thinking_level,
             };
 
             match provider.stream(req).await {
@@ -810,7 +814,7 @@ mod tests {
         let router = LlmRouter::new(registry, aliases, vec![]);
 
         let mut stream = router
-            .stream("model", &[], None, vec![LlmMessage::user("hi")], 100)
+            .stream("model", &[], None, vec![LlmMessage::user("hi")], 100, None)
             .await
             .unwrap();
 
@@ -846,6 +850,7 @@ mod tests {
                 None,
                 vec![LlmMessage::user("hi")],
                 100,
+                None,
             )
             .await;
         assert!(stream.is_ok());

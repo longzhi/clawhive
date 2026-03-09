@@ -60,3 +60,7 @@ mime_guess = "2"
 semver = "1"
 sha2 = "0.10"
 self-replace = "1"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+prost = "0.13"
+futures-util = "0.3"
+url = "2"

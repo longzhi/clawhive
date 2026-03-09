@@ -84,6 +84,8 @@ fn make_orchestrator_with_provider(
         model_policy: ModelPolicy {
             primary: "sonnet".into(),
             fallbacks: vec![],
+            thinking_level: None,
+            context_window: None,
         },
         tool_policy: None,
         memory_policy: None,
@@ -373,6 +375,8 @@ async fn mock_server_fallback_on_failure() {
         model_policy: ModelPolicy {
             primary: "primary/claude-sonnet-4-5".to_string(),
             fallbacks: vec!["fallback/claude-sonnet-4-5".to_string()],
+            thinking_level: None,
+            context_window: None,
         },
     };
 
@@ -406,6 +410,7 @@ async fn mock_server_validates_request_headers() {
             messages: vec![LlmMessage::user("check headers")],
             max_tokens: 128,
             tools: vec![],
+            thinking_level: None,
         })
         .await
         .unwrap();
@@ -424,6 +429,7 @@ async fn mock_server_handles_connection_error() {
             messages: vec![LlmMessage::user("ping")],
             max_tokens: 64,
             tools: vec![],
+            thinking_level: None,
         })
         .await
         .unwrap_err();

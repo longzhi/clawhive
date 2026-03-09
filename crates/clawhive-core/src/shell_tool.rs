@@ -733,6 +733,26 @@ impl ToolExecutor for ExecuteCommandTool {
                     .network_allow
                     .iter()
                     .any(|pattern| domain_matches(pattern, host));
+
+                // Hard baseline: block private/loopback/metadata targets (SSRF protection)
+                // This is non-negotiable — cannot be bypassed via approval
+                if !is_whitelisted && HardBaseline::network_denied(host, *port) {
+                    tracing::warn!(
+                        target: "clawhive::audit::network",
+                        agent_id = %self.agent_id,
+                        tool = "execute_command",
+                        host = %host,
+                        port = %port,
+                        command = %command,
+                        "network access denied by hard baseline (SSRF protection)"
+                    );
+                    return Ok(ToolOutput {
+                        content: format!(
+                            "Network access denied: {}:{} is a private/loopback address blocked by hard baseline. ", host, port
+                        ),
+                        is_error: true,
+                    });
+                }
                 let is_pkg_manager = pkg_domains.iter().any(|d| domain_matches(d, host));
                 let is_runtime_allowed = match self.approval_registry.as_ref() {
                     Some(reg) => reg.is_network_allowed(&self.agent_id, host, *port).await,
@@ -1530,5 +1550,48 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.content.contains("no approval UI available"));
+    }
+
+    #[tokio::test]
+    async fn hard_baseline_blocks_localhost_in_network_ask_mode() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let sandbox = SandboxPolicyConfig {
+            network: SandboxNetworkMode::Ask,
+            ..Default::default()
+        };
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Full,
+                ask: ExecAskMode::Off,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            sandbox,
+            None,
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "curl -sS http://localhost:8001/health"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_error,
+            "localhost should be blocked by hard baseline"
+        );
+        assert!(
+            result.content.contains("hard baseline") || result.content.contains("denied"),
+            "error should mention hard baseline, got: {}",
+            result.content
+        );
     }
 }

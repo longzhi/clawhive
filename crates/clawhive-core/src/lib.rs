@@ -68,6 +68,7 @@ pub use web_fetch_tool::*;
 pub use web_search_tool::*;
 pub use workspace::*;
 
+use clawhive_provider::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +76,12 @@ pub struct ModelPolicy {
     pub primary: String,
     #[serde(default)]
     pub fallbacks: Vec<String>,
+    /// Thinking / reasoning effort level. None = no extended thinking (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ThinkingLevel>,
+    /// Override context window (auto-resolved from model presets if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,4 +89,16 @@ pub struct AgentConfig {
     pub agent_id: String,
     pub enabled: bool,
     pub model_policy: ModelPolicy,
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn context_config_resolves_from_model_preset() {
+        let info = clawhive_schema::provider_presets::model_info("moonshot", "moonshot-v1-8k");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.context_window, 8192);
+    }
 }

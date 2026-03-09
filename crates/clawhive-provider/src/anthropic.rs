@@ -93,10 +93,23 @@ impl AnthropicProvider {
             })
             .collect();
 
+        let thinking = request.thinking_level.map(|level| {
+            serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": level.anthropic_budget_tokens()
+            })
+        });
+
+        let max_tokens = if let Some(level) = request.thinking_level {
+            request.max_tokens.max(level.anthropic_min_max_tokens())
+        } else {
+            request.max_tokens
+        };
+
         ApiRequest {
             model: request.model,
             system: request.system,
-            max_tokens: request.max_tokens,
+            max_tokens,
             messages: request
                 .messages
                 .into_iter()
@@ -151,6 +164,7 @@ impl AnthropicProvider {
                 .collect(),
             tools: if tools.is_empty() { None } else { Some(tools) },
             stream: false,
+            thinking,
         }
     }
 }
@@ -284,6 +298,35 @@ impl LlmProvider for AnthropicProvider {
 
         let sse_stream = parse_sse_stream(resp.bytes_stream());
         Ok(Box::pin(sse_stream))
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let url = format!("{}/models", self.api_base);
+        let mut req = self
+            .client
+            .get(&url)
+            .header("anthropic-version", "2023-06-01");
+        req = match self.use_session_auth() {
+            Some(session) => req.header("authorization", format!("Bearer {session}")),
+            None => req.header("x-api-key", &self.api_key),
+        };
+        let resp = req.send().await?;
+        if resp.status() != StatusCode::OK {
+            return Err(anyhow!(
+                "failed to list anthropic models ({})",
+                resp.status()
+            ));
+        }
+        let body: serde_json::Value = resp.json().await?;
+        let models = body["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(models)
     }
 }
 
@@ -423,6 +466,8 @@ pub(crate) struct ApiRequest {
     pub tools: Option<Vec<ApiToolDef>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +556,7 @@ mod tests {
             messages: vec![LlmMessage::user("hello")],
             max_tokens: 1024,
             tools: vec![],
+            thinking_level: None,
         };
         let api_req = AnthropicProvider::to_api_request(req);
 
@@ -608,6 +654,7 @@ mod tests {
             messages: vec![],
             tools: None,
             stream: false,
+            thinking: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("stream").is_none());
@@ -619,6 +666,7 @@ mod tests {
             messages: vec![],
             tools: None,
             stream: true,
+            thinking: None,
         };
         let json_stream = serde_json::to_value(&req_stream).unwrap();
         assert_eq!(json_stream.get("stream").unwrap(), true);
@@ -704,6 +752,7 @@ mod tests {
             messages: vec![],
             tools: None,
             stream: false,
+            thinking: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("system").is_none());
@@ -726,5 +775,38 @@ mod tests {
 
         let response = provider.chat(request).await.unwrap();
         assert!(!response.text.trim().is_empty());
+    }
+
+    #[test]
+    fn to_api_request_includes_thinking_when_set() {
+        let req = LlmRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            system: None,
+            messages: vec![LlmMessage::user("hello")],
+            max_tokens: 2048,
+            tools: vec![],
+            thinking_level: Some(crate::ThinkingLevel::Medium),
+        };
+        let api_req = AnthropicProvider::to_api_request(req);
+        let json = serde_json::to_value(&api_req).unwrap();
+        assert_eq!(json["thinking"]["type"], "enabled");
+        assert_eq!(json["thinking"]["budget_tokens"], 4096);
+        // max_tokens auto-bumped to at least 8192
+        assert!(json["max_tokens"].as_u64().unwrap() >= 8192);
+    }
+
+    #[test]
+    fn to_api_request_no_thinking_when_none() {
+        let req = LlmRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            system: None,
+            messages: vec![LlmMessage::user("hello")],
+            max_tokens: 1024,
+            tools: vec![],
+            thinking_level: None,
+        };
+        let api_req = AnthropicProvider::to_api_request(req);
+        let json = serde_json::to_value(&api_req).unwrap();
+        assert!(json.get("thinking").is_none());
     }
 }

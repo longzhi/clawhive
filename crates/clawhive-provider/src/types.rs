@@ -77,6 +77,48 @@ pub struct ToolDef {
     pub input_schema: serde_json::Value,
 }
 
+/// Thinking / reasoning effort level for models that support extended thinking.
+/// Maps to provider-specific parameters:
+///   - Anthropic: `thinking.budget_tokens`
+///   - OpenAI: `reasoning_effort`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    /// Anthropic budget_tokens mapping.
+    pub fn anthropic_budget_tokens(self) -> u32 {
+        match self {
+            Self::Low => 1024,
+            Self::Medium => 4096,
+            Self::High => 16384,
+        }
+    }
+
+    /// Minimum max_tokens needed when Anthropic thinking is enabled.
+    /// budget_tokens must be strictly less than max_tokens.
+    pub fn anthropic_min_max_tokens(self) -> u32 {
+        match self {
+            Self::Low => 4096,
+            Self::Medium => 8192,
+            Self::High => 32768,
+        }
+    }
+
+    /// OpenAI reasoning_effort string.
+    pub fn openai_reasoning_effort(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     pub model: String,
@@ -86,6 +128,9 @@ pub struct LlmRequest {
     pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
+    /// Optional thinking/reasoning level. None = no extended thinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -100,6 +145,7 @@ impl LlmRequest {
             messages: vec![LlmMessage::user(user)],
             max_tokens: default_max_tokens(),
             tools: vec![],
+            thinking_level: None,
         }
     }
 }

@@ -18,13 +18,15 @@ import {
   useRouting,
   useUpdateRouting,
   useSetPassword,
+  useListModels,
 } from "@/hooks/use-api";
-import type { ProviderPreset } from "@/hooks/use-api";
-import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink } from "lucide-react";
+import type { ProviderPreset, ModelInfoResponse, ModelPresetInfo } from "@/hooks/use-api";
+import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink, RefreshCw } from "lucide-react";
 
 import { toast } from "sonner";
 
 const STEP_LABELS = ["Provider", "Agent", "Channel", "Tools", "Launch"];
+
 
 // ---------------------------------------------------------------------------
 // Security Setup Component
@@ -130,12 +132,20 @@ export default function SetupPage() {
   const [selectedModel, setSelectedModel] = useState("");
   const [agentCreated, setAgentCreated] = useState(false);
   const [agentId, setAgentId] = useState("clawhive-main");
+  const [thinkingLevel, setThinkingLevel] = useState<string>("none");
+  const [fetchedModels, setFetchedModels] = useState<ModelInfoResponse[]>([]);
 
   // Step 3: Channel
-  const [channelKind, setChannelKind] = useState<"telegram" | "discord" | null>(null);
+  const [channelKind, setChannelKind] = useState<"telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | null>(null);
   const [channelToken, setChannelToken] = useState("");
   const [channelConnectorId, setChannelConnectorId] = useState("");
   const [channelGroups, setChannelGroups] = useState("");
+  const [channelAppId, setChannelAppId] = useState("");
+  const [channelAppSecret, setChannelAppSecret] = useState("");
+  const [channelClientId, setChannelClientId] = useState("");
+  const [channelClientSecret, setChannelClientSecret] = useState("");
+  const [channelBotId, setChannelBotId] = useState("");
+  const [channelSecret, setChannelSecret] = useState("");
   const [channelRequireMention, setChannelRequireMention] = useState(true);
   const [channelRoutingKinds, setChannelRoutingKinds] = useState<("dm" | "group")[]>(["dm", "group"]);
   const [channelCreated, setChannelCreated] = useState(false);
@@ -162,6 +172,7 @@ export default function SetupPage() {
   const { data: providerPresets } = useProviderPresets();
   const { data: routingData } = useRouting();
   const updateRouting = useUpdateRouting();
+  const listModels = useListModels();
 
   // Mark wizard as active once we start interacting
   useEffect(() => {
@@ -182,7 +193,7 @@ export default function SetupPage() {
     if (selectedProvider) {
       setApiBase(selectedProvider.api_base);
       if (selectedProvider.models.length > 0) {
-        setSelectedModel(selectedProvider.models[0]);
+        setSelectedModel(selectedProvider.models[0].id);
       }
     }
   }, [selectedProvider]);
@@ -213,6 +224,24 @@ export default function SetupPage() {
     }
   };
 
+  const handleFetchModels = async () => {
+    if (!selectedProvider) return;
+    try {
+      const result = await listModels.mutateAsync({
+        provider_type: selectedProvider.id,
+        api_key: selectedProvider.needs_key ? apiKey : undefined,
+        base_url: apiBase || undefined,
+      });
+      setFetchedModels(result.models);
+      if (result.models.length > 0 && !selectedModel) {
+        setSelectedModel(result.models[0].id);
+      }
+      toast.success(`Fetched ${result.models.length} models`);
+    } catch {
+      toast.error("Failed to fetch models from provider");
+    }
+  };
+
   const handleCreateAgent = async () => {
     if (!selectedModel) return;
     try {
@@ -221,6 +250,7 @@ export default function SetupPage() {
         name: agentName || "Clawhive",
         emoji: agentEmoji || "\u{1F980}",
         primary_model: selectedModel,
+        ...(thinkingLevel !== "none" ? { thinking_level: thinkingLevel } : {}),
       });
       setAgentCreated(true);
     } catch {
@@ -229,7 +259,9 @@ export default function SetupPage() {
   };
 
   const handleAddChannel = async () => {
-    if (!channelKind || !channelToken || !channelConnectorId) return;
+    if (!channelKind || !channelConnectorId) return;
+    const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(channelKind);
+    if (!isChineseChannel && !channelToken) return;
     const groups = channelGroups
       .split(",")
       .map((s) => s.trim())
@@ -239,7 +271,10 @@ export default function SetupPage() {
       await addConnector.mutateAsync({
         kind: channelKind,
         connectorId: channelConnectorId,
-        token: channelToken,
+        ...(channelToken ? { token: channelToken } : {}),
+        ...(channelKind === "feishu" ? { appId: channelAppId, appSecret: channelAppSecret } : {}),
+        ...(channelKind === "dingtalk" ? { clientId: channelClientId, clientSecret: channelClientSecret } : {}),
+        ...(channelKind === "wecom" ? { botId: channelBotId, secret: channelSecret } : {}),
         ...(channelKind === "discord" && hasGroup && groups.length > 0 ? { groups } : {}),
         ...(hasGroup ? { requireMention: channelRequireMention } : {}),
       });
@@ -402,13 +437,18 @@ export default function SetupPage() {
               onNameChange={setAgentName}
               emoji={agentEmoji}
               onEmojiChange={setAgentEmoji}
-              models={selectedProvider?.models ?? []}
+              models={fetchedModels.length > 0 ? fetchedModels : (selectedProvider?.models ?? [])}
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
+              thinkingLevel={thinkingLevel}
+              onThinkingLevelChange={setThinkingLevel}
               onSubmit={handleCreateAgent}
               isCreating={createAgent.isPending}
               isCreated={agentCreated}
               error={createAgent.error?.message}
+              onFetchModels={handleFetchModels}
+              isFetchingModels={listModels.isPending}
+              canFetchModels={providerCreated}
             />
           )}
           {step === 2 && (
@@ -429,6 +469,18 @@ export default function SetupPage() {
               isCreating={addConnector.isPending || updateRouting.isPending}
               isCreated={channelCreated}
               error={addConnector.error?.message ?? updateRouting.error?.message}
+              appId={channelAppId}
+              onAppIdChange={setChannelAppId}
+              appSecret={channelAppSecret}
+              onAppSecretChange={setChannelAppSecret}
+              clientId={channelClientId}
+              onClientIdChange={setChannelClientId}
+              clientSecret={channelClientSecret}
+              onClientSecretChange={setChannelClientSecret}
+              botId={channelBotId}
+              onBotIdChange={setChannelBotId}
+              secret={channelSecret}
+              onSecretChange={setChannelSecret}
             />
           )}
           {step === 3 && (
@@ -667,7 +719,7 @@ function StepProvider({
 
             <div className="flex items-center justify-between">
               <p className="text-xs text-muted-foreground">
-                Models: {selected.models.join(", ")}
+                Models: {selected.models.map(m => m.id).join(", ")}
               </p>
               {isCreated ? (
                 <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
@@ -713,10 +765,15 @@ function StepAgent({
   models,
   selectedModel,
   onModelChange,
+  thinkingLevel,
+  onThinkingLevelChange,
   onSubmit,
   isCreating,
   isCreated,
   error,
+  onFetchModels,
+  isFetchingModels,
+  canFetchModels,
 }: {
   agentId: string;
   onAgentIdChange: (v: string) => void;
@@ -724,13 +781,18 @@ function StepAgent({
   onNameChange: (v: string) => void;
   emoji: string;
   onEmojiChange: (v: string) => void;
-  models: string[];
+  models: (ModelPresetInfo | ModelInfoResponse)[];
   selectedModel: string;
   onModelChange: (v: string) => void;
+  thinkingLevel: string;
+  onThinkingLevelChange: (v: string) => void;
   onSubmit: () => void;
   isCreating: boolean;
   isCreated: boolean;
   error?: string;
+  onFetchModels: () => void;
+  isFetchingModels: boolean;
+  canFetchModels: boolean;
 }) {
   const [customModel, setCustomModel] = useState(false);
   return (
@@ -793,22 +855,45 @@ function StepAgent({
         </div>
 
         <div>
-          <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Model
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Model
+            </label>
+            {canFetchModels && !isCreated && (
+              <button
+                onClick={onFetchModels}
+                disabled={isFetchingModels}
+                className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
+              >
+                {isFetchingModels ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3 w-3" />
+                )}
+                {isFetchingModels ? "Fetching..." : "Fetch from API"}
+              </button>
+            )}
+          </div>
           <div className="mt-1.5 flex flex-wrap gap-2">
             {models.map((m) => (
               <button
-                key={m}
-                onClick={() => { if (!isCreated) { setCustomModel(false); onModelChange(m); } }}
+                key={m.id}
+                onClick={() => { if (!isCreated) { setCustomModel(false); onModelChange(m.id); } }}
                 disabled={isCreated}
                 className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
-                  selectedModel === m && !customModel
+                  selectedModel === m.id && !customModel
                     ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
                     : "border-border hover:border-primary/40"
                 } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
               >
-                {m}
+                <span className="block">{m.id}</span>
+                <span className="block text-[10px] text-muted-foreground font-normal">
+                  {[
+                    m.context_window ? (m.context_window >= 1_000_000 ? `${(m.context_window / 1_000_000).toFixed(0)}M` : `${Math.round(m.context_window / 1000)}k`) : null,
+                    m.reasoning ? "reasoning" : null,
+                    m.vision ? "vision" : null,
+                  ].filter(Boolean).join(" · ") || ""}
+                </span>
               </button>
             ))}
             <button
@@ -820,7 +905,7 @@ function StepAgent({
                   : "border-border hover:border-primary/40"
               } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
             >
-              Custom\u2026
+              Custom…
             </button>
           </div>
           {customModel && (
@@ -832,6 +917,31 @@ function StepAgent({
               className="mt-2 font-mono"
             />
           )}
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Thinking Level
+          </label>
+          <p className="text-xs text-muted-foreground mt-0.5 mb-1">
+            For reasoning models (o-series, Claude with extended thinking). Leave as None for standard models.
+          </p>
+          <div className="grid grid-cols-4 gap-2 mt-1">
+            {(["none", "low", "medium", "high"] as const).map((level) => (
+              <button
+                key={level}
+                onClick={() => { if (!isCreated) onThinkingLevelChange(level); }}
+                disabled={isCreated}
+                className={`rounded-lg border px-3 py-2 text-sm transition-all ${
+                  thinkingLevel === level
+                    ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                    : "border-border hover:border-primary/40 hover:bg-muted/50"
+                } ${isCreated ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+              >
+                {level === "none" ? "None" : level.charAt(0).toUpperCase() + level.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex items-center justify-between pt-2">
@@ -894,9 +1004,15 @@ function StepChannel({
   isCreating,
   isCreated,
   error,
+  appId, onAppIdChange,
+  appSecret, onAppSecretChange,
+  clientId, onClientIdChange,
+  clientSecret, onClientSecretChange,
+  botId, onBotIdChange,
+  secret, onSecretChange,
 }: {
-  kind: "telegram" | "discord" | null;
-  onKindChange: (v: "telegram" | "discord") => void;
+  kind: "telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | null;
+  onKindChange: (v: "telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage") => void;
   token: string;
   onTokenChange: (v: string) => void;
   connectorId: string;
@@ -911,6 +1027,18 @@ function StepChannel({
   isCreating: boolean;
   isCreated: boolean;
   error?: string;
+  appId: string;
+  onAppIdChange: (v: string) => void;
+  appSecret: string;
+  onAppSecretChange: (v: string) => void;
+  clientId: string;
+  onClientIdChange: (v: string) => void;
+  clientSecret: string;
+  onClientSecretChange: (v: string) => void;
+  botId: string;
+  onBotIdChange: (v: string) => void;
+  secret: string;
+  onSecretChange: (v: string) => void;
 }) {
   const hasGroup = routingKinds.includes("group");
 
@@ -919,13 +1047,13 @@ function StepChannel({
       <div>
         <h2 className="text-lg font-semibold">Connect a channel</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Optional: connect Telegram or Discord so your agent can chat there.
+          Optional: connect a messaging platform so your agent can chat there.
           You can always set this up later from the dashboard.
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        {(["telegram", "discord"] as const).map((ch) => (
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        {(["telegram", "discord", "slack", "whatsapp", "imessage", "feishu", "dingtalk", "wecom"] as const).map((ch) => (
           <button
             key={ch}
             onClick={() => { if (!isCreated) onKindChange(ch); }}
@@ -936,9 +1064,9 @@ function StepChannel({
                 : "border-border hover:border-primary/40 hover:bg-muted/50"
             } ${isCreated ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
           >
-            <div className="text-sm font-medium capitalize">{ch}</div>
+            <div className="text-sm font-medium capitalize">{ch === "dingtalk" ? "DingTalk" : ch === "wecom" ? "WeCom" : ch === "imessage" ? "iMessage" : ch === "whatsapp" ? "WhatsApp" : ch}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">
-              {ch === "telegram" ? "Add a Telegram bot" : "Add a Discord bot"}
+              {ch === "telegram" ? "Add a Telegram bot" : ch === "discord" ? "Add a Discord bot" : ch === "slack" ? "Add a Slack bot" : ch === "whatsapp" ? "Connect WhatsApp" : ch === "imessage" ? "Connect iMessage (macOS)" : ch === "feishu" ? "Add a Feishu bot" : ch === "dingtalk" ? "Add a DingTalk bot" : "Add a WeCom bot"}
             </div>
           </button>
         ))}
@@ -952,7 +1080,7 @@ function StepChannel({
                 Bot Name
               </label>
               <Input
-                placeholder={kind === "telegram" ? "my_telegram_bot" : kind === "discord" ? "my_discord_bot" : `my_${kind}_bot`}
+                placeholder={kind === "telegram" ? "my_telegram_bot" : kind === "discord" ? "my_discord_bot" : kind === "slack" ? "my_slack_bot" : kind === "whatsapp" ? "my_whatsapp_bot" : kind === "imessage" ? "my_imessage_bot" : `my_${kind}_bot`}
                 value={connectorId}
                 onChange={(e) => onConnectorIdChange(e.target.value)}
                 disabled={isCreated}
@@ -960,19 +1088,59 @@ function StepChannel({
               />
               <p className="text-xs text-muted-foreground mt-1">A unique name to identify this bot, no spaces (e.g. support_bot)</p>
             </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Bot Token
-              </label>
-              <Input
-                type="password"
-                placeholder={kind === "telegram" ? "123456:ABC-DEF..." : "Bot token from Discord Developer Portal"}
-                value={token}
-                onChange={(e) => onTokenChange(e.target.value)}
-                disabled={isCreated}
-                className="mt-1.5"
-              />
-            </div>
+
+            {kind === "imessage" || kind === "whatsapp" ? (
+              <p className="text-xs text-muted-foreground">
+                {kind === "imessage" ? "No credentials needed. Requires macOS with Full Disk Access." : "No credentials needed. WhatsApp will pair via QR code on first start."}
+              </p>
+            ) : kind === "feishu" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">App ID</label>
+                  <Input placeholder="cli_xxx" value={appId} onChange={(e) => onAppIdChange(e.target.value)} disabled={isCreated} className="mt-1.5" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">App Secret</label>
+                  <Input type="password" placeholder="App secret from Feishu Developer Console" value={appSecret} onChange={(e) => onAppSecretChange(e.target.value)} disabled={isCreated} className="mt-1.5" />
+                </div>
+              </>
+            ) : kind === "dingtalk" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Client ID</label>
+                  <Input placeholder="AppKey from DingTalk" value={clientId} onChange={(e) => onClientIdChange(e.target.value)} disabled={isCreated} className="mt-1.5" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Client Secret</label>
+                  <Input type="password" placeholder="AppSecret from DingTalk" value={clientSecret} onChange={(e) => onClientSecretChange(e.target.value)} disabled={isCreated} className="mt-1.5" />
+                </div>
+              </>
+            ) : kind === "wecom" ? (
+              <>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Bot ID</label>
+                  <Input placeholder="Bot ID from WeCom Admin" value={botId} onChange={(e) => onBotIdChange(e.target.value)} disabled={isCreated} className="mt-1.5" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Secret</label>
+                  <Input type="password" placeholder="Bot secret" value={secret} onChange={(e) => onSecretChange(e.target.value)} disabled={isCreated} className="mt-1.5" />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Bot Token
+                </label>
+                <Input
+                  type="password"
+                  placeholder={kind === "telegram" ? "123456:ABC-DEF..." : kind === "slack" ? "xoxb-..." : "Bot token from Discord Developer Portal"}
+                  value={token}
+                  onChange={(e) => onTokenChange(e.target.value)}
+                  disabled={isCreated}
+                  className="mt-1.5"
+                />
+              </div>
+            )}
 
             {/* Message routing kind selector */}
             <div>
@@ -1041,14 +1209,16 @@ function StepChannel({
             )}
 
             <div className="flex items-center justify-between">
-              <a
-                href={kind === "telegram" ? "https://t.me/BotFather" : "https://discord.com/developers/applications"}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-xs text-primary hover:underline"
-              >
-                Get a bot token <ExternalLink className="h-3 w-3" />
-              </a>
+              {kind !== "imessage" && kind !== "whatsapp" ? (
+                <a
+                  href={kind === "telegram" ? "https://t.me/BotFather" : kind === "discord" ? "https://discord.com/developers/applications" : kind === "slack" ? "https://api.slack.com/apps" : kind === "feishu" ? "https://open.feishu.cn/app" : kind === "dingtalk" ? "https://open-dev.dingtalk.com/" : "https://developer.work.weixin.qq.com/"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  Get credentials <ExternalLink className="h-3 w-3" />
+                </a>
+              ) : <div />}
               {isCreated ? (
                 <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
                   <CheckCircle2 className="h-3.5 w-3.5" />
@@ -1058,7 +1228,13 @@ function StepChannel({
                 <Button
                   size="sm"
                   onClick={onSubmit}
-                  disabled={isCreating || !token || !connectorId}
+                  disabled={isCreating || !connectorId || (() => {
+                    if (kind === "imessage" || kind === "whatsapp") return false;
+                    if (kind === "feishu") return !appId || !appSecret;
+                    if (kind === "dingtalk") return !clientId || !clientSecret;
+                    if (kind === "wecom") return !botId || !secret;
+                    return !token;
+                  })()}
                 >
                   {isCreating ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />

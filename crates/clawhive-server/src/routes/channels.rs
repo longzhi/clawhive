@@ -26,7 +26,27 @@ struct ConnectorStatus {
 #[derive(Deserialize)]
 struct AddConnectorRequest {
     connector_id: String,
-    token: String,
+    /// Token for Telegram/Discord connectors.
+    #[serde(default)]
+    token: Option<String>,
+    /// Feishu app_id
+    #[serde(default)]
+    app_id: Option<String>,
+    /// Feishu app_secret
+    #[serde(default)]
+    app_secret: Option<String>,
+    /// DingTalk client_id
+    #[serde(default)]
+    client_id: Option<String>,
+    /// DingTalk client_secret
+    #[serde(default)]
+    client_secret: Option<String>,
+    /// WeCom bot_id
+    #[serde(default)]
+    bot_id: Option<String>,
+    /// WeCom secret
+    #[serde(default)]
+    secret: Option<String>,
     #[serde(default)]
     groups: Option<Vec<String>>,
     #[serde(default)]
@@ -113,14 +133,62 @@ async fn get_channels_status(
                 continue;
             }
 
-            let token = connector_map
-                .get(serde_yaml::Value::String("token".to_string()))
-                .and_then(serde_yaml::Value::as_str)
-                .unwrap_or_default();
+            let has_credentials = match kind_str {
+                "feishu" => {
+                    let app_id = connector_map
+                        .get(serde_yaml::Value::String("app_id".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    let app_secret = connector_map
+                        .get(serde_yaml::Value::String("app_secret".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    !app_id.is_empty()
+                        && !app_secret.is_empty()
+                        && !app_id.starts_with("${")
+                        && !app_secret.starts_with("${")
+                }
+                "dingtalk" => {
+                    let client_id = connector_map
+                        .get(serde_yaml::Value::String("client_id".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    let client_secret = connector_map
+                        .get(serde_yaml::Value::String("client_secret".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    !client_id.is_empty()
+                        && !client_secret.is_empty()
+                        && !client_id.starts_with("${")
+                        && !client_secret.starts_with("${")
+                }
+                "wecom" => {
+                    let bot_id = connector_map
+                        .get(serde_yaml::Value::String("bot_id".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    let secret = connector_map
+                        .get(serde_yaml::Value::String("secret".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    !bot_id.is_empty()
+                        && !secret.is_empty()
+                        && !bot_id.starts_with("${")
+                        && !secret.starts_with("${")
+                }
+                _ => {
+                    // Token-based channels: telegram, discord, slack, whatsapp, imessage
+                    let token = connector_map
+                        .get(serde_yaml::Value::String("token".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    !token.is_empty() && !token.starts_with("${")
+                }
+            };
 
             let status = if !enabled {
                 "inactive"
-            } else if token.is_empty() || token.starts_with("${") {
+            } else if !has_credentials {
                 "error"
             } else {
                 "connected"
@@ -160,12 +228,29 @@ fn connectors_mut<'a>(
     let channels = root["channels"]
         .as_mapping_mut()
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let channel = channels
-        .get_mut(serde_yaml::Value::String(kind.to_string()))
-        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
-    let channel_map = channel
-        .as_mapping_mut()
+    let kind_key = serde_yaml::Value::String(kind.to_string());
+    // Auto-create channel kind with enabled: true if missing
+    if !channels.contains_key(&kind_key) {
+        let mut new_channel = serde_yaml::Mapping::new();
+        new_channel.insert(
+            serde_yaml::Value::String("enabled".to_string()),
+            serde_yaml::Value::Bool(true),
+        );
+        new_channel.insert(
+            serde_yaml::Value::String("connectors".to_string()),
+            serde_yaml::Value::Sequence(Vec::new()),
+        );
+        channels.insert(kind_key.clone(), serde_yaml::Value::Mapping(new_channel));
+    }
+    let channel_map = channels
+        .get_mut(&kind_key)
+        .and_then(|v| v.as_mapping_mut())
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Ensure enabled is true when adding a connector
+    channel_map.insert(
+        serde_yaml::Value::String("enabled".to_string()),
+        serde_yaml::Value::Bool(true),
+    );
     let connectors = channel_map
         .entry(serde_yaml::Value::String("connectors".to_string()))
         .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
@@ -173,7 +258,6 @@ fn connectors_mut<'a>(
         .as_sequence_mut()
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
-
 async fn add_connector(
     State(state): State<AppState>,
     Path(kind): Path<String>,
@@ -186,25 +270,82 @@ async fn add_connector(
     let mut main = load_main_config(&state)?;
     let connectors = connectors_mut(&mut main, &kind)?;
 
-    let exists = connectors.iter().any(|item| {
+    // Remove existing connector with same ID (upsert behavior)
+    connectors.retain(|item| {
         item["connector_id"]
             .as_str()
-            .map(|id| id == body.connector_id)
-            .unwrap_or(false)
+            .map(|id| id != body.connector_id)
+            .unwrap_or(true)
     });
-    if exists {
-        return Err(axum::http::StatusCode::CONFLICT);
-    }
 
     let mut connector = serde_yaml::Mapping::new();
     connector.insert(
         serde_yaml::Value::String("connector_id".to_string()),
         serde_yaml::Value::String(body.connector_id.clone()),
     );
-    connector.insert(
-        serde_yaml::Value::String("token".to_string()),
-        serde_yaml::Value::String(body.token.clone()),
-    );
+
+    // Write credential fields based on channel kind
+    match kind.as_str() {
+        "feishu" => {
+            let app_id = body.app_id.as_deref().unwrap_or_default();
+            let app_secret = body.app_secret.as_deref().unwrap_or_default();
+            if app_id.is_empty() || app_secret.is_empty() {
+                return Err(axum::http::StatusCode::BAD_REQUEST);
+            }
+            connector.insert(
+                serde_yaml::Value::String("app_id".to_string()),
+                serde_yaml::Value::String(app_id.to_string()),
+            );
+            connector.insert(
+                serde_yaml::Value::String("app_secret".to_string()),
+                serde_yaml::Value::String(app_secret.to_string()),
+            );
+        }
+        "dingtalk" => {
+            let client_id = body.client_id.as_deref().unwrap_or_default();
+            let client_secret = body.client_secret.as_deref().unwrap_or_default();
+            if client_id.is_empty() || client_secret.is_empty() {
+                return Err(axum::http::StatusCode::BAD_REQUEST);
+            }
+            connector.insert(
+                serde_yaml::Value::String("client_id".to_string()),
+                serde_yaml::Value::String(client_id.to_string()),
+            );
+            connector.insert(
+                serde_yaml::Value::String("client_secret".to_string()),
+                serde_yaml::Value::String(client_secret.to_string()),
+            );
+        }
+        "wecom" => {
+            let bot_id = body.bot_id.as_deref().unwrap_or_default();
+            let secret = body.secret.as_deref().unwrap_or_default();
+            if bot_id.is_empty() || secret.is_empty() {
+                return Err(axum::http::StatusCode::BAD_REQUEST);
+            }
+            connector.insert(
+                serde_yaml::Value::String("bot_id".to_string()),
+                serde_yaml::Value::String(bot_id.to_string()),
+            );
+            connector.insert(
+                serde_yaml::Value::String("secret".to_string()),
+                serde_yaml::Value::String(secret.to_string()),
+            );
+        }
+        "imessage" | "whatsapp" => {
+            // No credentials needed — iMessage uses AppleScript, WhatsApp pairs via QR
+        }
+        _ => {
+            // Telegram, Discord, Slack, and other token-based channels
+            let token = body.token.as_deref().unwrap_or_default();
+            if token.is_empty() {
+                return Err(axum::http::StatusCode::BAD_REQUEST);
+            }
+            connector.insert(
+                serde_yaml::Value::String("token".to_string()),
+                serde_yaml::Value::String(token.to_string()),
+            );
+        }
+    }
     if let Some(groups) = &body.groups {
         if !groups.is_empty() {
             let groups_seq: Vec<serde_yaml::Value> = groups
@@ -231,7 +372,6 @@ async fn add_connector(
     Ok(Json(serde_json::json!({
         "kind": kind,
         "connector_id": body.connector_id,
-        "token": body.token,
     })))
 }
 

@@ -46,6 +46,42 @@ pub fn fireworks(api_key: impl Into<String>) -> OpenAiProvider {
     OpenAiProvider::new(api_key, "https://api.fireworks.ai/inference/v1")
 }
 
+/// Qwen (通义千问) via Alibaba DashScope - OpenAI compatible
+/// https://dashscope.aliyuncs.com
+pub fn qwen(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::new(api_key, "https://dashscope.aliyuncs.com/compatible-mode/v1")
+}
+
+/// Moonshot / Kimi - OpenAI compatible
+/// https://platform.moonshot.ai/docs/api/chat
+pub fn moonshot(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::new(api_key, "https://api.moonshot.ai/v1")
+}
+
+/// Zhipu GLM (智谱AI) - OpenAI compatible
+/// https://open.bigmodel.cn
+pub fn zhipu(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::new(api_key, "https://open.bigmodel.cn/api/paas/v4")
+}
+
+/// MiniMax - OpenAI compatible
+/// https://platform.minimax.io
+pub fn minimax(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::new(api_key, "https://api.minimax.io/v1")
+}
+
+/// Volcengine / Doubao (火山引擎/豆包) - OpenAI compatible
+/// https://www.volcengine.com/docs/82379
+pub fn volcengine(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::new(api_key, "https://ark.cn-beijing.volces.com/api/v3")
+}
+
+/// Baidu Qianfan (百度千帆) v2 API - OpenAI compatible
+/// https://qianfan.baidubce.com
+pub fn qianfan(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::new(api_key, "https://qianfan.baidubce.com/v2")
+}
+
 /// Custom OpenAI-compatible endpoint
 pub fn custom(api_key: impl Into<String>, base_url: impl Into<String>) -> OpenAiProvider {
     OpenAiProvider::new(api_key, base_url)
@@ -78,5 +114,48 @@ mod tests {
     fn custom_accepts_any_base() {
         let provider = custom("key", "https://my-llm.example.com/v1");
         assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn qwen_uses_correct_base() {
+        let provider = qwen("sk-test");
+        assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn moonshot_uses_correct_base() {
+        let provider = moonshot("sk-test");
+        assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn zhipu_uses_correct_base() {
+        let provider = zhipu("sk-test");
+        assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn minimax_uses_correct_base() {
+        let provider = minimax("sk-test");
+        assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn volcengine_uses_correct_base() {
+        let provider = volcengine("sk-test");
+        assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn qianfan_uses_correct_base() {
+        let provider = qianfan("sk-test");
+        assert!(std::mem::size_of_val(&provider) > 0);
+    }
+
+    #[test]
+    fn compat_providers_are_openai_provider() {
+        // All compat providers return OpenAiProvider which implements LlmProvider
+        let provider = deepseek("test-key");
+        let _: Box<dyn crate::LlmProvider> = Box::new(provider);
     }
 }

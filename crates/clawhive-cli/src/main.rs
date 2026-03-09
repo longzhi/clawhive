@@ -17,8 +17,11 @@ mod setup_ui;
 
 use clawhive_auth::{AuthProfile, TokenManager};
 use clawhive_bus::EventBus;
+use clawhive_channels::dingtalk::DingTalkBot;
 use clawhive_channels::discord::DiscordBot;
+use clawhive_channels::feishu::FeishuBot;
 use clawhive_channels::telegram::TelegramBot;
+use clawhive_channels::wecom::WeComBot;
 use clawhive_channels::ChannelBot;
 use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
 use clawhive_core::*;
@@ -33,8 +36,9 @@ use clawhive_memory::embedding::{
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
-    register_builtin_providers, AnthropicProvider, AzureOpenAiProvider, OpenAiChatGptProvider,
-    OpenAiProvider, ProviderRegistry,
+    minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
+    AnthropicProvider, AzureOpenAiProvider, OpenAiChatGptProvider, OpenAiProvider,
+    ProviderRegistry,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, ScheduleType, SqliteStore, WaitTask, WaitTaskManager};
@@ -1497,6 +1501,60 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                     tracing::warn!("Azure OpenAI: no API key set, skipping");
                 }
             }
+            "qwen" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(qwen(api_key));
+                    registry.register("qwen", provider);
+                } else {
+                    tracing::warn!("Qwen: no API key set, skipping");
+                }
+            }
+            "moonshot" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(moonshot(api_key));
+                    registry.register("moonshot", provider);
+                } else {
+                    tracing::warn!("Moonshot: no API key set, skipping");
+                }
+            }
+            "zhipu" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(zhipu(api_key));
+                    registry.register("zhipu", provider);
+                } else {
+                    tracing::warn!("Zhipu: no API key set, skipping");
+                }
+            }
+            "minimax" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(minimax(api_key));
+                    registry.register("minimax", provider);
+                } else {
+                    tracing::warn!("MiniMax: no API key set, skipping");
+                }
+            }
+            "volcengine" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(volcengine(api_key));
+                    registry.register("volcengine", provider);
+                } else {
+                    tracing::warn!("Volcengine: no API key set, skipping");
+                }
+            }
+            "qianfan" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(qianfan(api_key));
+                    registry.register("qianfan", provider);
+                } else {
+                    tracing::warn!("Qianfan: no API key set, skipping");
+                }
+            }
             _ => {
                 tracing::warn!("Unknown provider: {}", provider_config.provider_id);
             }
@@ -1734,7 +1792,7 @@ fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
     // config/main.yaml — channels disabled
     std::fs::write(
         &main_yaml,
-        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n  feishu:\n    enabled: false\n    connectors: []\n  dingtalk:\n    enabled: false\n    connectors: []\n  wecom:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
     )?;
 
     // config/routing.yaml
@@ -2187,6 +2245,53 @@ async fn start_bot(
                         .with_groups(connector.groups.clone())
                         .with_require_mention(connector.require_mention),
                 ));
+            }
+        }
+    }
+    // Feishu
+    if let Some(feishu_config) = &config.main.channels.feishu {
+        if feishu_config.enabled {
+            for connector in &feishu_config.connectors {
+                tracing::info!("Registering Feishu bot: {}", connector.connector_id);
+                bots.push(Box::new(FeishuBot::new(
+                    connector.app_id.clone(),
+                    connector.app_secret.clone(),
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                    bus.clone(),
+                )));
+            }
+        }
+    }
+
+    // DingTalk
+    if let Some(dingtalk_config) = &config.main.channels.dingtalk {
+        if dingtalk_config.enabled {
+            for connector in &dingtalk_config.connectors {
+                tracing::info!("Registering DingTalk bot: {}", connector.connector_id);
+                bots.push(Box::new(DingTalkBot::new(
+                    connector.client_id.clone(),
+                    connector.client_secret.clone(),
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                    bus.clone(),
+                )));
+            }
+        }
+    }
+
+    // WeCom
+    if let Some(wecom_config) = &config.main.channels.wecom {
+        if wecom_config.enabled {
+            for connector in &wecom_config.connectors {
+                tracing::info!("Registering WeCom bot: {}", connector.connector_id);
+                bots.push(Box::new(WeComBot::new(
+                    connector.bot_id.clone(),
+                    connector.secret.clone(),
+                    connector.connector_id.clone(),
+                    gateway.clone(),
+                    bus.clone(),
+                )));
             }
         }
     }

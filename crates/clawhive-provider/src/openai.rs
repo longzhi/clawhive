@@ -102,6 +102,10 @@ impl OpenAiProvider {
             )
         };
 
+        let reasoning_effort = request
+            .thinking_level
+            .map(|level| level.openai_reasoning_effort().to_string());
+
         ApiRequest {
             model: request.model,
             messages: to_api_messages(request.system, request.messages),
@@ -115,6 +119,7 @@ impl OpenAiProvider {
             } else {
                 None
             },
+            reasoning_effort,
         }
     }
 }
@@ -200,6 +205,32 @@ impl LlmProvider for OpenAiProvider {
 
         let sse_stream = parse_sse_stream(resp.bytes_stream());
         Ok(Box::pin(sse_stream))
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let url = format!("{}/models", self.api_base);
+        let resp = self
+            .client
+            .get(&url)
+            .header(
+                "authorization",
+                format!("Bearer {}", self.auth_bearer_token()),
+            )
+            .send()
+            .await?;
+        if resp.status() != StatusCode::OK {
+            return Err(anyhow!("failed to list openai models ({})", resp.status()));
+        }
+        let body: serde_json::Value = resp.json().await?;
+        let models = body["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(models)
     }
 }
 
@@ -506,6 +537,8 @@ pub(crate) struct ApiRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<ApiStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +711,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}}
                 }),
             }],
+            thinking_level: None,
         };
 
         let api = OpenAiProvider::to_api_request(req, false);
@@ -808,6 +842,7 @@ mod tests {
             }],
             max_tokens: 100,
             tools: vec![],
+            thinking_level: None,
         };
         let api = OpenAiProvider::to_api_request(req, false);
         assert_eq!(api.messages[0].role, "tool");
@@ -973,5 +1008,35 @@ mod tests {
         let blocks = drain_tool_accumulators(&mut acc);
         assert_eq!(blocks.len(), 1);
         assert!(matches!(&blocks[0], ContentBlock::ToolUse { input, .. } if input.is_object()));
+    }
+
+    #[test]
+    fn to_api_request_includes_reasoning_effort() {
+        let req = LlmRequest {
+            model: "o4-mini".into(),
+            system: None,
+            messages: vec![LlmMessage::user("test")],
+            max_tokens: 128,
+            tools: vec![],
+            thinking_level: Some(crate::ThinkingLevel::High),
+        };
+        let api_req = OpenAiProvider::to_api_request(req, false);
+        let json = serde_json::to_value(&api_req).unwrap();
+        assert_eq!(json["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn to_api_request_no_reasoning_effort_when_none() {
+        let req = LlmRequest {
+            model: "gpt-4o-mini".into(),
+            system: None,
+            messages: vec![LlmMessage::user("test")],
+            max_tokens: 128,
+            tools: vec![],
+            thinking_level: None,
+        };
+        let api_req = OpenAiProvider::to_api_request(req, false);
+        let json = serde_json::to_value(&api_req).unwrap();
+        assert!(json.get("reasoning_effort").is_none());
     }
 }

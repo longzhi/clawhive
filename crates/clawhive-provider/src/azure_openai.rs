@@ -229,6 +229,7 @@ mod tests {
                 description: "Get weather".into(),
                 input_schema: serde_json::json!({"type": "object", "properties": {"location": {"type": "string"}}}),
             }],
+            thinking_level: None,
         };
 
         let payload = OpenAiChatGptProvider::to_responses_request(request, true);

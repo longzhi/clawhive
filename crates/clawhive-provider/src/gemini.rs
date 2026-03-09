@@ -495,6 +495,7 @@ mod tests {
                     "properties": { "city": { "type": "string" } }
                 }),
             }],
+            thinking_level: None,
         };
         let api_req = provider.build_request(&req);
 

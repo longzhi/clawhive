@@ -22,7 +22,8 @@ pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use openai_chatgpt::OpenAiChatGptProvider;
 pub use openai_compat::{
-    custom, deepseek, fireworks, groq, ollama, ollama_with_base, openrouter, together,
+    custom, deepseek, fireworks, groq, minimax, moonshot, ollama, ollama_with_base, openrouter,
+    qianfan, qwen, together, volcengine, zhipu,
 };
 pub use types::StreamChunk;
 pub use types::*;
@@ -38,6 +39,11 @@ pub trait LlmProvider: Send + Sync {
     }
     async fn health(&self) -> Result<()> {
         Ok(())
+    }
+    /// List available model IDs from the provider.
+    /// Default: returns empty vec (provider doesn't support model listing).
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(vec![])
     }
 }
 
@@ -62,6 +68,19 @@ pub enum ProviderType {
     Fireworks,
     /// Custom OpenAI-compatible endpoint
     Custom,
+    /// Qwen (通义千问) via DashScope - OpenAI compatible
+    Qwen,
+    /// Moonshot / Kimi - OpenAI compatible
+    Moonshot,
+    /// Zhipu GLM (智谱AI) - OpenAI compatible
+    Zhipu,
+    /// MiniMax - OpenAI compatible
+    #[serde(rename = "minimax")]
+    MiniMax,
+    /// Volcengine / Doubao (火山引擎) - OpenAI compatible
+    Volcengine,
+    /// Baidu Qianfan (百度千帆) v2 - OpenAI compatible
+    Qianfan,
 }
 
 /// Configuration for a single provider instance.
@@ -196,6 +215,48 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> 
                 .as_ref()
                 .ok_or_else(|| anyhow!("custom provider requires base_url"))?;
             Arc::new(custom(key.clone(), base_url.clone()))
+        }
+        ProviderType::Qwen => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("qwen requires api_key"))?;
+            Arc::new(qwen(key.clone()))
+        }
+        ProviderType::Moonshot => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("moonshot requires api_key"))?;
+            Arc::new(moonshot(key.clone()))
+        }
+        ProviderType::Zhipu => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("zhipu requires api_key"))?;
+            Arc::new(zhipu(key.clone()))
+        }
+        ProviderType::MiniMax => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("minimax requires api_key"))?;
+            Arc::new(minimax(key.clone()))
+        }
+        ProviderType::Volcengine => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("volcengine requires api_key"))?;
+            Arc::new(volcengine(key.clone()))
+        }
+        ProviderType::Qianfan => {
+            let key = config
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("qianfan requires api_key"))?;
+            Arc::new(qianfan(key.clone()))
         }
     };
     Ok(provider)
@@ -376,6 +437,7 @@ mod tests {
             messages: vec![],
             max_tokens: 100,
             tools: vec![],
+            thinking_level: None,
         };
         let resp = provider.chat(req).await.unwrap();
         assert!(resp.text.contains("stub:anthropic:m"));
@@ -385,6 +447,43 @@ mod tests {
     async fn default_health_returns_ok() {
         let provider = StubProvider;
         assert!(provider.health().await.is_ok());
+    }
+}
+#[test]
+fn provider_config_chinese_providers_serialize() {
+    let types = vec![
+        ("qwen", ProviderType::Qwen),
+        ("moonshot", ProviderType::Moonshot),
+        ("zhipu", ProviderType::Zhipu),
+        ("minimax", ProviderType::MiniMax),
+        ("volcengine", ProviderType::Volcengine),
+        ("qianfan", ProviderType::Qianfan),
+    ];
+    for (expected_str, pt) in &types {
+        let config = ProviderConfig::new("test", pt.clone()).with_api_key("sk-test");
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains(expected_str),
+            "Expected {} in {}",
+            expected_str,
+            json
+        );
+    }
+}
+
+#[test]
+fn create_provider_chinese_providers() {
+    let providers = vec![
+        ProviderConfig::new("qwen", ProviderType::Qwen).with_api_key("sk-test"),
+        ProviderConfig::new("moonshot", ProviderType::Moonshot).with_api_key("sk-test"),
+        ProviderConfig::new("zhipu", ProviderType::Zhipu).with_api_key("sk-test"),
+        ProviderConfig::new("minimax", ProviderType::MiniMax).with_api_key("sk-test"),
+        ProviderConfig::new("volcengine", ProviderType::Volcengine).with_api_key("sk-test"),
+        ProviderConfig::new("qianfan", ProviderType::Qianfan).with_api_key("sk-test"),
+    ];
+    for config in &providers {
+        let result = create_provider(config);
+        assert!(result.is_ok(), "Failed to create provider: {}", config.id);
     }
 }
 

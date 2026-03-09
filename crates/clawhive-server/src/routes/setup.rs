@@ -14,6 +14,7 @@ pub fn router() -> Router<AppState> {
         .route("/tools/web-search", get(get_web_search).put(put_web_search))
         .route("/tools/actionbook", get(get_actionbook).put(put_actionbook))
         .route("/provider-presets", get(get_provider_presets))
+        .route("/list-models", post(list_models_handler))
 }
 
 #[derive(Serialize)]
@@ -57,17 +58,20 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
         .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
         .map(|val| {
             let channels = &val["channels"];
-            let tg_enabled = channels["telegram"]["enabled"].as_bool().unwrap_or(false);
-            let dc_enabled = channels["discord"]["enabled"].as_bool().unwrap_or(false);
-            let tg_has_connectors = channels["telegram"]["connectors"]
-                .as_sequence()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-            let dc_has_connectors = channels["discord"]["connectors"]
-                .as_sequence()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-            (tg_enabled && tg_has_connectors) || (dc_enabled && dc_has_connectors)
+            // Dynamically check all channel types — any enabled channel with
+            // non-empty connectors means the user has configured at least one.
+            channels
+                .as_mapping()
+                .map(|map| {
+                    map.values().any(|ch| {
+                        ch["enabled"].as_bool().unwrap_or(false)
+                            && ch["connectors"]
+                                .as_sequence()
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
         })
         .unwrap_or(false);
 
@@ -100,6 +104,107 @@ async fn get_provider_presets() -> Json<Vec<serde_json::Value>> {
         })
         .collect();
     Json(presets)
+}
+
+// ---------------------------------------------------------------------------
+// List models from provider API
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct ListModelsRequest {
+    provider_type: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ModelInfoResponse {
+    id: String,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+    reasoning: bool,
+    vision: bool,
+}
+
+#[derive(Serialize)]
+struct ListModelsResponse {
+    models: Vec<ModelInfoResponse>,
+}
+fn is_non_chat_model(model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    id.contains("embed")
+        || id.contains("moderation")
+        || id.contains("tts")
+        || id.contains("whisper")
+        || id.contains("dall-e")
+        || id.contains("davinci")
+        || id.contains("babbage")
+}
+
+async fn list_models_handler(
+    Json(req): Json<ListModelsRequest>,
+) -> Result<Json<ListModelsResponse>, axum::http::StatusCode> {
+    let provider_id = req.provider_type.clone();
+
+    let provider_type: clawhive_provider::ProviderType =
+        serde_json::from_value(serde_json::Value::String(req.provider_type))
+            .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let mut config = clawhive_provider::ProviderConfig::new("temp", provider_type);
+    if let Some(key) = req.api_key {
+        config = config.with_api_key(key);
+    }
+    if let Some(url) = req.base_url {
+        config = config.with_base_url(url);
+    }
+
+    let provider = clawhive_provider::create_provider(&config)
+        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let api_models = match provider.list_models().await {
+        Ok(models) => models,
+        Err(e) => {
+            tracing::warn!(provider = %provider_id, error = %e, "failed to fetch models from API, falling back to presets");
+            vec![]
+        }
+    };
+
+    let models: Vec<ModelInfoResponse> = if api_models.is_empty() {
+        // Fallback to static presets
+        clawhive_schema::provider_presets::preset_by_id(&provider_id)
+            .map(|p| {
+                p.models
+                    .iter()
+                    .map(|m| ModelInfoResponse {
+                        id: m.id.to_string(),
+                        context_window: Some(m.context_window),
+                        max_output_tokens: Some(m.max_output_tokens),
+                        reasoning: m.reasoning,
+                        vision: m.vision,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        // Merge API results with preset metadata
+        api_models
+            .into_iter()
+            .filter(|id| !is_non_chat_model(id))
+            .map(|id| {
+                let info = clawhive_schema::provider_presets::model_info(&provider_id, &id);
+                ModelInfoResponse {
+                    context_window: info.map(|p| p.context_window),
+                    max_output_tokens: info.map(|p| p.max_output_tokens),
+                    reasoning: info.is_some_and(|p| p.reasoning),
+                    vision: info.is_some_and(|p| p.vision),
+                    id,
+                }
+            })
+            .collect()
+    };
+
+    Ok(Json(ListModelsResponse { models }))
 }
 
 // ---------------------------------------------------------------------------

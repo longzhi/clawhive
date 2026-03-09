@@ -79,6 +79,7 @@ async fn openai_basic_chat_with_header_verification() {
             messages: vec![LlmMessage::user("hi")],
             max_tokens: 128,
             tools: vec![],
+            thinking_level: None,
         })
         .await
         .unwrap();
@@ -120,6 +121,7 @@ async fn openai_tool_calling_with_stop_reason_normalization() {
                     "properties": {"city": {"type": "string"}}
                 }),
             }],
+            thinking_level: None,
         })
         .await
         .unwrap();
@@ -160,6 +162,7 @@ async fn openai_streaming_text_with_deltas() {
             messages: vec![LlmMessage::user("hello")],
             max_tokens: 64,
             tools: vec![],
+            thinking_level: None,
         })
         .await
         .unwrap();
@@ -210,6 +213,7 @@ async fn openai_streaming_tool_calls_with_accumulated_blocks() {
                 description: "Get weather".into(),
                 input_schema: serde_json::json!({"type": "object"}),
             }],
+            thinking_level: None,
         })
         .await
         .unwrap();
@@ -251,6 +255,7 @@ async fn openai_error_handling_401_not_retryable() {
             messages: vec![LlmMessage::user("test")],
             max_tokens: 64,
             tools: vec![],
+            thinking_level: None,
         })
         .await
         .unwrap_err();
@@ -318,6 +323,7 @@ async fn openai_connection_error_retryable() {
             messages: vec![LlmMessage::user("ping")],
             max_tokens: 64,
             tools: vec![],
+            thinking_level: None,
         })
         .await
         .unwrap_err();

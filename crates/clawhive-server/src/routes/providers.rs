@@ -115,9 +115,6 @@ async fn create_provider(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let path = providers_dir.join(format!("{}.yaml", body.provider_id));
-    if path.exists() {
-        return Err(axum::http::StatusCode::CONFLICT);
-    }
 
     let mut yaml = format!(
         "provider_id: {}\nenabled: true\napi_base: {}\n",

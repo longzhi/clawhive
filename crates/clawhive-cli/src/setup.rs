@@ -12,9 +12,12 @@ use console::{style, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 use clawhive_core::config::{
-    ActionbookConfig, DiscordChannelConfig, DiscordConnectorConfig, MainConfig,
-    TelegramChannelConfig, TelegramConnectorConfig, WebSearchConfig,
+    ActionbookConfig, DingTalkChannelConfig, DingTalkConnectorConfig, DiscordChannelConfig,
+    DiscordConnectorConfig, FeishuChannelConfig, FeishuConnectorConfig, MainConfig,
+    TelegramChannelConfig, TelegramConnectorConfig, WeComChannelConfig, WeComConnectorConfig,
+    WebSearchConfig,
 };
+use clawhive_schema::provider_presets::model_info;
 
 use crate::setup_scan::{scan_config, ConfigState};
 use crate::setup_ui::{print_done, print_logo, render_dashboard, ARROW, CRAB};
@@ -42,6 +45,12 @@ enum ProviderId {
     OpenRouter,
     Together,
     Fireworks,
+    Qwen,
+    Moonshot,
+    Zhipu,
+    MiniMax,
+    Volcengine,
+    Qianfan,
 }
 
 const ALL_PROVIDERS: &[ProviderId] = &[
@@ -55,6 +64,12 @@ const ALL_PROVIDERS: &[ProviderId] = &[
     ProviderId::OpenRouter,
     ProviderId::Together,
     ProviderId::Fireworks,
+    ProviderId::Qwen,
+    ProviderId::Moonshot,
+    ProviderId::Zhipu,
+    ProviderId::MiniMax,
+    ProviderId::Volcengine,
+    ProviderId::Qianfan,
 ];
 
 impl ProviderId {
@@ -70,6 +85,12 @@ impl ProviderId {
             Self::OpenRouter => "openrouter",
             Self::Together => "together",
             Self::Fireworks => "fireworks",
+            Self::Qwen => "qwen",
+            Self::Moonshot => "moonshot",
+            Self::Zhipu => "zhipu",
+            Self::MiniMax => "minimax",
+            Self::Volcengine => "volcengine",
+            Self::Qianfan => "qianfan",
         }
     }
 
@@ -108,12 +129,18 @@ enum AuthChoice {
     ApiKey { api_key: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ChannelConfig {
     connector_id: String,
     token: String,
     groups: Vec<String>,
     require_mention: bool,
+    app_id: Option<String>,
+    app_secret: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    bot_id: Option<String>,
+    secret: Option<String>,
 }
 
 pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
@@ -471,10 +498,20 @@ fn handle_add_agent(
     }
     models.push("Custom…".to_string());
 
-    let model_labels: Vec<&str> = models.iter().map(String::as_str).collect();
+    let model_labels: Vec<String> = models
+        .iter()
+        .map(|m| {
+            if m == "Custom…" {
+                m.clone()
+            } else {
+                format_model_label(m)
+            }
+        })
+        .collect();
+    let model_labels_refs: Vec<&str> = model_labels.iter().map(String::as_str).collect();
     let selected = Select::with_theme(theme)
         .with_prompt("Primary model")
-        .items(&model_labels)
+        .items(&model_labels_refs)
         .default(0)
         .interact()?;
 
@@ -487,7 +524,28 @@ fn handle_add_agent(
         models[selected].clone()
     };
 
-    write_agent_files_unchecked(config_root, &agent_id, &name, &emoji, &primary_model)?;
+    // Thinking level selection
+    let thinking_levels = ["None (default)", "Low", "Medium", "High"];
+    let thinking_selected = Select::with_theme(theme)
+        .with_prompt("Thinking level (for reasoning models)")
+        .items(&thinking_levels)
+        .default(0)
+        .interact()?;
+    let thinking_level = match thinking_selected {
+        1 => Some("low"),
+        2 => Some("medium"),
+        3 => Some("high"),
+        _ => None,
+    };
+
+    write_agent_files_unchecked(
+        config_root,
+        &agent_id,
+        &name,
+        &emoji,
+        &primary_model,
+        thinking_level,
+    )?;
     print_done(&Term::stdout(), &format!("Agent {agent_id} configured."));
     Ok(())
 }
@@ -498,7 +556,9 @@ fn handle_add_channel(
     state: &ConfigState,
     _force: bool,
 ) -> Result<()> {
-    let channel_types = ["Telegram", "Discord", "← Back"];
+    let channel_types = [
+        "Telegram", "Discord", "Feishu", "DingTalk", "WeCom", "← Back",
+    ];
     let selected = Select::with_theme(theme)
         .with_prompt("Channel type")
         .items(&channel_types)
@@ -507,11 +567,18 @@ fn handle_add_channel(
     let channel_type = match selected {
         0 => "telegram",
         1 => "discord",
+        2 => "feishu",
+        3 => "dingtalk",
+        4 => "wecom",
         _ => return Ok(()),
     };
     let default_id = match channel_type {
         "telegram" => "my_telegram_bot",
-        _ => "my_discord_bot",
+        "discord" => "my_discord_bot",
+        "feishu" => "my_feishu_bot",
+        "dingtalk" => "my_dingtalk_bot",
+        "wecom" => "my_wecom_bot",
+        _ => "my_bot",
     };
 
     let connector_id = match input_or_back_with_default(
@@ -523,13 +590,85 @@ fn handle_add_channel(
         None => return Ok(()),
     };
 
-    let token = match input_or_back(theme, "Bot token")? {
-        Some(t) if !t.is_empty() => t,
-        Some(_) => anyhow::bail!("Bot token cannot be empty"),
-        None => return Ok(()),
-    };
-    let masked = mask_secret(&token);
-    println!("  {ARROW} Token saved: {masked}");
+    let token;
+    let mut app_id = None;
+    let mut app_secret = None;
+    let mut client_id = None;
+    let mut client_secret = None;
+    let mut bot_id_str = None;
+    let mut secret = None;
+
+    match channel_type {
+        "feishu" => {
+            let id = match input_or_back(theme, "App ID (from Feishu Developer Console)")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("App ID cannot be empty"),
+                None => return Ok(()),
+            };
+            let sec = match input_or_back(theme, "App Secret")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("App Secret cannot be empty"),
+                None => return Ok(()),
+            };
+            println!(
+                "  {ARROW} Credentials saved: {}:{}",
+                mask_secret(&id),
+                mask_secret(&sec)
+            );
+            app_id = Some(id);
+            app_secret = Some(sec);
+            token = String::new();
+        }
+        "dingtalk" => {
+            let id = match input_or_back(theme, "Client ID (AppKey from DingTalk Developer)")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("Client ID cannot be empty"),
+                None => return Ok(()),
+            };
+            let sec = match input_or_back(theme, "Client Secret (AppSecret)")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("Client Secret cannot be empty"),
+                None => return Ok(()),
+            };
+            println!(
+                "  {ARROW} Credentials saved: {}:{}",
+                mask_secret(&id),
+                mask_secret(&sec)
+            );
+            client_id = Some(id);
+            client_secret = Some(sec);
+            token = String::new();
+        }
+        "wecom" => {
+            let id = match input_or_back(theme, "Bot ID (from WeCom Admin Console)")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("Bot ID cannot be empty"),
+                None => return Ok(()),
+            };
+            let sec = match input_or_back(theme, "Secret")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("Secret cannot be empty"),
+                None => return Ok(()),
+            };
+            println!(
+                "  {ARROW} Credentials saved: {}:{}",
+                mask_secret(&id),
+                mask_secret(&sec)
+            );
+            bot_id_str = Some(id);
+            secret = Some(sec);
+            token = String::new();
+        }
+        _ => {
+            token = match input_or_back(theme, "Bot token")? {
+                Some(t) if !t.is_empty() => t,
+                Some(_) => anyhow::bail!("Bot token cannot be empty"),
+                None => return Ok(()),
+            };
+            let masked = mask_secret(&token);
+            println!("  {ARROW} Token saved: {masked}");
+        }
+    }
 
     // Message routing kind selection
     let kind_options = ["DM only", "Group only", "DM + Group", "← Back"];
@@ -597,6 +736,12 @@ fn handle_add_channel(
         token,
         groups,
         require_mention,
+        app_id,
+        app_secret,
+        client_id,
+        client_secret,
+        bot_id: bot_id_str,
+        secret,
     };
     add_channel_to_config(config_root, channel_type, &cfg)?;
     print_done(
@@ -880,6 +1025,66 @@ fn add_channel_to_config(
                 }
                 None => {
                     main_cfg.channels.discord = Some(DiscordChannelConfig {
+                        enabled: true,
+                        connectors: vec![connector],
+                    });
+                }
+            }
+        }
+        "feishu" => {
+            let connector = FeishuConnectorConfig {
+                connector_id: cfg.connector_id.clone(),
+                app_id: cfg.app_id.clone().unwrap_or_default(),
+                app_secret: cfg.app_secret.clone().unwrap_or_default(),
+            };
+            match main_cfg.channels.feishu.as_mut() {
+                Some(fs) => {
+                    fs.enabled = true;
+                    fs.connectors.retain(|c| c.connector_id != cfg.connector_id);
+                    fs.connectors.push(connector);
+                }
+                None => {
+                    main_cfg.channels.feishu = Some(FeishuChannelConfig {
+                        enabled: true,
+                        connectors: vec![connector],
+                    });
+                }
+            }
+        }
+        "dingtalk" => {
+            let connector = DingTalkConnectorConfig {
+                connector_id: cfg.connector_id.clone(),
+                client_id: cfg.client_id.clone().unwrap_or_default(),
+                client_secret: cfg.client_secret.clone().unwrap_or_default(),
+            };
+            match main_cfg.channels.dingtalk.as_mut() {
+                Some(dt) => {
+                    dt.enabled = true;
+                    dt.connectors.retain(|c| c.connector_id != cfg.connector_id);
+                    dt.connectors.push(connector);
+                }
+                None => {
+                    main_cfg.channels.dingtalk = Some(DingTalkChannelConfig {
+                        enabled: true,
+                        connectors: vec![connector],
+                    });
+                }
+            }
+        }
+        "wecom" => {
+            let connector = WeComConnectorConfig {
+                connector_id: cfg.connector_id.clone(),
+                bot_id: cfg.bot_id.clone().unwrap_or_default(),
+                secret: cfg.secret.clone().unwrap_or_default(),
+            };
+            match main_cfg.channels.wecom.as_mut() {
+                Some(wc) => {
+                    wc.enabled = true;
+                    wc.connectors.retain(|c| c.connector_id != cfg.connector_id);
+                    wc.connectors.push(connector);
+                }
+                None => {
+                    main_cfg.channels.wecom = Some(WeComChannelConfig {
                         enabled: true,
                         connectors: vec![connector],
                     });
@@ -1206,10 +1411,11 @@ fn write_agent_files_unchecked(
     name: &str,
     emoji: &str,
     primary_model: &str,
+    thinking_level: Option<&str>,
 ) -> Result<()> {
     let agents_dir = config_root.join("config/agents.d");
     fs::create_dir_all(&agents_dir)?;
-    let yaml = generate_agent_yaml(agent_id, name, emoji, primary_model);
+    let yaml = generate_agent_yaml(agent_id, name, emoji, primary_model, thinking_level);
     fs::write(agents_dir.join(format!("{agent_id}.yaml")), yaml)?;
 
     // Workspace prompt templates (AGENTS.md, SOUL.md, etc.) are created
@@ -1266,9 +1472,19 @@ fn generate_provider_yaml(
     }
 }
 
-fn generate_agent_yaml(agent_id: &str, name: &str, emoji: &str, primary_model: &str) -> String {
+fn generate_agent_yaml(
+    agent_id: &str,
+    name: &str,
+    emoji: &str,
+    primary_model: &str,
+    thinking_level: Option<&str>,
+) -> String {
+    let thinking_line = match thinking_level {
+        Some(level) => format!("\n  thinking_level: {level}"),
+        None => String::new(),
+    };
     format!(
-        "agent_id: {agent_id}\nenabled: true\nidentity:\n  name: \"{name}\"\n  emoji: \"{emoji}\"\nmodel_policy:\n  primary: \"{primary_model}\"\n  fallbacks: []\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n"
+        "agent_id: {agent_id}\nenabled: true\nidentity:\n  name: \"{name}\"\n  emoji: \"{emoji}\"\nmodel_policy:\n  primary: \"{primary_model}\"\n  fallbacks: []{thinking_line}\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n"
     )
 }
 
@@ -1357,6 +1573,28 @@ fn provider_models_for_id(provider_id: &str) -> Vec<String> {
     clawhive_schema::provider_presets::provider_models_for_id(provider_id)
 }
 
+fn format_model_label(model_id: &str) -> String {
+    let parts: Vec<&str> = model_id.splitn(2, '/').collect();
+    if parts.len() == 2 {
+        if let Some(info) = model_info(parts[0], parts[1]) {
+            let ctx = if info.context_window >= 1_000_000 {
+                format!("{}M", info.context_window / 1_000_000)
+            } else {
+                format!("{}k", info.context_window / 1000)
+            };
+            let mut tags = vec![format!("{ctx} ctx")];
+            if info.reasoning {
+                tags.push("reasoning".into());
+            }
+            if info.vision {
+                tags.push("vision".into());
+            }
+            return format!("{model_id} ({})", tags.join(", "));
+        }
+    }
+    model_id.to_string()
+}
+
 fn unix_timestamp() -> Result<i64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1428,7 +1666,13 @@ mod tests {
 
     #[test]
     fn agent_yaml_contains_identity_and_model_policy() {
-        let yaml = generate_agent_yaml("clawhive-main", "Clawhive", "🦀", "openai/gpt-4o-mini");
+        let yaml = generate_agent_yaml(
+            "clawhive-main",
+            "Clawhive",
+            "\u{1F980}",
+            "openai/gpt-4o-mini",
+            None,
+        );
 
         assert!(yaml.contains("agent_id: clawhive-main"));
         assert!(yaml.contains("name: \"Clawhive\""));
@@ -1474,12 +1718,14 @@ mod tests {
                 token: "123:telegram-token".to_string(),
                 groups: Vec::new(),
                 require_mention: true,
+                ..Default::default()
             }),
             Some(ChannelConfig {
                 connector_id: "dc-main".to_string(),
                 token: "discord-token".to_string(),
                 groups: Vec::new(),
                 require_mention: true,
+                ..Default::default()
             }),
         );
 
@@ -1500,6 +1746,7 @@ mod tests {
                 token: "tok1".into(),
                 groups: Vec::new(),
                 require_mention: true,
+                ..Default::default()
             }),
             None,
         );
@@ -1512,6 +1759,7 @@ mod tests {
                 token: "tok2".into(),
                 groups: Vec::new(),
                 require_mention: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1531,12 +1779,14 @@ mod tests {
                 token: "tok1".into(),
                 groups: Vec::new(),
                 require_mention: true,
+                ..Default::default()
             }),
             Some(ChannelConfig {
                 connector_id: "dc-main".into(),
                 token: "tok2".into(),
                 groups: Vec::new(),
                 require_mention: true,
+                ..Default::default()
             }),
         );
         std::fs::write(temp.path().join("config/main.yaml"), &initial).unwrap();
@@ -1611,7 +1861,13 @@ mod tests {
         .expect("write provider yaml");
         std::fs::write(
             temp.path().join("config/agents.d/clawhive-main.yaml"),
-            generate_agent_yaml("clawhive-main", "Clawhive", "🦀", "openai/gpt-4o-mini"),
+            generate_agent_yaml(
+                "clawhive-main",
+                "Clawhive",
+                "\u{1F980}",
+                "openai/gpt-4o-mini",
+                None,
+            ),
         )
         .expect("write agent yaml");
 
@@ -1679,8 +1935,9 @@ mod tests {
             temp.path(),
             "clawhive-main",
             "Clawhive",
-            "🦀",
+            "\u{1F980}",
             "openai/gpt-4o-mini",
+            None,
         )
         .expect("write agent files");
 
