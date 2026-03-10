@@ -1,6 +1,6 @@
 use console::{style, Emoji, Term};
 
-use crate::setup_scan::{AuthSummary, ConfigState};
+use super::scan::{AuthSummary, ConfigState};
 
 pub static CHECKMARK: Emoji<'_, '_> = Emoji("✅ ", "√ ");
 pub static CIRCLE: Emoji<'_, '_> = Emoji("○ ", "o ");

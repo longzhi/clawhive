@@ -9,6 +9,7 @@ pub mod dashboard;
 pub mod logs;
 pub mod schedule;
 pub mod session;
+pub mod setup;
 pub mod skill;
 pub mod start;
 pub mod status;

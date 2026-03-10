@@ -7,14 +7,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 mod commands;
 mod runtime;
-mod setup;
-mod setup_scan;
-mod setup_ui;
 
 use clawhive_core::*;
 use commands::auth::{handle_auth_command, AuthCommands};
+use commands::setup::run_setup;
 use runtime::bootstrap::resolve_security_override;
-use setup::run_setup;
 
 /// Default HTTP API server port.
 const DEFAULT_PORT: u16 = 8848;
@@ -433,9 +430,9 @@ mod tests {
 
     #[test]
     fn setup_ui_symbols_exist() {
-        let _ = crate::setup_ui::CHECKMARK;
-        let _ = crate::setup_ui::ARROW;
-        let _ = crate::setup_ui::CRAB;
+        let _ = crate::commands::setup::ui::CHECKMARK;
+        let _ = crate::commands::setup::ui::ARROW;
+        let _ = crate::commands::setup::ui::CRAB;
     }
 
     #[test]
