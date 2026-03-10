@@ -2293,53 +2293,16 @@ fn response_claims_actions(text: &str) -> bool {
         || en_indicators.iter().any(|ind| text_lower.contains(ind))
 }
 
-/// Detect a "lazy ack" response — the agent merely acknowledges the task
-/// instructions or promises to do it later, without actually performing anything.
-/// This catches responses like "已收到", "我会按规则执行", "好的我来做", etc.
-fn response_is_lazy_ack(text: &str) -> bool {
-    let text_lower = text.to_ascii_lowercase();
-    let char_count = text.chars().count();
-    // Short response (under 200 chars) that doesn't contain tool output markers
-    if char_count > 200 {
-        return false;
-    }
-    let ack_cn = [
-        "已收到",
-        "我会",
-        "好的",
-        "收到",
-        "我来",
-        "按规则",
-        "按要求",
-        "按这份",
-        "按你",
-        "后续就按",
-        "对齐",
-        "明白",
-    ];
-    let ack_en = [
-        "got it",
-        "understood",
-        "i will",
-        "i'll",
-        "acknowledged",
-        "noted",
-        "will do",
-        "on it",
-    ];
-    ack_cn.iter().any(|ind| text.contains(ind)) || ack_en.iter().any(|ind| text_lower.contains(ind))
-}
-
 fn should_retry_fabricated_scheduled_response(
     is_scheduled_task: bool,
     already_retried: bool,
     tool_use_count: usize,
-    response_text: &str,
+    _response_text: &str,
 ) -> bool {
-    is_scheduled_task
-        && !already_retried
-        && tool_use_count == 0
-        && (response_claims_actions(response_text) || response_is_lazy_ack(response_text))
+    // For scheduled tasks, if the agent returned with zero tool calls,
+    // it almost certainly did not actually execute the multi-step task.
+    // Retry once with a forceful continuation prompt.
+    is_scheduled_task && !already_retried && tool_use_count == 0
 }
 
 fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {
