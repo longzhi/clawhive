@@ -10,6 +10,7 @@ pub mod logs;
 pub mod schedule;
 pub mod session;
 pub mod skill;
+pub mod start;
 pub mod status;
 pub mod task;
 pub mod update;
