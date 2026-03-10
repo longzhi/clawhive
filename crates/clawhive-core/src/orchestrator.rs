@@ -1410,7 +1410,7 @@ impl Orchestrator {
         let mut web_search_reminder_injected = false;
         let mut web_search_called = false;
         let loop_started = std::time::Instant::now();
-        let mut scheduled_task_retry_injected = false;
+        let mut scheduled_task_retries: u32 = 0;
 
         for iteration in 0..max_iterations {
             let iteration_no = iteration + 1;
@@ -1524,38 +1524,30 @@ impl Orchestrator {
                 // to have performed actions but made zero tool calls.
                 if should_retry_fabricated_scheduled_response(
                     is_scheduled_task,
-                    scheduled_task_retry_injected,
+                    scheduled_task_retries,
                     tool_uses.len(),
-                    &resp.text,
                 ) {
-                    scheduled_task_retry_injected = true;
+                    scheduled_task_retries += 1;
                     tracing::warn!(
                         agent_id = %agent_id,
                         iteration = iteration_no,
+                        retry_count = scheduled_task_retries,
                         response_len = resp.text.len(),
-                        "tool_use_loop: scheduled task response has no tool calls — likely fabrication or lazy ack, injecting retry"
+                        "tool_use_loop: scheduled task response has no tool calls, injecting retry {}/2",
+                        scheduled_task_retries
                     );
-                    let retry_prompt = if response_claims_actions(&resp.text) {
-                        concat!(
-                            "Your response claims to have performed actions (writing files, ",
-                            "executing commands, fetching data, etc.) but you did not make any ",
-                            "tool calls. This is a scheduled task \u{2014} you must actually execute ",
-                            "each step using the available tools. Do not generate fictional ",
-                            "results. Complete the task now using tool calls.",
-                        )
-                    } else {
-                        concat!(
-                            "You only acknowledged the task but did not execute it. ",
-                            "This is an automated scheduled task \u{2014} do not just confirm or promise. ",
-                            "Start executing NOW: read the required files, run the commands, ",
-                            "write the output. Use tool calls to perform each step.",
-                        )
-                    };
                     messages.push(LlmMessage {
                         role: "assistant".into(),
                         content: resp.content.clone(),
                     });
-                    messages.push(LlmMessage::user(retry_prompt));
+                    messages.push(LlmMessage::user(concat!(
+                        "[SYSTEM] You responded without making any tool calls. ",
+                        "This is UNACCEPTABLE for a scheduled task. ",
+                        "You MUST use tools to execute the task. ",
+                        "Start with step 1 RIGHT NOW: call execute_command or read_file ",
+                        "to begin the work. Do NOT reply with text \u{2014} your next message ",
+                        "MUST contain tool_use blocks.",
+                    )));
                     continue;
                 }
 
@@ -2251,58 +2243,16 @@ fn should_inject_web_search_reminder(
         && tool_use_count == 0
 }
 
-/// Detect if a scheduled task response likely fabricated action claims without
-/// actually calling tools. Checks for action-indicating phrases in both Chinese
-/// and English that suggest the agent claimed to have performed operations.
-fn response_claims_actions(text: &str) -> bool {
-    let text_lower = text.to_ascii_lowercase();
-    // Chinese action claims
-    let cn_indicators = [
-        "已完成",
-        "已写入",
-        "已执行",
-        "已抓取",
-        "已生成",
-        "已发布",
-        "已提交",
-        "已推送",
-        "已构建",
-        "已部署",
-        "已更新",
-        "写入：",
-        "写入:",
-        "执行了",
-        "抓取了",
-        "生成了",
-    ];
-    // English action claims
-    let en_indicators = [
-        "wrote to",
-        "written to",
-        "pushed to",
-        "committed",
-        "executed",
-        "fetched",
-        "generated",
-        "deployed",
-        "hugo build",
-        "git push",
-        "git commit",
-    ];
-    cn_indicators.iter().any(|ind| text.contains(ind))
-        || en_indicators.iter().any(|ind| text_lower.contains(ind))
-}
-
 fn should_retry_fabricated_scheduled_response(
     is_scheduled_task: bool,
-    already_retried: bool,
+    retry_count: u32,
     tool_use_count: usize,
-    _response_text: &str,
 ) -> bool {
     // For scheduled tasks, if the agent returned with zero tool calls,
     // it almost certainly did not actually execute the multi-step task.
-    // Retry once with a forceful continuation prompt.
-    is_scheduled_task && !already_retried && tool_use_count == 0
+    // Allow up to 2 retries with increasingly forceful continuation prompts.
+    const MAX_RETRIES: u32 = 2;
+    is_scheduled_task && retry_count < MAX_RETRIES && tool_use_count == 0
 }
 
 fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {
