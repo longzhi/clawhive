@@ -8,6 +8,7 @@ pub mod file_tools;
 pub mod heartbeat;
 pub mod hooks;
 pub mod image_tool;
+mod language_prefs;
 pub mod memory_tools;
 pub mod message_tool;
 pub mod orchestrator;
