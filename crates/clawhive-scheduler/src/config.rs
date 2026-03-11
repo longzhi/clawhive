@@ -12,8 +12,7 @@ pub struct ScheduleConfig {
     pub agent_id: String,
     #[serde(default)]
     pub session_mode: SessionMode,
-    pub task: String,
-    /// Typed task payload. Takes precedence over legacy `task` field.
+    /// Typed task payload.
     #[serde(default)]
     pub payload: Option<TaskPayload>,
     #[serde(default = "default_timeout")]
@@ -36,7 +35,6 @@ impl Default for ScheduleConfig {
             },
             agent_id: "clawhive-main".to_string(),
             session_mode: SessionMode::default(),
-            task: String::new(),
             payload: None,
             timeout_seconds: default_timeout(),
             delete_after_run: false,
@@ -44,31 +42,6 @@ impl Default for ScheduleConfig {
         }
     }
 }
-
-impl ScheduleConfig {
-    /// Auto-convert legacy `task + session_mode` to `payload` if payload is not set.
-    pub fn migrate_legacy(&mut self) {
-        if self.payload.is_some() {
-            return;
-        }
-        if self.task.is_empty() {
-            return;
-        }
-        self.payload = Some(match self.session_mode {
-            SessionMode::Main => TaskPayload::SystemEvent {
-                text: self.task.clone(),
-            },
-            SessionMode::Isolated => TaskPayload::AgentTurn {
-                message: self.task.clone(),
-                model: None,
-                thinking: None,
-                timeout_seconds: self.timeout_seconds,
-                light_context: false,
-            },
-        });
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum ScheduleType {
@@ -126,29 +99,9 @@ pub enum TaskPayload {
     DirectDeliver { text: String },
 }
 
-/// Resolve payload from either explicit payload or legacy task field.
-pub fn resolve_payload(
-    task: Option<String>,
-    payload: Option<TaskPayload>,
-    session_mode: SessionMode,
-) -> Result<TaskPayload, anyhow::Error> {
-    if let Some(p) = payload {
-        return Ok(p);
-    }
-    match task {
-        Some(t) if !t.trim().is_empty() => match session_mode {
-            SessionMode::Main => Ok(TaskPayload::SystemEvent { text: t }),
-            SessionMode::Isolated => Ok(TaskPayload::AgentTurn {
-                message: t,
-                model: None,
-                thinking: None,
-                timeout_seconds: 300,
-                light_context: false,
-            }),
-        },
-        Some(_) => Err(anyhow::anyhow!("task cannot be empty")),
-        None => Err(anyhow::anyhow!("either task or payload must be provided")),
-    }
+/// Resolve payload — payload is required, no legacy fallback.
+pub fn resolve_payload(payload: Option<TaskPayload>) -> Result<TaskPayload, anyhow::Error> {
+    payload.ok_or_else(|| anyhow::anyhow!("payload must be provided"))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -274,116 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_payload_prefers_explicit() {
+    fn resolve_payload_requires_payload() {
         let payload = TaskPayload::DirectDeliver { text: "hi".into() };
-        let result =
-            resolve_payload(Some("old task".into()), Some(payload), SessionMode::Main).unwrap();
+        let result = resolve_payload(Some(payload)).unwrap();
         assert!(matches!(result, TaskPayload::DirectDeliver { .. }));
     }
 
     #[test]
-    fn resolve_payload_falls_back_to_task() {
-        let result = resolve_payload(Some("old task".into()), None, SessionMode::Isolated).unwrap();
-        match result {
-            TaskPayload::AgentTurn {
-                message,
-                timeout_seconds,
-                ..
-            } => {
-                assert_eq!(message, "old task");
-                assert_eq!(timeout_seconds, 300);
-            }
-            _ => panic!("expected AgentTurn"),
-        }
-    }
-
-    #[test]
-    fn resolve_payload_errors_when_both_none() {
-        let result = resolve_payload(None, None, SessionMode::Isolated);
+    fn resolve_payload_errors_when_none() {
+        let result = resolve_payload(None);
         assert!(result.is_err());
     }
-
-    #[test]
-    fn resolve_payload_rejects_empty_task() {
-        let result = resolve_payload(Some("   ".into()), None, SessionMode::Isolated);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
-    }
-
-    #[test]
-    fn resolve_payload_main_mode_becomes_system_event() {
-        let result = resolve_payload(Some("legacy main".into()), None, SessionMode::Main).unwrap();
-        assert!(matches!(result, TaskPayload::SystemEvent { text } if text == "legacy main"));
-    }
-
-    #[test]
-    fn migrate_legacy_isolated_becomes_agent_turn() {
-        let mut config = ScheduleConfig {
-            schedule_id: "test".into(),
-            name: "Test".into(),
-            task: "do stuff".into(),
-            session_mode: SessionMode::Isolated,
-            payload: None,
-            ..Default::default()
-        };
-        config.migrate_legacy();
-        let payload = config.payload.as_ref().expect("payload should be set");
-        match payload {
-            TaskPayload::AgentTurn {
-                message,
-                timeout_seconds,
-                ..
-            } => {
-                assert_eq!(message, "do stuff");
-                assert_eq!(*timeout_seconds, 300);
-            }
-            _ => panic!("expected AgentTurn"),
-        }
-    }
-
-    #[test]
-    fn migrate_legacy_main_becomes_system_event() {
-        let mut config = ScheduleConfig {
-            schedule_id: "test".into(),
-            name: "Test".into(),
-            task: "remind me".into(),
-            session_mode: SessionMode::Main,
-            payload: None,
-            ..Default::default()
-        };
-        config.migrate_legacy();
-        let payload = config.payload.as_ref().expect("payload should be set");
-        assert!(matches!(payload, TaskPayload::SystemEvent { text } if text == "remind me"));
-    }
-
-    #[test]
-    fn migrate_legacy_skips_if_payload_present() {
-        let mut config = ScheduleConfig {
-            schedule_id: "test".into(),
-            name: "Test".into(),
-            task: "old task".into(),
-            payload: Some(TaskPayload::DirectDeliver { text: "new".into() }),
-            ..Default::default()
-        };
-        config.migrate_legacy();
-        assert!(
-            matches!(config.payload.as_ref().unwrap(), TaskPayload::DirectDeliver { text } if text == "new")
-        );
-    }
-
-    #[test]
-    fn migrate_legacy_skips_if_task_empty() {
-        let mut config = ScheduleConfig {
-            schedule_id: "test".into(),
-            name: "Test".into(),
-            task: String::new(),
-            payload: None,
-            ..Default::default()
-        };
-        config.migrate_legacy();
-        assert!(config.payload.is_none());
-    }
-
     #[test]
     fn delivery_config_serde_with_user_scope() {
         let config = DeliveryConfig {

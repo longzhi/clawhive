@@ -53,35 +53,25 @@ struct CompletionEvent {
 }
 
 fn to_scheduled_payload(config: &ScheduleConfig) -> ScheduledTaskPayload {
-    if let Some(ref payload) = config.payload {
-        match payload {
-            crate::TaskPayload::SystemEvent { text } => {
-                ScheduledTaskPayload::SystemEvent { text: text.clone() }
-            }
-            crate::TaskPayload::AgentTurn {
-                message,
-                model,
-                thinking,
-                timeout_seconds,
-                light_context,
-            } => ScheduledTaskPayload::AgentTurn {
-                message: message.clone(),
-                model: model.clone(),
-                thinking: thinking.clone(),
-                timeout_seconds: *timeout_seconds,
-                light_context: *light_context,
-            },
-            crate::TaskPayload::DirectDeliver { text } => {
-                ScheduledTaskPayload::DirectDeliver { text: text.clone() }
-            }
+    match config.payload.as_ref().expect("payload must be set") {
+        crate::TaskPayload::SystemEvent { text } => {
+            ScheduledTaskPayload::SystemEvent { text: text.clone() }
         }
-    } else {
-        ScheduledTaskPayload::AgentTurn {
-            message: config.task.clone(),
-            model: None,
-            thinking: None,
-            timeout_seconds: config.timeout_seconds,
-            light_context: false,
+        crate::TaskPayload::AgentTurn {
+            message,
+            model,
+            thinking,
+            timeout_seconds,
+            light_context,
+        } => ScheduledTaskPayload::AgentTurn {
+            message: message.clone(),
+            model: model.clone(),
+            thinking: thinking.clone(),
+            timeout_seconds: *timeout_seconds,
+            light_context: *light_context,
+        },
+        crate::TaskPayload::DirectDeliver { text } => {
+            ScheduledTaskPayload::DirectDeliver { text: text.clone() }
         }
     }
 }
@@ -186,8 +176,7 @@ impl ScheduleManager {
         let mut entries = HashMap::new();
         let now_ms = Utc::now().timestamp_millis();
 
-        for mut config in configs {
-            config.migrate_legacy();
+        for config in configs {
             let mut state = persisted_states
                 .get(&config.schedule_id)
                 .cloned()
@@ -269,8 +258,7 @@ impl ScheduleManager {
             .and_then(|entry| entry.state.next_run_at_ms)
     }
 
-    pub async fn add_schedule(&self, mut config: ScheduleConfig) -> Result<()> {
-        config.migrate_legacy();
+    pub async fn add_schedule(&self, config: ScheduleConfig) -> Result<()> {
         let now_ms = Utc::now().timestamp_millis();
         let next = if config.enabled {
             compute_next_run_at_ms(&config.schedule, now_ms)?
@@ -307,7 +295,6 @@ impl ScheduleManager {
         let mut value = serde_json::to_value(&entry.config)?;
         merge_json_value(&mut value, patch);
         let mut updated: ScheduleConfig = serde_json::from_value(value)?;
-        updated.migrate_legacy();
         if updated.schedule_id != schedule_id {
             updated.schedule_id = schedule_id.to_string();
         }
@@ -609,8 +596,13 @@ mod tests {
                 schedule,
                 agent_id: "clawhive-main".to_string(),
                 session_mode: SessionMode::Isolated,
-                task: "test task".to_string(),
-                payload: None,
+                payload: Some(crate::TaskPayload::AgentTurn {
+                    message: "test task".to_string(),
+                    model: None,
+                    thinking: None,
+                    timeout_seconds: 300,
+                    light_context: false,
+                }),
                 timeout_seconds: 300,
                 delete_after_run,
                 delivery: DeliveryConfig::default(),
@@ -758,8 +750,13 @@ mod tests {
             },
             agent_id: "clawhive-main".to_string(),
             session_mode: SessionMode::Isolated,
-            task: "stuck task".to_string(),
-            payload: None,
+            payload: Some(crate::TaskPayload::AgentTurn {
+                message: "stuck task".to_string(),
+                model: None,
+                thinking: None,
+                timeout_seconds: 300,
+                light_context: false,
+            }),
             timeout_seconds: 300,
             delete_after_run: false,
             delivery: DeliveryConfig::default(),

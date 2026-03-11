@@ -4,7 +4,7 @@ use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_scheduler::{
     apply_job_result, error_backoff_ms, CompletedResult, DeliveryConfig, RunStatus, ScheduleConfig,
-    ScheduleEntry, ScheduleManager, ScheduleState, ScheduleType, SessionMode,
+    ScheduleEntry, ScheduleManager, ScheduleState, ScheduleType, SessionMode, TaskPayload,
 };
 use clawhive_schema::BusMessage;
 use tokio::time::{timeout, Duration};
@@ -21,7 +21,10 @@ schedule:
   tz: "Asia/Shanghai"
 agent_id: clawhive-main
 session_mode: isolated
-task: "Test task"
+payload:
+  kind: agent_turn
+  message: "Test task"
+  timeout_seconds: 300
 "#;
 
     let config: ScheduleConfig = serde_yaml::from_str(yaml).unwrap();
@@ -50,7 +53,10 @@ schedule:
   interval_ms: 100
 agent_id: test-agent
 session_mode: isolated
-task: "Hello from test"
+payload:
+  kind: agent_turn
+  message: "Hello from test"
+  timeout_seconds: 300
 "#;
     std::fs::write(config_dir.join("test-immediate.yaml"), yaml).unwrap();
 
@@ -85,8 +91,13 @@ fn error_backoff_and_state_transition_work() {
             },
             agent_id: "clawhive-main".to_string(),
             session_mode: SessionMode::Isolated,
-            task: "run".to_string(),
-            payload: None,
+            payload: Some(TaskPayload::AgentTurn {
+                message: "run".to_string(),
+                model: None,
+                thinking: None,
+                timeout_seconds: 300,
+                light_context: false,
+            }),
             timeout_seconds: 300,
             delete_after_run: false,
             delivery: DeliveryConfig::default(),

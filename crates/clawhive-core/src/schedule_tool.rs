@@ -56,8 +56,6 @@ struct ScheduleJobInput {
     description: Option<String>,
     schedule: ScheduleType,
     #[serde(default)]
-    task: Option<String>,
-    #[serde(default)]
     payload: Option<TaskPayload>,
     #[serde(default)]
     session_mode: Option<SessionMode>,
@@ -92,9 +90,9 @@ impl ScheduleJobInput {
         ctx: &ToolContext,
     ) -> Result<ScheduleConfig, anyhow::Error> {
         let session_mode = self.session_mode.clone().unwrap_or(SessionMode::Isolated);
-        let resolved = resolve_payload(self.task.clone(), self.payload, session_mode.clone())?;
+        let resolved = resolve_payload(self.payload)?;
 
-        let mut task = match &resolved {
+        let mut task_text = match &resolved {
             TaskPayload::AgentTurn { message, .. } => message.clone(),
             TaskPayload::SystemEvent { text } => text.clone(),
             TaskPayload::DirectDeliver { text } => text.clone(),
@@ -110,7 +108,7 @@ impl ScheduleJobInput {
                     .join("\n");
 
                 if !context.is_empty() {
-                    task = format!("{task}\n\nRecent context:\n{context}");
+                    task_text = format!("{task_text}\n\nRecent context:\n{context}");
                 }
             }
         }
@@ -123,14 +121,18 @@ impl ScheduleJobInput {
                 light_context,
                 ..
             } => TaskPayload::AgentTurn {
-                message: task.clone(),
+                message: task_text.clone(),
                 model,
                 thinking,
                 timeout_seconds,
                 light_context,
             },
-            TaskPayload::SystemEvent { .. } => TaskPayload::SystemEvent { text: task.clone() },
-            TaskPayload::DirectDeliver { .. } => TaskPayload::DirectDeliver { text: task.clone() },
+            TaskPayload::SystemEvent { .. } => TaskPayload::SystemEvent {
+                text: task_text.clone(),
+            },
+            TaskPayload::DirectDeliver { .. } => TaskPayload::DirectDeliver {
+                text: task_text.clone(),
+            },
         };
 
         let delivery = self.delivery.unwrap_or(DeliveryInput {
@@ -173,7 +175,6 @@ impl ScheduleJobInput {
                 .filter(|id| !id.trim().is_empty())
                 .unwrap_or_else(|| default_agent_id.to_string()),
             session_mode,
-            task,
             payload: Some(payload),
             timeout_seconds: self.timeout_seconds.unwrap_or(300),
             delete_after_run,
@@ -346,10 +347,6 @@ impl ToolExecutor for ScheduleTool {
                                     "interval_ms": { "type": "number", "description": "For kind='every': interval in milliseconds" }
                                 },
                                 "required": ["kind"]
-                            },
-                            "task": { 
-                                "type": "string",
-                                "description": "Legacy: task/reminder text. Prefer 'payload' for typed control."
                             },
                             "payload": {
                                 "type": "object",
@@ -598,7 +595,10 @@ mod tests {
                     "job": {
                         "name": "Milk reminder",
                         "schedule": { "kind": "at", "at": "20m" },
-                        "task": "Remind user to buy milk",
+                        "payload": {
+                            "kind": "agent_turn",
+                            "message": "Remind user to buy milk"
+                        },
                         "context_messages": 2,
                         "delete_after_run": true,
                         "session_mode": "main"
@@ -613,7 +613,11 @@ mod tests {
         let entries = manager.list().await;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].config.schedule_id, "milk-reminder");
-        assert!(entries[0].config.task.contains("Recent context"));
+        let payload_text = match entries[0].config.payload.as_ref().unwrap() {
+            clawhive_scheduler::TaskPayload::AgentTurn { message, .. } => message.clone(),
+            _ => panic!("expected AgentTurn"),
+        };
+        assert!(payload_text.contains("Recent context"));
     }
 
     #[tokio::test]
@@ -730,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_action_legacy_task_still_works_without_payload() {
+    async fn add_action_requires_payload() {
         let (manager, _bus, _tmp) = setup();
         let tool = ScheduleTool::new(manager.clone());
         let ctx = ToolContext::builtin();
@@ -740,9 +744,8 @@ mod tests {
                 serde_json::json!({
                     "action": "add",
                     "job": {
-                        "name": "Legacy task",
-                        "schedule": { "kind": "at", "at": "5m" },
-                        "task": "Old style task"
+                        "name": "No payload task",
+                        "schedule": { "kind": "at", "at": "5m" }
                     }
                 }),
                 &ctx,
@@ -750,10 +753,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error);
-        let entries = manager.list().await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].config.task, "Old style task");
+        assert!(result.is_error);
+        assert!(result.content.contains("payload"));
     }
 
     #[tokio::test]
@@ -771,8 +772,13 @@ mod tests {
                 },
                 agent_id: "clawhive-main".to_string(),
                 session_mode: clawhive_scheduler::SessionMode::Isolated,
-                task: "generate report".to_string(),
-                payload: None,
+                payload: Some(clawhive_scheduler::TaskPayload::AgentTurn {
+                    message: "generate report".to_string(),
+                    model: None,
+                    thinking: None,
+                    timeout_seconds: 300,
+                    light_context: false,
+                }),
                 timeout_seconds: 300,
                 delete_after_run: false,
                 delivery: clawhive_scheduler::DeliveryConfig::default(),
@@ -811,7 +817,6 @@ mod tests {
                 },
                 agent_id: "clawhive-main".to_string(),
                 session_mode: clawhive_scheduler::SessionMode::Isolated,
-                task: "Generate daily digest from news headlines".to_string(),
                 payload: Some(clawhive_scheduler::TaskPayload::AgentTurn {
                     message: "Generate daily digest from news headlines".to_string(),
                     model: None,
@@ -855,7 +860,6 @@ mod tests {
                 },
                 agent_id: "clawhive-main".to_string(),
                 session_mode: clawhive_scheduler::SessionMode::Isolated,
-                task: "Generate and summarize long daily payload text".to_string(),
                 payload: Some(clawhive_scheduler::TaskPayload::AgentTurn {
                     message: "Generate and summarize long daily payload text".to_string(),
                     model: None,
@@ -898,7 +902,10 @@ mod tests {
                     "job": {
                         "name": "Run-now test",
                         "schedule": { "kind": "at", "at": "5m" },
-                        "task": "Do test"
+                        "payload": {
+                            "kind": "agent_turn",
+                            "message": "Do test"
+                        }
                     }
                 }),
                 &ctx,
@@ -940,7 +947,10 @@ mod tests {
                     "job": {
                         "name": "Delete me",
                         "schedule": { "kind": "at", "at": "1h" },
-                        "task": "cleanup"
+                        "payload": {
+                            "kind": "agent_turn",
+                            "message": "cleanup"
+                        }
                     }
                 }),
                 &ctx,
@@ -978,7 +988,10 @@ mod tests {
                     "job": {
                         "name": "One-shot reminder",
                         "schedule": { "kind": "at", "at": "5m" },
-                        "task": "Do something"
+                        "payload": {
+                            "kind": "agent_turn",
+                            "message": "Do something"
+                        }
                     }
                 }),
                 &ctx,
@@ -1034,7 +1047,10 @@ mod tests {
                     "job": {
                         "name": "User scope test",
                         "schedule": { "kind": "at", "at": "5m" },
-                        "task": "test task"
+                        "payload": {
+                            "kind": "agent_turn",
+                            "message": "test task"
+                        }
                     }
                 }),
                 &ctx,
