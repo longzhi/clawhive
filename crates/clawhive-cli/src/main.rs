@@ -150,6 +150,20 @@ enum Commands {
     },
 }
 
+/// Read log_level from main.yaml before full config loading.
+/// Returns "info" on any failure (file missing, parse error, field absent).
+fn read_log_level(config_root: &std::path::Path) -> String {
+    let path = config_root.join("config/main.yaml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return "info".to_string(),
+    };
+    serde_yaml::from_str::<serde_yaml::Value>(&content)
+        .ok()
+        .and_then(|v| v.get("log_level")?.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "info".to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -170,8 +184,9 @@ async fn main() -> Result<()> {
     let file_appender = tracing_appender::rolling::daily(&log_dir, "clawhive.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
+    let config_log_level = read_log_level(&cli.config_root);
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config_log_level));
 
     // Suppress stderr logs when running TUI modes or Logs to avoid corrupting the terminal.
     let is_tui_mode = matches!(

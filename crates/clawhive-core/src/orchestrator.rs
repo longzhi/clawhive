@@ -1089,6 +1089,16 @@ impl Orchestrator {
             attachments: vec![],
         };
 
+        if !outbound.text.is_empty() {
+            let preview_end = outbound.text.floor_char_boundary(200);
+            tracing::info!(
+                agent_id = %agent_id,
+                reply_len = outbound.text.len(),
+                reply_preview = &outbound.text[..preview_end],
+                "agent reply"
+            );
+        }
+
         // Record session messages (JSONL)
         if let Err(e) = self
             .session_writer_for(agent_id)
@@ -1486,6 +1496,14 @@ impl Orchestrator {
                 "tool_use_loop: LLM response"
             );
 
+            let text_preview_end = resp.text.floor_char_boundary(300);
+            tracing::debug!(
+                agent_id = %agent_id,
+                iteration = iteration_no,
+                text_preview = &resp.text[..text_preview_end],
+                "tool_use_loop: LLM response text"
+            );
+
             let tool_uses: Vec<_> = resp
                 .content
                 .iter()
@@ -1615,7 +1633,15 @@ impl Orchestrator {
                     let agent_id = agent_id.to_string();
                     let tool_name = name.clone();
                     async move {
-                        let input_bytes = input.to_string().len();
+                        let input_str = input.to_string();
+                        let input_preview_end = input_str.floor_char_boundary(300);
+                        tracing::debug!(
+                            agent_id = %agent_id,
+                            tool_name = %tool_name,
+                            input_preview = &input_str[..input_preview_end],
+                            "tool_use_loop: tool input"
+                        );
+                        let input_bytes = input_str.len();
                         let tool_started = std::time::Instant::now();
                         match self
                             .execute_tool_for_agent(&agent_id, &name, input, &ctx)
@@ -1623,23 +1649,21 @@ impl Orchestrator {
                         {
                             Ok(output) => {
                                 let duration_ms = tool_started.elapsed().as_millis() as u64;
+                                let output_preview_end = output.content.floor_char_boundary(200);
+                                tracing::info!(
+                                    agent_id = %agent_id,
+                                    tool_name = %tool_name,
+                                    duration_ms,
+                                    is_error = output.is_error,
+                                    output_preview = &output.content[..output_preview_end],
+                                    "tool executed"
+                                );
                                 if is_slow_latency_ms(duration_ms, SLOW_TOOL_EXEC_WARN_MS) {
                                     tracing::warn!(
                                         agent_id = %agent_id,
                                         tool_name = %tool_name,
                                         duration_ms,
-                                        input_bytes,
-                                        is_error = output.is_error,
-                                        "tool_use_loop: slow tool execution"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        agent_id = %agent_id,
-                                        tool_name = %tool_name,
-                                        duration_ms,
-                                        input_bytes,
-                                        is_error = output.is_error,
-                                        "tool_use_loop: tool execution completed"
+                                        "tool execution slow"
                                     );
                                 }
                                 ContentBlock::ToolResult {
@@ -1813,6 +1837,16 @@ impl Orchestrator {
             reply_to: None,
             attachments: vec![],
         };
+
+        if !outbound.text.is_empty() {
+            let preview_end = outbound.text.floor_char_boundary(200);
+            tracing::info!(
+                agent_id = %agent_id,
+                reply_len = outbound.text.len(),
+                reply_preview = &outbound.text[..preview_end],
+                "agent reply"
+            );
+        }
 
         let _ = self
             .bus

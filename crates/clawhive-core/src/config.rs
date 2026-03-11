@@ -185,6 +185,10 @@ pub struct ToolsConfig {
     pub actionbook: Option<ActionbookConfig>,
 }
 
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MainConfig {
     pub app: AppConfig,
@@ -195,6 +199,8 @@ pub struct MainConfig {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_password_hash: Option<String>,
 }
@@ -221,6 +227,7 @@ impl Default for MainConfig {
             },
             embedding: EmbeddingConfig::default(),
             tools: ToolsConfig::default(),
+            log_level: default_log_level(),
             web_password_hash: None,
         }
     }
@@ -697,6 +704,7 @@ fn resolve_main_env(main: &mut MainConfig) {
     main.embedding.base_url = resolve_env_var(&main.embedding.base_url);
     main.embedding.model = resolve_env_var(&main.embedding.model);
     main.embedding.provider = resolve_env_var(&main.embedding.provider);
+    main.log_level = resolve_env_var(&main.log_level);
 }
 
 fn resolve_routing_env(routing: &mut RoutingConfig) {
@@ -820,6 +828,24 @@ mod tests {
     }
 
     #[test]
+    fn main_config_without_log_level_defaults_to_info() {
+        let yaml = r#"
+app:
+  name: test
+runtime:
+  max_concurrent: 2
+features:
+  multi_agent: false
+  sub_agent: false
+  tui: false
+  cli: false
+channels: {}
+"#;
+        let config: MainConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
     fn validate_config_detects_unknown_agent_id_in_routing() {
         let (_tmp, root) = make_temp_config();
         let mut config = load_config(&root).unwrap();
@@ -899,6 +925,7 @@ mod tests {
                 },
                 embedding: EmbeddingConfig::default(),
                 tools: ToolsConfig::default(),
+                log_level: default_log_level(),
                 web_password_hash: None,
             },
             routing: RoutingConfig {
