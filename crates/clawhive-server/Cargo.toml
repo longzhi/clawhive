@@ -20,6 +20,7 @@ axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 bcrypt = "0.17"
+reqwest.workspace = true
 clawhive-schema = { path = "../clawhive-schema" }
 clawhive-bus = { path = "../clawhive-bus" }
 clawhive-core = { path = "../clawhive-core" }
@@ -33,3 +34,4 @@ mime_guess.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true

@@ -10,7 +10,10 @@ async fn get_routing(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let path = state.root.join("config/routing.yaml");
-    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return Ok(Json(serde_json::json!({ "bindings": [] }))),
+    };
     let val: serde_yaml::Value = serde_yaml::from_str(&content)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let json =

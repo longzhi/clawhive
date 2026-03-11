@@ -379,6 +379,9 @@ async fn start_bot(
         gateway: Some(gateway.clone()),
         web_password_hash: Arc::new(RwLock::new(web_password_hash)),
         session_store: Arc::new(RwLock::new(HashMap::<String, Instant>::new())),
+        pending_openai_oauth: Arc::new(RwLock::new(HashMap::new())),
+        openai_oauth_config: clawhive_server::state::default_openai_oauth_config(),
+        enable_openai_oauth_callback_listener: true,
         daemon_mode: false,
         port,
     };

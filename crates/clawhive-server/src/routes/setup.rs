@@ -1,11 +1,14 @@
 use axum::{
     extract::State,
+    http::{header, HeaderMap, HeaderValue},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use crate::{create_setup_session, SETUP_COOKIE_NAME, SETUP_TTL};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -25,7 +28,15 @@ pub struct SetupStatus {
     pub has_channels: bool,
 }
 
-async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
+fn make_setup_cookie(token: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "{SETUP_COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Lax; Max-Age={}",
+        SETUP_TTL.as_secs()
+    ))
+    .unwrap_or_else(|_| HeaderValue::from_static(""))
+}
+
+async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
     let providers_dir = state.root.join("config/providers.d");
     let has_providers = std::fs::read_dir(&providers_dir)
         .map(|entries| {
@@ -77,12 +88,21 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
 
     let needs_setup = !has_providers || !has_active_agents;
 
-    Json(SetupStatus {
-        needs_setup,
-        has_providers,
-        has_active_agents,
-        has_channels,
-    })
+    let mut headers = HeaderMap::new();
+    if needs_setup {
+        let token = create_setup_session(&state);
+        headers.insert(header::SET_COOKIE, make_setup_cookie(&token));
+    }
+
+    (
+        headers,
+        Json(SetupStatus {
+            needs_setup,
+            has_providers,
+            has_active_agents,
+            has_channels,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------

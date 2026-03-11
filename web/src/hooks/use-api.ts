@@ -26,6 +26,7 @@ export interface ProviderSummary {
   enabled: boolean;
   api_base: string;
   key_configured: boolean;
+  auth_profile?: string | null;
   models: string[];
 }
 
@@ -39,6 +40,30 @@ export interface AuthProfileItem {
 export interface AuthStatus {
   active_profile: string | null;
   profiles: AuthProfileItem[];
+}
+
+export interface OpenAiOAuthStartResponse {
+  flow_id: string;
+  authorize_url: string;
+  profile_name: string;
+  replaces_existing: boolean;
+}
+
+export interface OpenAiOAuthCompleteRequest {
+  flow_id: string;
+  callback_input?: string;
+}
+
+export interface OpenAiOAuthCompleteResponse {
+  profile_name: string;
+  chatgpt_account_id?: string | null;
+}
+
+export interface OpenAiOAuthFlowStatus {
+  flow_id: string;
+  callback_listener_active: boolean;
+  callback_captured: boolean;
+  message?: string | null;
 }
 
 export interface SessionSummary {
@@ -138,6 +163,7 @@ export interface CreateProviderRequest {
   provider_id: string;
   api_base: string;
   api_key?: string;
+  auth_profile?: string;
   models: string[];
 }
 
@@ -243,6 +269,44 @@ export function useAuthStatus() {
   return useQuery({ queryKey: ["auth-status"], queryFn: () => apiFetch<AuthStatus>("/api/auth/status") });
 }
 
+export function useStartOpenAiOAuth() {
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<OpenAiOAuthStartResponse>("/api/auth/openai/start", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+  });
+}
+
+export function useCompleteOpenAiOAuth() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: OpenAiOAuthCompleteRequest) =>
+      apiFetch<OpenAiOAuthCompleteResponse>("/api/auth/openai/complete", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["auth-status"] });
+    },
+  });
+}
+
+export function useOpenAiOAuthFlowStatus(flowId: string | null) {
+  return useQuery({
+    queryKey: ["openai-oauth-flow", flowId],
+    queryFn: () => apiFetch<OpenAiOAuthFlowStatus>(`/api/auth/openai/flow/${flowId}`),
+    enabled: Boolean(flowId),
+    refetchInterval: (query) => {
+      const data = query.state.data as OpenAiOAuthFlowStatus | undefined;
+      if (!flowId) return false;
+      if (data?.callback_captured) return false;
+      return 1000;
+    },
+  });
+}
+
 export function useTestProvider() {
   return useMutation({
     mutationFn: (id: string) => apiFetch<{ok: boolean; message: string}>(`/api/providers/${id}/test`, { method: "POST" }),
@@ -273,8 +337,13 @@ export function useChannelStatus() {
   });
 }
 
-export function useRouting() {
-  return useQuery({ queryKey: ["routing"], queryFn: () => apiFetch<Record<string, unknown>>("/api/routing") });
+export function useRouting(enabled = true) {
+  return useQuery({
+    queryKey: ["routing"],
+    queryFn: () => apiFetch<Record<string, unknown>>("/api/routing"),
+    enabled,
+    retry: false,
+  });
 }
 
 export function useUpdateChannels() {

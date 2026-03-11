@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { OpenAiOAuthSetup } from "@/components/providers/openai-oauth-setup";
 import {
   useSetupStatus,
   useCreateProvider,
@@ -19,9 +20,18 @@ import {
   useUpdateRouting,
   useSetPassword,
   useListModels,
+  useAuthStatus,
 } from "@/hooks/use-api";
 import type { ProviderPreset, ModelInfoResponse, ModelPresetInfo } from "@/hooks/use-api";
-import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink, RefreshCw } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronRight,
+  ChevronLeft,
+  ExternalLink,
+  Loader2,
+  RefreshCw,
+  Zap,
+} from "lucide-react";
 
 import { toast } from "sonner";
 
@@ -170,9 +180,16 @@ export default function SetupPage() {
   const updateActionbook = useUpdateActionbook();
   const restart = useRestart();
   const { data: providerPresets } = useProviderPresets();
-  const { data: routingData } = useRouting();
+  const { data: authStatus } = useAuthStatus();
+  const { data: routingData } = useRouting(step === 2);
   const updateRouting = useUpdateRouting();
   const listModels = useListModels();
+  const openAiOAuthProfileName =
+    authStatus?.profiles.find((profile) => profile.kind === "OpenAiOAuth" && profile.active)?.name ??
+    authStatus?.profiles.find((profile) => profile.kind === "OpenAiOAuth")?.name ??
+    "openai-oauth";
+  const hasOpenAiOAuth =
+    authStatus?.profiles.some((profile) => profile.kind === "OpenAiOAuth") ?? false;
 
   // Mark wizard as active once we start interacting
   useEffect(() => {
@@ -216,6 +233,10 @@ export default function SetupPage() {
         provider_id: selectedProvider.id,
         api_base: apiBase || selectedProvider.api_base,
         api_key: selectedProvider.needs_key ? apiKey : undefined,
+        auth_profile:
+          selectedProvider.id === "openai-chatgpt"
+            ? openAiOAuthProfileName
+            : undefined,
         models: [selectedProvider.default_model],
       });
       setProviderCreated(true);
@@ -426,6 +447,7 @@ export default function SetupPage() {
               onSubmit={handleCreateProvider}
               isCreating={createProvider.isPending}
               isCreated={providerCreated}
+              hasOpenAiOAuth={hasOpenAiOAuth}
               error={createProvider.error?.message}
             />
           )}
@@ -448,7 +470,9 @@ export default function SetupPage() {
               error={createAgent.error?.message}
               onFetchModels={handleFetchModels}
               isFetchingModels={listModels.isPending}
-              canFetchModels={providerCreated}
+              canFetchModels={
+                providerCreated && selectedProvider?.id !== "openai-chatgpt"
+              }
             />
           )}
           {step === 2 && (
@@ -640,6 +664,7 @@ function StepProvider({
   onSubmit,
   isCreating,
   isCreated,
+  hasOpenAiOAuth,
   error,
 }: {
   providers: ProviderPreset[];
@@ -652,6 +677,7 @@ function StepProvider({
   onSubmit: () => void;
   isCreating: boolean;
   isCreated: boolean;
+  hasOpenAiOAuth: boolean;
   error?: string;
 }) {
   return (
@@ -680,9 +706,12 @@ function StepProvider({
         ))}
       </div>
 
-      {selected && (
-        <Card className="border-primary/20 bg-primary/[0.02]">
+        {selected && (
+          <Card className="border-primary/20 bg-primary/[0.02]">
           <CardContent className="space-y-4">
+            {selected.id === "openai-chatgpt" && (
+              <OpenAiOAuthSetup />
+            )}
             {selected.needs_key && (
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -730,7 +759,13 @@ function StepProvider({
                 <Button
                   size="sm"
                   onClick={onSubmit}
-                  disabled={isCreating || (selected.needs_key && !apiKey) || (selected.needs_base_url && (!apiBase || apiBase.includes('<your-resource>')))}
+                  disabled={
+                    isCreating ||
+                    (selected.needs_key && !apiKey) ||
+                    (selected.needs_base_url &&
+                      (!apiBase || apiBase.includes("<your-resource>"))) ||
+                    (selected.id === "openai-chatgpt" && !hasOpenAiOAuth)
+                  }
                 >
                   {isCreating ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />

@@ -10,4 +10,7 @@ pub use openai::{
     open_authorize_url, run_openai_pkce_flow, OpenAiOAuthConfig, OpenAiTokenResponse, PkcePair,
     OPENAI_OAUTH_CLIENT_ID, OPENAI_OAUTH_SCOPE,
 };
-pub use server::{wait_for_oauth_callback, OAuthCallback, OAUTH_CALLBACK_ADDR};
+pub use server::{
+    start_oauth_callback_listener, wait_for_oauth_callback, OAuthCallback, OAuthCallbackListener,
+    OAUTH_CALLBACK_ADDR,
+};

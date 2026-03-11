@@ -75,6 +75,15 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         ],
     },
     ProviderPreset {
+        id: "openai-chatgpt",
+        name: "OpenAI OAuth",
+        api_base: "https://chatgpt.com/backend-api/codex",
+        needs_key: false,
+        needs_base_url: false,
+        default_model: "gpt-5.3-codex",
+        models: &[m("gpt-5.3-codex", 200_000, 16384, false, false)],
+    },
+    ProviderPreset {
         id: "azure-openai",
         name: "Azure OpenAI",
         api_base: "https://<your-resource>.openai.azure.com/openai/v1",
@@ -337,5 +346,11 @@ mod tests {
     fn model_info_returns_none_for_unknown_model() {
         assert!(model_info("openai", "not-a-model").is_none());
         assert!(model_info("not-a-provider", "gpt-5.2").is_none());
+    }
+
+    #[test]
+    fn provider_models_for_openai_chatgpt_returns_codex_model() {
+        let models = provider_models_for_id("openai-chatgpt");
+        assert_eq!(models, vec!["openai-chatgpt/gpt-5.3-codex"]);
     }
 }

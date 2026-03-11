@@ -33,10 +33,46 @@ struct CallbackState {
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
-pub async fn wait_for_oauth_callback(
+pub struct OAuthCallbackListener {
+    callback_rx: oneshot::Receiver<OAuthCallback>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    server_task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl OAuthCallbackListener {
+    pub fn shutdown_sender(&self) -> tokio::sync::broadcast::Sender<()> {
+        self.shutdown_tx.clone()
+    }
+
+    pub async fn wait(self, timeout: Duration) -> Result<OAuthCallback> {
+        let Self {
+            callback_rx,
+            shutdown_tx,
+            server_task,
+        } = self;
+
+        let callback = tokio::select! {
+            result = callback_rx => {
+                match result {
+                    Ok(cb) => Ok(cb),
+                    Err(_) => Err(anyhow!("callback channel closed before receiving OAuth code")),
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                Err(anyhow!("timed out waiting for OAuth callback"))
+            }
+        };
+
+        let _ = shutdown_tx.send(());
+        let _ = server_task.await;
+
+        callback
+    }
+}
+
+pub async fn start_oauth_callback_listener(
     expected_state: impl Into<String>,
-    timeout: Duration,
-) -> Result<OAuthCallback> {
+) -> Result<OAuthCallbackListener> {
     let expected_state = expected_state.into();
     let (callback_tx, callback_rx) = oneshot::channel::<OAuthCallback>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
@@ -64,22 +100,21 @@ pub async fn wait_for_oauth_callback(
             .await
     });
 
-    let callback = tokio::select! {
-        result = callback_rx => {
-            match result {
-                Ok(cb) => Ok(cb),
-                Err(_) => Err(anyhow!("callback channel closed before receiving OAuth code")),
-            }
-        }
-        _ = tokio::time::sleep(timeout) => {
-            Err(anyhow!("timed out waiting for OAuth callback"))
-        }
-    };
+    Ok(OAuthCallbackListener {
+        callback_rx,
+        shutdown_tx,
+        server_task,
+    })
+}
 
-    let _ = shutdown_tx.send(());
-    let _ = server_task.await;
-
-    callback
+pub async fn wait_for_oauth_callback(
+    expected_state: impl Into<String>,
+    timeout: Duration,
+) -> Result<OAuthCallback> {
+    start_oauth_callback_listener(expected_state)
+        .await?
+        .wait(timeout)
+        .await
 }
 
 pub fn parse_oauth_callback_input(input: &str, expected_state: &str) -> Result<OAuthCallback> {
@@ -149,7 +184,29 @@ async fn handle_callback(
             let _ = state.shutdown_tx.send(());
             (
                 StatusCode::OK,
-                Html("<h1>Authentication successful</h1><p>You can close this window.</p>"),
+                Html(
+                    r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Authentication successful</title>
+  </head>
+  <body>
+    <h1>Authentication successful</h1>
+    <p>This window should close automatically.</p>
+    <script>
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({ type: "clawhive-openai-oauth-callback" }, "*");
+        }
+      } catch (_) {}
+      setTimeout(() => {
+        window.close();
+      }, 1500);
+    </script>
+  </body>
+</html>"#,
+                ),
             )
                 .into_response()
         }

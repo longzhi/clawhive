@@ -887,6 +887,7 @@ dependencies = [
  "clawhive-schema",
  "futures-core",
  "mime_guess",
+ "reqwest 0.12.28",
  "rust-embed",
  "serde",
  "serde_json",
@@ -898,6 +899,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

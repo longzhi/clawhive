@@ -621,6 +621,9 @@ mod tests {
             gateway: None,
             web_password_hash: Arc::new(RwLock::new(None)),
             session_store: Arc::new(RwLock::new(HashMap::new())),
+            pending_openai_oauth: Arc::new(RwLock::new(HashMap::new())),
+            openai_oauth_config: crate::state::default_openai_oauth_config(),
+            enable_openai_oauth_callback_listener: true,
             daemon_mode: false,
             port: 3000,
         };
