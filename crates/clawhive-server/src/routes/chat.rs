@@ -417,11 +417,10 @@ async fn relay_bus_events(
                     continue;
                 }
                 remove_active_trace_id(&active_trace_ids, trace_id).await;
-                let send_result = out_tx
-                    .send(ServerMessage::ReplyReady {
-                        trace_id: trace_id.to_string(),
-                        text: outbound.text,
-                    });
+                let send_result = out_tx.send(ServerMessage::ReplyReady {
+                    trace_id: trace_id.to_string(),
+                    text: outbound.text,
+                });
                 tracing::info!(
                     trace_id = %trace_id,
                     send_ok = send_result.is_ok(),

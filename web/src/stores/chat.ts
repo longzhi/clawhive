@@ -108,6 +108,16 @@ export const useChatStore = create<ChatState>((set) => ({
               { tool_name: toolName, arguments: args, is_running: true },
             ],
           };
+        } else {
+          // Tool call arrived before any streaming — create assistant message
+          messages.push({
+            id: traceId,
+            role: "assistant",
+            text: "",
+            timestamp: new Date().toISOString(),
+            tool_calls: [{ tool_name: toolName, arguments: args, is_running: true }],
+            is_streaming: true,
+          });
         }
         return { ...c, messages };
       }),
@@ -145,6 +155,16 @@ export const useChatStore = create<ChatState>((set) => ({
             text,
             is_streaming: false,
           };
+        } else {
+          // No streaming happened — create new assistant message
+          messages.push({
+            id: traceId,
+            role: "assistant",
+            text,
+            timestamp: new Date().toISOString(),
+            tool_calls: [],
+            is_streaming: false,
+          });
         }
         return { ...c, messages };
       }),
