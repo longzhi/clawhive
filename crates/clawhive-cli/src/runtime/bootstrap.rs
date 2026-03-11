@@ -4,27 +4,27 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use clawhive_auth::{
-    AuthProfile, TokenManager,
     manager::OpenAiRefreshConfig,
-    oauth::{OPENAI_OAUTH_CLIENT_ID, OpenAiOAuthConfig},
+    oauth::{OpenAiOAuthConfig, OPENAI_OAUTH_CLIENT_ID},
+    AuthProfile, TokenManager,
 };
 use clawhive_bus::EventBus;
 use clawhive_core::*;
 use clawhive_gateway::{Gateway, RateLimitConfig, RateLimiter};
-use clawhive_memory::MemoryStore;
 use clawhive_memory::embedding::{
     EmbeddingProvider, GeminiEmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider,
     StubEmbeddingProvider,
 };
 use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::MemoryStore;
 use clawhive_provider::{
+    minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
     AnthropicProvider, AzureOpenAiProvider, LlmProvider, LlmRequest, LlmResponse,
-    OpenAiChatGptProvider, OpenAiProvider, ProviderRegistry, StreamChunk, minimax, moonshot,
-    qianfan, qwen, register_builtin_providers, volcengine, zhipu,
+    OpenAiChatGptProvider, OpenAiProvider, ProviderRegistry, StreamChunk,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, ScheduleType, SqliteStore, WaitTaskManager};
@@ -887,64 +887,6 @@ pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRout
     LlmRouter::new(registry, aliases, global_fallbacks)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::collect_openai_oauth_refresh_targets;
-    use clawhive_core::{ClawhiveConfig, MainConfig, ProviderConfig, RoutingConfig};
-
-    #[test]
-    fn collect_openai_oauth_refresh_targets_uses_named_or_active_profiles() {
-        let config = ClawhiveConfig {
-            main: MainConfig::default(),
-            routing: RoutingConfig {
-                default_agent_id: String::new(),
-                bindings: Vec::new(),
-            },
-            providers: vec![
-                ProviderConfig {
-                    provider_id: "openai".to_string(),
-                    enabled: true,
-                    api_base: "https://api.openai.com/v1".to_string(),
-                    api_key: None,
-                    auth_profile: Some("named-openai".to_string()),
-                    models: Vec::new(),
-                },
-                ProviderConfig {
-                    provider_id: "openai-chatgpt".to_string(),
-                    enabled: true,
-                    api_base: "https://chatgpt.com/backend-api/codex".to_string(),
-                    api_key: None,
-                    auth_profile: None,
-                    models: Vec::new(),
-                },
-                ProviderConfig {
-                    provider_id: "anthropic".to_string(),
-                    enabled: true,
-                    api_base: "https://api.anthropic.com".to_string(),
-                    api_key: None,
-                    auth_profile: Some("anthropic-session".to_string()),
-                    models: Vec::new(),
-                },
-                ProviderConfig {
-                    provider_id: "openai".to_string(),
-                    enabled: false,
-                    api_base: "https://api.openai.com/v1".to_string(),
-                    api_key: None,
-                    auth_profile: Some("disabled-openai".to_string()),
-                    models: Vec::new(),
-                },
-            ],
-            agents: Vec::new(),
-        };
-
-        let targets = collect_openai_oauth_refresh_targets(&config, Some("active-openai"));
-
-        assert_eq!(targets.len(), 2);
-        assert!(targets.contains("named-openai"));
-        assert!(targets.contains("active-openai"));
-    }
-}
-
 pub(crate) async fn build_embedding_provider(
     config: &ClawhiveConfig,
 ) -> Arc<dyn EmbeddingProvider> {
@@ -1085,4 +1027,62 @@ pub(crate) async fn build_embedding_provider(
     // BM25 keyword search will handle memory_search as fallback
     tracing::warn!("No embedding provider available, memory_search will use keyword matching only");
     Arc::new(StubEmbeddingProvider::new(8))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_openai_oauth_refresh_targets;
+    use clawhive_core::{ClawhiveConfig, MainConfig, ProviderConfig, RoutingConfig};
+
+    #[test]
+    fn collect_openai_oauth_refresh_targets_uses_named_or_active_profiles() {
+        let config = ClawhiveConfig {
+            main: MainConfig::default(),
+            routing: RoutingConfig {
+                default_agent_id: String::new(),
+                bindings: Vec::new(),
+            },
+            providers: vec![
+                ProviderConfig {
+                    provider_id: "openai".to_string(),
+                    enabled: true,
+                    api_base: "https://api.openai.com/v1".to_string(),
+                    api_key: None,
+                    auth_profile: Some("named-openai".to_string()),
+                    models: Vec::new(),
+                },
+                ProviderConfig {
+                    provider_id: "openai-chatgpt".to_string(),
+                    enabled: true,
+                    api_base: "https://chatgpt.com/backend-api/codex".to_string(),
+                    api_key: None,
+                    auth_profile: None,
+                    models: Vec::new(),
+                },
+                ProviderConfig {
+                    provider_id: "anthropic".to_string(),
+                    enabled: true,
+                    api_base: "https://api.anthropic.com".to_string(),
+                    api_key: None,
+                    auth_profile: Some("anthropic-session".to_string()),
+                    models: Vec::new(),
+                },
+                ProviderConfig {
+                    provider_id: "openai".to_string(),
+                    enabled: false,
+                    api_base: "https://api.openai.com/v1".to_string(),
+                    api_key: None,
+                    auth_profile: Some("disabled-openai".to_string()),
+                    models: Vec::new(),
+                },
+            ],
+            agents: Vec::new(),
+        };
+
+        let targets = collect_openai_oauth_refresh_targets(&config, Some("active-openai"));
+
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains("named-openai"));
+        assert!(targets.contains("active-openai"));
+    }
 }

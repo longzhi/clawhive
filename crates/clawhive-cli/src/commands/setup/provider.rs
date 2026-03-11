@@ -3,19 +3,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clawhive_auth::oauth::{
-    OpenAiOAuthConfig, extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow,
-    validate_setup_token,
+    extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow,
+    validate_setup_token, OpenAiOAuthConfig,
 };
 use clawhive_auth::{AuthProfile, TokenManager};
 use console::Term;
-use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 use super::config_io::{
     display_rel, input_or_back, input_or_back_with_default, mask_secret, unix_timestamp,
 };
 use super::scan::ConfigState;
-use super::ui::ARROW;
 use super::ui::print_done;
+use super::ui::ARROW;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProviderId {

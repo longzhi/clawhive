@@ -124,21 +124,21 @@ impl TokenManager {
         let mut store = self.load_store()?;
         let (refresh_token, should_refresh, chatgpt_account_id) =
             match store.profiles.get(profile_name) {
-            Some(AuthProfile::OpenAiOAuth {
-                refresh_token,
-                expires_at,
-                chatgpt_account_id,
-                ..
-            }) => {
-                let deadline = now_unix_ts()? + Duration::from_secs(300).as_secs() as i64;
-                (
-                    refresh_token.clone(),
-                    *expires_at <= deadline,
-                    chatgpt_account_id.clone(),
-                )
-            }
-            _ => return Ok(None),
-        };
+                Some(AuthProfile::OpenAiOAuth {
+                    refresh_token,
+                    expires_at,
+                    chatgpt_account_id,
+                    ..
+                }) => {
+                    let deadline = now_unix_ts()? + Duration::from_secs(300).as_secs() as i64;
+                    (
+                        refresh_token.clone(),
+                        *expires_at <= deadline,
+                        chatgpt_account_id.clone(),
+                    )
+                }
+                _ => return Ok(None),
+            };
 
         if !should_refresh {
             return Ok(None);

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::StatusCode;
@@ -981,14 +981,12 @@ mod tests {
         let chunks: Vec<Result<StreamChunk>> = parse_sse_stream(stream).collect().await;
 
         assert_eq!(chunks.len(), 1);
-        assert!(
-            chunks[0]
-                .as_ref()
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("bad")
-        );
+        assert!(chunks[0]
+            .as_ref()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("bad"));
     }
 
     #[tokio::test]
@@ -1001,14 +999,12 @@ mod tests {
         let chunks: Vec<Result<StreamChunk>> = parse_sse_stream(stream).collect().await;
 
         assert_eq!(chunks.len(), 1);
-        assert!(
-            chunks[0]
-                .as_ref()
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("failed")
-        );
+        assert!(chunks[0]
+            .as_ref()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("failed"));
     }
 
     #[test]

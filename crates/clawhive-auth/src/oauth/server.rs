@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
-use axum::{Router, http::StatusCode};
+use axum::{http::StatusCode, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
 pub const OAUTH_CALLBACK_ADDR: &str = "127.0.0.1:1455";
 
@@ -193,7 +193,7 @@ fn validate_callback(
 
 #[cfg(test)]
 mod tests {
-    use super::{CallbackQuery, parse_oauth_callback_input, validate_callback};
+    use super::{parse_oauth_callback_input, validate_callback, CallbackQuery};
     use axum::http::StatusCode;
 
     #[test]

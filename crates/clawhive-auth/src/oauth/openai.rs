@@ -301,8 +301,8 @@ pub fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiOAuthConfig, build_authorize_url, exchange_code_for_tokens,
-        exchange_id_token_for_api_key, extract_chatgpt_account_id, generate_pkce_pair,
+        build_authorize_url, exchange_code_for_tokens, exchange_id_token_for_api_key,
+        extract_chatgpt_account_id, generate_pkce_pair, OpenAiOAuthConfig,
     };
     use base64::Engine;
     use wiremock::matchers::{body_string_contains, method, path};
