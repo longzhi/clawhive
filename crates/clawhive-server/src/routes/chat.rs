@@ -201,7 +201,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                 let Some(server_msg) = outbound else {
                     break;
                 };
-                tracing::info!(msg_type = ?std::mem::discriminant(&server_msg), "chat ws: sending server message to client");
+                tracing::debug!(msg_type = ?std::mem::discriminant(&server_msg), "chat ws: sending server message to client");
                 let Ok(payload) = serde_json::to_string(&server_msg) else {
                     continue;
                 };
@@ -248,7 +248,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     guard.insert(trace_id);
                                 }
                                 last_active_trace_id = Some(trace_id);
-                                tracing::info!(trace_id = %trace_id, agent_id = %agent_id, "chat ws: dispatching inbound to gateway");
+                                tracing::debug!(trace_id = %trace_id, agent_id = %agent_id, "chat ws: dispatching inbound to gateway");
 
                                 let gateway = Arc::clone(&gateway);
                                 tokio::spawn(async move {
@@ -316,13 +316,13 @@ async fn relay_bus_events(
     active_trace_ids: Arc<RwLock<HashSet<Uuid>>>,
     out_tx: mpsc::UnboundedSender<ServerMessage>,
 ) {
-    tracing::info!("chat relay: starting bus event subscriptions");
+    tracing::debug!("chat relay: starting bus event subscriptions");
     let mut rx_stream = bus.subscribe(Topic::StreamDelta).await;
     let mut rx_tool_start = bus.subscribe(Topic::ToolCallStarted).await;
     let mut rx_tool_done = bus.subscribe(Topic::ToolCallCompleted).await;
     let mut rx_reply = bus.subscribe(Topic::ReplyReady).await;
     let mut rx_failed = bus.subscribe(Topic::TaskFailed).await;
-    tracing::info!("chat relay: subscribed to all topics, starting poll loop");
+    tracing::debug!("chat relay: subscribed to all topics, starting poll loop");
 
     let mut interval = tokio::time::interval(Duration::from_millis(100));
 
@@ -407,7 +407,7 @@ async fn relay_bus_events(
             if let BusMessage::ReplyReady { outbound } = msg {
                 let trace_id = outbound.trace_id;
                 let is_active = is_active_trace_id(&active_trace_ids, trace_id).await;
-                tracing::info!(
+                tracing::debug!(
                     trace_id = %trace_id,
                     is_active = is_active,
                     reply_len = outbound.text.len(),
@@ -421,7 +421,7 @@ async fn relay_bus_events(
                     trace_id: trace_id.to_string(),
                     text: outbound.text,
                 });
-                tracing::info!(
+                tracing::debug!(
                     trace_id = %trace_id,
                     send_ok = send_result.is_ok(),
                     "chat relay: forwarded ReplyReady to WebSocket channel"
