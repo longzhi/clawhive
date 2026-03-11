@@ -51,7 +51,7 @@ export function MessageStream() {
   }
 
   return (
-    <ScrollArea className="flex-1" data-testid="chat-messages" ref={scrollRef} onScrollCapture={handleScroll}>
+    <ScrollArea className="flex-1 min-h-0" data-testid="chat-messages" ref={scrollRef} onScrollCapture={handleScroll}>
       <div className="flex flex-col gap-4 p-4">
         {messages.map((msg, idx) => (
           <MessageBubble key={msg.id || idx} message={msg} />
