@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useChatAgents } from "@/hooks/use-api";
+import { useChatAgents, useChatMessages } from "@/hooks/use-api";
 import { useChatWebSocket } from "@/hooks/use-chat-ws";
-import { useChatStore } from "@/stores/chat";
+import { useChatStore, type ChatMessageItem } from "@/stores/chat";
 import { cn } from "@/lib/utils";
 import { PanelLeftClose, PanelLeftOpen, Bot, WifiOff } from "lucide-react";
 import { ConversationSidebar } from "@/components/chat/conversation-sidebar";
@@ -18,10 +18,33 @@ export default function Chat() {
     setSelectedAgent,
     isConnected,
     addMessage,
+    hydrateMessages,
   } = useChatStore();
 
   const { sendMessage, cancelRequest } = useChatWebSocket();
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const { data: serverMessages } = useChatMessages(activeConversationId);
+
+  // Hydrate messages from server when conversation is activated
+  useEffect(() => {
+    if (!activeConversationId || !serverMessages || serverMessages.length === 0) return;
+    const mapped: ChatMessageItem[] = serverMessages.map((msg, idx) => ({
+      id: `history-${idx}`,
+      role: msg.role as "user" | "assistant",
+      text: msg.text,
+      timestamp: msg.timestamp || new Date().toISOString(),
+      tool_calls: (msg.tool_calls ?? []).map((tc) => ({
+        tool_name: tc.tool_name,
+        arguments: tc.arguments,
+        output: tc.output,
+        duration_ms: tc.duration_ms,
+        is_running: tc.is_running,
+      })),
+      is_streaming: false,
+    }));
+    hydrateMessages(activeConversationId, mapped);
+  }, [activeConversationId, serverMessages, hydrateMessages]);
 
   // Auto-select first agent on load
   useEffect(() => {

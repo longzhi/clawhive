@@ -1,13 +1,13 @@
 import { useEffect, useRef } from "react";
 import Markdown from "react-markdown";
-import { ScrollArea } from "@/components/ui/scroll-area";
+
 import { useChatStore, type ChatMessageItem } from "@/stores/chat";
 import { cn } from "@/lib/utils";
 import { Bot, User, Loader2 } from "lucide-react";
 import { ToolCallPanel } from "./tool-call-panel";
 
 export function MessageStream() {
-  const { conversations, activeConversationId } = useChatStore();
+  const { conversations, activeConversationId, isProcessing } = useChatStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAutoScrollRef = useRef(true);
 
@@ -19,7 +19,7 @@ export function MessageStream() {
     if (isAutoScrollRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, isProcessing]);
 
   // Track if user scrolled up
   const handleScroll = () => {
@@ -51,13 +51,19 @@ export function MessageStream() {
   }
 
   return (
-    <ScrollArea className="flex-1 min-h-0" data-testid="chat-messages" ref={scrollRef} onScrollCapture={handleScroll}>
+    <div
+      ref={scrollRef}
+      onScroll={handleScroll}
+      className="flex-1 min-h-0 overflow-y-auto"
+      data-testid="chat-messages"
+    >
       <div className="flex flex-col gap-4 p-4">
         {messages.map((msg, idx) => (
           <MessageBubble key={msg.id || idx} message={msg} />
         ))}
+        {isProcessing && activeConversationId && <TypingIndicator />}
       </div>
-    </ScrollArea>
+    </div>
   );
 }
 
@@ -139,6 +145,36 @@ function MessageBubble({ message }: { message: ChatMessageItem }) {
         <div className={cn("text-xs mt-1", isUser ? "text-primary-foreground/70" : "text-muted-foreground")}>
           {new Date(message.timestamp).toLocaleTimeString()}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="flex gap-3 flex-row">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
+        <Bot className="h-4 w-4" />
+      </div>
+      <div className="rounded-lg px-4 py-3 bg-muted">
+        <div className="flex items-center gap-1">
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className="block h-2 w-2 rounded-full bg-muted-foreground/60"
+              style={{
+                animation: "typing-bounce 1.4s ease-in-out infinite",
+                animationDelay: `${i * 0.16}s`,
+              }}
+            />
+          ))}
+        </div>
+        <style>{`
+          @keyframes typing-bounce {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+            30% { transform: translateY(-4px); opacity: 1; }
+          }
+        `}</style>
       </div>
     </div>
   );

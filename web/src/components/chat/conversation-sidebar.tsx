@@ -17,14 +17,19 @@ export function ConversationSidebar() {
   // Sync server conversations to store
   useEffect(() => {
     if (serverConversations) {
+      const { conversations: existing } = useChatStore.getState();
+      const existingMap = new Map(existing.map((c) => [c.id, c]));
       setConversations(
-        serverConversations.map((sc) => ({
-          id: sc.conversation_id,
-          agent_id: sc.agent_id,
-          title: sc.preview || `Chat with ${sc.agent_id}`,
-          last_message_at: sc.last_message_at,
-          messages: [],
-        }))
+        serverConversations.map((sc) => {
+          const prev = existingMap.get(sc.conversation_id);
+          return {
+            id: sc.conversation_id,
+            agent_id: sc.agent_id,
+            title: sc.preview || `Chat with ${sc.agent_id}`,
+            last_message_at: sc.last_message_at,
+            messages: prev?.messages ?? [],
+          };
+        })
       );
     }
   }, [serverConversations, setConversations]);

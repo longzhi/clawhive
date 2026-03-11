@@ -55,6 +55,7 @@ interface ChatState {
   addPendingAttachment: (attachment: AttachmentPayload) => void;
   removePendingAttachment: (index: number) => void;
   clearPendingAttachments: () => void;
+  hydrateMessages: (conversationId: string, messages: ChatMessageItem[]) => void;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -82,6 +83,16 @@ export const useChatStore = create<ChatState>((set) => ({
     })),
 
   clearPendingAttachments: () => set({ pendingAttachments: [] }),
+
+  hydrateMessages: (conversationId, messages) =>
+    set((state) => ({
+      conversations: state.conversations.map((c) =>
+        c.id === conversationId && c.messages.length === 0
+          ? { ...c, messages }
+          : c
+      ),
+    })),
+
 
   addMessage: (conversationId, message) =>
     set((state) => ({

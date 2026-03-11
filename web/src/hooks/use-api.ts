@@ -717,7 +717,18 @@ export function useDeleteChatConversation() {
 export function useChatMessages(conversationId: string | null) {
   return useQuery({
     queryKey: ["chat-messages", conversationId],
-    queryFn: () => apiFetch<Array<{ role: string; text: string; timestamp: string }>>(`/api/chat/conversations/${conversationId}/messages`),
+    queryFn: () => apiFetch<Array<{
+      role: string;
+      text: string;
+      timestamp: string;
+      tool_calls?: Array<{
+        tool_name: string;
+        arguments: string;
+        output?: string;
+        duration_ms?: number;
+        is_running: boolean;
+      }>;
+    }>>(`/api/chat/conversations/${conversationId}/messages`),
     enabled: !!conversationId,
   });
 }
