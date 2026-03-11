@@ -1,10 +1,11 @@
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Bot, MessageSquare, Radio, Brain, GitBranch, CalendarClock, Settings, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Bot, MessageSquare, MessageCircle, Radio, Brain, GitBranch, CalendarClock, Settings, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/chat', label: 'Chat', icon: MessageCircle },
   { href: '/agents', label: 'Agents', icon: Bot },
   { href: '/sessions', label: 'Sessions', icon: MessageSquare },
   { href: '/schedules', label: 'Schedules', icon: CalendarClock },
