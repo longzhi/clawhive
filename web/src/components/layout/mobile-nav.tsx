@@ -1,9 +1,10 @@
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Bot, MessageSquare, Settings, Sliders, Sparkles } from 'lucide-react';
+import { LayoutDashboard, Bot, MessageSquare, MessageCircle, Settings, Sliders, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const mobileTabs = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/chat', label: 'Chat', icon: MessageCircle },
   { href: '/agents', label: 'Agents', icon: Bot },
   { href: '/sessions', label: 'Sessions', icon: MessageSquare },
   { href: '/skills', label: 'Skills', icon: Sparkles },

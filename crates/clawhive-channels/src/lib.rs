@@ -28,3 +28,6 @@ pub mod dingtalk;
 
 #[cfg(feature = "wecom")]
 pub mod wecom;
+
+#[cfg(feature = "web_console")]
+pub mod web_console;

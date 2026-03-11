@@ -12,6 +12,7 @@ import Providers_ from "@/pages/Providers";
 import Channels from "@/pages/Channels";
 import Routing from "@/pages/Routing";
 import Sessions from "@/pages/Sessions";
+import Chat from "@/pages/Chat";
 import Schedules from "@/pages/Schedules";
 import Setup from "@/pages/Setup";
 import Settings from "@/pages/Settings";
@@ -36,6 +37,7 @@ export default function App() {
                     <Route path="/channels" element={<Channels />} />
                     <Route path="/routing" element={<Routing />} />
                     <Route path="/sessions" element={<Sessions />} />
+                    <Route path="/chat" element={<Chat />} />
                     <Route path="/schedules" element={<Schedules />} />
                     <Route path="/settings" element={<Settings />} />
                     <Route path="/skills" element={<Skills />} />

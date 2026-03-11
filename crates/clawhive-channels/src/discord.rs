@@ -117,6 +117,7 @@ impl DiscordBot {
             connector_id: self.connector_id,
             gateway: self.gateway,
             http_holder: http_holder.clone(),
+            http_client: reqwest::Client::new(),
             allowed_groups: self.allowed_groups,
             require_mention: self.require_mention,
         };
@@ -172,6 +173,7 @@ struct DiscordHandler {
     connector_id: String,
     gateway: Arc<Gateway>,
     http_holder: Arc<RwLock<Option<Arc<Http>>>>,
+    http_client: reqwest::Client,
     allowed_groups: Vec<String>,
     require_mention: bool,
 }
@@ -315,7 +317,7 @@ impl EventHandler for DiscordHandler {
             };
             // For images, download and base64-encode (LLM providers require base64)
             let url_or_data = if kind == AttachmentKind::Image {
-                match download_attachment(&att.url).await {
+                match download_attachment(&self.http_client, &att.url).await {
                     Ok(base64_data) => base64_data,
                     Err(e) => {
                         tracing::warn!("Failed to download Discord attachment: {e}");
@@ -857,10 +859,10 @@ async fn spawn_skill_confirm_listener(
 }
 
 /// Download a Discord attachment and return its content as a base64-encoded string.
-async fn download_attachment(url: &str) -> anyhow::Result<String> {
+async fn download_attachment(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
     use base64::Engine;
 
-    let bytes = reqwest::get(url).await?.bytes().await?;
+    let bytes = client.get(url).send().await?.bytes().await?;
     let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(base64_data)
 }

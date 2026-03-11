@@ -52,7 +52,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 tempfile = "3"
 wiremock = "0.6"
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 rust-embed = "8"

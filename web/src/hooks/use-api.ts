@@ -673,3 +673,62 @@ export function useSetPassword() {
       }),
   });
 }
+
+// Chat hooks
+export function useChatConversations() {
+  return useQuery({
+    queryKey: ["chat-conversations"],
+    queryFn: () => apiFetch<Array<{ conversation_id: string; agent_id: string; last_message_at: string | null; message_count: number; preview: string | null }>>("/api/chat/conversations"),
+  });
+}
+
+export function useChatAgents() {
+  return useQuery({
+    queryKey: ["chat-agents"],
+    queryFn: () => apiFetch<Array<{ agent_id: string; name: string | null; model: string | null }>>("/api/chat/agents"),
+  });
+}
+
+export function useCreateChatConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { agent_id: string }) =>
+      apiFetch<{ conversation_id: string; agent_id: string }>("/api/chat/conversations", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["chat-conversations"] });
+    },
+  });
+}
+
+export function useDeleteChatConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiFetch<void>(`/api/chat/conversations/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["chat-conversations"] });
+    },
+  });
+}
+
+export function useChatMessages(conversationId: string | null) {
+  return useQuery({
+    queryKey: ["chat-messages", conversationId],
+    queryFn: () => apiFetch<Array<{
+      role: string;
+      text: string;
+      timestamp: string;
+      tool_calls?: Array<{
+        tool_name: string;
+        arguments: string;
+        output?: string;
+        duration_ms?: number;
+        is_running: boolean;
+      }>;
+    }>>(`/api/chat/conversations/${conversationId}/messages`),
+    enabled: !!conversationId,
+  });
+}
