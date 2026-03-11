@@ -584,50 +584,6 @@ impl Orchestrator {
             .or_else(|| detect_recent_user_language(history_messages))
     }
 
-    fn apply_language_policy_prompt(
-        &self,
-        system_prompt: &mut String,
-        target_language: Option<ResponseLanguage>,
-    ) {
-        if let Some(language) = target_language {
-            system_prompt.push_str(&language_policy_prompt(language));
-        }
-    }
-
-    fn log_language_guard(
-        &self,
-        agent_id: &str,
-        inbound: &InboundMessage,
-        reply_text: &str,
-        target_language: Option<ResponseLanguage>,
-        is_streaming: bool,
-    ) {
-        if is_language_guard_exempt(&inbound.text) {
-            return;
-        }
-        let Some(target) = target_language else {
-            return;
-        };
-        let Some(detected) = detect_response_language(reply_text) else {
-            return;
-        };
-        if detected == target {
-            return;
-        }
-
-        tracing::warn!(
-            agent_id = %agent_id,
-            channel_type = %inbound.channel_type,
-            connector_id = %inbound.connector_id,
-            conversation_scope = %inbound.conversation_scope,
-            user_scope = %inbound.user_scope,
-            target_language = %target.as_str(),
-            detected_language = %detected.as_str(),
-            is_streaming,
-            "language_guard: response language mismatch"
-        );
-    }
-
     fn build_runtime_system_prompt(
         &self,
         agent_id: &str,
@@ -975,7 +931,7 @@ impl Orchestrator {
         };
 
         let target_language = self.resolve_target_language(&inbound, &history_messages);
-        self.apply_language_policy_prompt(&mut system_prompt, target_language);
+        apply_language_policy_prompt(&mut system_prompt, target_language);
 
         // Build messages from history (no fake memory dialogue)
         let mut messages = build_messages_from_history(&history_messages);
@@ -1064,7 +1020,7 @@ impl Orchestrator {
             );
         }
 
-        self.log_language_guard(agent_id, &inbound, &reply_text, target_language, false);
+        log_language_guard(agent_id, &inbound, &reply_text, target_language, false);
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
@@ -1216,7 +1172,7 @@ impl Orchestrator {
         };
 
         let target_language = self.resolve_target_language(&inbound, &history_messages);
-        self.apply_language_policy_prompt(&mut system_prompt, target_language);
+        apply_language_policy_prompt(&mut system_prompt, target_language);
 
         // Build messages from history (no fake memory dialogue, stream variant)
         let mut messages = build_messages_from_history(&history_messages);
@@ -1860,6 +1816,48 @@ impl Orchestrator {
             _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
+}
+
+fn apply_language_policy_prompt(
+    system_prompt: &mut String,
+    target_language: Option<ResponseLanguage>,
+) {
+    if let Some(language) = target_language {
+        system_prompt.push_str(&language_policy_prompt(language));
+    }
+}
+
+fn log_language_guard(
+    agent_id: &str,
+    inbound: &InboundMessage,
+    reply_text: &str,
+    target_language: Option<ResponseLanguage>,
+    is_streaming: bool,
+) {
+    if is_language_guard_exempt(&inbound.text) {
+        return;
+    }
+    let Some(target) = target_language else {
+        return;
+    };
+    let Some(detected) = detect_response_language(reply_text) else {
+        return;
+    };
+    if detected == target {
+        return;
+    }
+
+    tracing::warn!(
+        agent_id = %agent_id,
+        channel_type = %inbound.channel_type,
+        connector_id = %inbound.connector_id,
+        conversation_scope = %inbound.conversation_scope,
+        user_scope = %inbound.user_scope,
+        target_language = %target.as_str(),
+        detected_language = %detected.as_str(),
+        is_streaming,
+        "language_guard: response language mismatch"
+    );
 }
 
 fn build_messages_from_history(history_messages: &[SessionMessage]) -> Vec<LlmMessage> {
