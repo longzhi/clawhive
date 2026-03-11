@@ -920,10 +920,9 @@ mod tests {
 
     use clawhive_bus::{EventBus, Topic};
     use clawhive_core::*;
-    use clawhive_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
-    use clawhive_memory::search_index::SearchIndex;
+
     use clawhive_memory::MemoryStore;
-    use clawhive_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
+
     use clawhive_provider::{register_builtin_providers, ProviderRegistry};
     use clawhive_runtime::NativeExecutor;
     use clawhive_scheduler::ScheduleManager;
@@ -951,13 +950,6 @@ mod tests {
             )
             .unwrap(),
         );
-        let session_mgr = SessionManager::new(memory.clone(), 1800);
-        let file_store = MemoryFileStore::new(tmp.path());
-        let session_writer = SessionWriter::new(tmp.path());
-        let session_reader = SessionReader::new(tmp.path());
-        let search_index = SearchIndex::new(memory.db());
-        let embedding_provider: Arc<dyn EmbeddingProvider> =
-            Arc::new(StubEmbeddingProvider::new(8));
         let agents = vec![FullAgentConfig {
             agent_id: "clawhive-main".into(),
             enabled: true,
@@ -977,26 +969,18 @@ mod tests {
             exec_security: None,
             sandbox: None,
         }];
-        let orch = Arc::new(Orchestrator::new(
-            router,
-            agents,
-            HashMap::new(),
-            session_mgr,
-            SkillRegistry::new(),
-            memory,
-            publisher.clone(),
-            None,
-            Arc::new(NativeExecutor),
-            file_store,
-            session_writer,
-            session_reader,
-            search_index,
-            embedding_provider,
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            schedule_manager,
-        ));
+        let orch = Arc::new(
+            OrchestratorBuilder::new(
+                router,
+                publisher.clone(),
+                memory,
+                Arc::new(NativeExecutor),
+                tmp.path().to_path_buf(),
+                schedule_manager,
+            )
+            .agents(agents)
+            .build(),
+        );
         let routing = RoutingConfig {
             default_agent_id: "clawhive-main".into(),
             bindings: vec![],
@@ -1035,13 +1019,6 @@ mod tests {
             )
             .unwrap(),
         );
-        let session_mgr = SessionManager::new(memory.clone(), 1800);
-        let file_store = MemoryFileStore::new(tmp.path());
-        let session_writer = SessionWriter::new(tmp.path());
-        let session_reader = SessionReader::new(tmp.path());
-        let search_index = SearchIndex::new(memory.db());
-        let embedding_provider: Arc<dyn EmbeddingProvider> =
-            Arc::new(StubEmbeddingProvider::new(8));
         let agents = vec![FullAgentConfig {
             agent_id: "clawhive-main".into(),
             enabled: true,
@@ -1061,26 +1038,18 @@ mod tests {
             exec_security: None,
             sandbox: None,
         }];
-        let orch = Arc::new(Orchestrator::new(
-            router,
-            agents,
-            HashMap::new(),
-            session_mgr,
-            SkillRegistry::new(),
-            memory,
-            publisher.clone(),
-            None,
-            Arc::new(NativeExecutor),
-            file_store,
-            session_writer,
-            session_reader,
-            search_index,
-            embedding_provider,
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            schedule_manager,
-        ));
+        let orch = Arc::new(
+            OrchestratorBuilder::new(
+                router,
+                publisher.clone(),
+                memory,
+                Arc::new(NativeExecutor),
+                tmp.path().to_path_buf(),
+                schedule_manager,
+            )
+            .agents(agents)
+            .build(),
+        );
         let routing = RoutingConfig {
             default_agent_id: "clawhive-main".into(),
             bindings: vec![],

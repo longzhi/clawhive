@@ -159,34 +159,17 @@ fn make_orchestrator(
         )
         .unwrap(),
     );
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
-    let file_store = MemoryFileStore::new(tmp.path());
-    let session_writer = SessionWriter::new(tmp.path());
-    let session_reader = SessionReader::new(tmp.path());
-    let search_index = SearchIndex::new(memory.db());
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
-
     (
-        Orchestrator::new(
+        OrchestratorBuilder::new(
             router,
-            agents,
-            HashMap::new(),
-            session_mgr,
-            SkillRegistry::new(),
-            memory,
             publisher,
-            None,
+            memory,
             Arc::new(NativeExecutor),
-            file_store,
-            session_writer,
-            session_reader,
-            search_index,
-            embedding_provider,
             tmp.path().to_path_buf(),
-            None,
-            None,
             schedule_manager,
-        ),
+        )
+        .agents(agents)
+        .build(),
         tmp,
     )
 }
@@ -200,7 +183,7 @@ async fn orchestrator_uses_search_index_for_memory_context() {
     let tmp = tempfile::TempDir::new().unwrap();
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
+    let _session_mgr = SessionManager::new(memory.clone(), 1800);
     let router = LlmRouter::new(registry, aliases, vec![]);
     let agents = vec![test_full_agent("clawhive-main", "trace", vec![])];
     let file_store = MemoryFileStore::new(tmp.path());
@@ -229,26 +212,21 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         .await
         .unwrap();
 
-    let orch = Orchestrator::new(
+    let orch = OrchestratorBuilder::new(
         router,
-        agents,
-        HashMap::new(),
-        session_mgr,
-        SkillRegistry::new(),
-        memory,
         bus.publisher(),
-        None,
+        memory,
         Arc::new(NativeExecutor),
-        file_store,
-        session_writer,
-        session_reader,
-        search_index,
-        Arc::clone(&embedding_provider),
         tmp.path().to_path_buf(),
-        None,
-        None,
         schedule_manager,
-    );
+    )
+    .agents(agents)
+    .file_store(file_store)
+    .session_writer(session_writer)
+    .session_reader(session_reader)
+    .search_index(search_index)
+    .embedding_provider(Arc::clone(&embedding_provider))
+    .build();
 
     let out = orch
         .handle_inbound(test_inbound("cobalt architecture"), "clawhive-main")
@@ -373,13 +351,9 @@ async fn orchestrator_creates_session() {
     )]);
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
     let agents = vec![test_full_agent("clawhive-main", "sonnet", vec![])];
     let router = LlmRouter::new(registry, aliases, vec![]);
     let tmp = tempfile::TempDir::new().unwrap();
-    let file_store = MemoryFileStore::new(tmp.path());
-    let session_writer = SessionWriter::new(tmp.path());
-    let session_reader = SessionReader::new(tmp.path());
     let schedule_manager = Arc::new(
         ScheduleManager::new(
             &tmp.path().join("config/schedules.d"),
@@ -388,26 +362,16 @@ async fn orchestrator_creates_session() {
         )
         .unwrap(),
     );
-    let orch = Orchestrator::new(
+    let orch = OrchestratorBuilder::new(
         router,
-        agents,
-        HashMap::new(),
-        session_mgr,
-        SkillRegistry::new(),
-        memory.clone(),
         bus.publisher(),
-        None,
+        memory.clone(),
         Arc::new(NativeExecutor),
-        file_store,
-        session_writer,
-        session_reader,
-        SearchIndex::new(memory.db()),
-        Arc::new(StubEmbeddingProvider::new(8)),
         tmp.path().to_path_buf(),
-        None,
-        None,
         schedule_manager,
-    );
+    )
+    .agents(agents)
+    .build();
 
     let inbound = test_inbound("hello");
     let key = SessionKey::from_inbound(&inbound);
@@ -477,14 +441,9 @@ async fn orchestrator_publishes_reply_ready() {
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe(clawhive_bus::Topic::ReplyReady).await;
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
     let agents = vec![test_full_agent("clawhive-main", "sonnet", vec![])];
     let router = LlmRouter::new(registry, aliases, vec![]);
     let tmp = tempfile::TempDir::new().unwrap();
-    let file_store = MemoryFileStore::new(tmp.path());
-    let session_writer = SessionWriter::new(tmp.path());
-    let session_reader = SessionReader::new(tmp.path());
-    let search_index = SearchIndex::new(memory.db());
     let schedule_manager = Arc::new(
         ScheduleManager::new(
             &tmp.path().join("config/schedules.d"),
@@ -493,26 +452,16 @@ async fn orchestrator_publishes_reply_ready() {
         )
         .unwrap(),
     );
-    let orch = Orchestrator::new(
+    let orch = OrchestratorBuilder::new(
         router,
-        agents,
-        HashMap::new(),
-        session_mgr,
-        SkillRegistry::new(),
-        memory,
         bus.publisher(),
-        None,
+        memory,
         Arc::new(NativeExecutor),
-        file_store,
-        session_writer,
-        session_reader,
-        search_index,
-        Arc::new(StubEmbeddingProvider::new(8)),
         tmp.path().to_path_buf(),
-        None,
-        None,
         schedule_manager,
-    );
+    )
+    .agents(agents)
+    .build();
 
     let _ = orch
         .handle_inbound(test_inbound("hello"), "clawhive-main")

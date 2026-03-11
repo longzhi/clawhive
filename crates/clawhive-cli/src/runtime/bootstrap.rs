@@ -12,7 +12,6 @@ use clawhive_memory::embedding::{
     EmbeddingProvider, GeminiEmbeddingProvider, OllamaEmbeddingProvider, OpenAiEmbeddingProvider,
     StubEmbeddingProvider,
 };
-use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
     minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
@@ -183,16 +182,11 @@ pub(crate) async fn bootstrap(
         Arc::clone(&sqlite_store),
         Arc::clone(&bus),
     ));
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
     let skill_registry = SkillRegistry::load_from_dir(&root.join("skills")).unwrap_or_else(|e| {
         tracing::warn!("Failed to load skills: {e}");
         SkillRegistry::new()
     });
     let workspace_dir = root.to_path_buf();
-    let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
-    let session_writer = clawhive_memory::SessionWriter::new(&workspace_dir);
-    let session_reader = clawhive_memory::SessionReader::new(&workspace_dir);
-    let search_index = SearchIndex::new(memory.db());
     let embedding_provider = build_embedding_provider(&config).await;
 
     let brave_api_key = config
@@ -204,26 +198,24 @@ pub(crate) async fn bootstrap(
         .and_then(|ws| ws.api_key.clone())
         .filter(|k| !k.is_empty());
 
-    let orchestrator = Arc::new(Orchestrator::new(
-        router,
-        config.agents.clone(),
-        personas,
-        session_mgr,
-        skill_registry,
-        memory.clone(),
-        publisher.clone(),
-        Some(approval_registry.clone()),
-        Arc::new(NativeExecutor),
-        file_store,
-        session_writer,
-        session_reader,
-        search_index,
-        embedding_provider,
-        workspace_dir.clone(),
-        brave_api_key,
-        Some(root.to_path_buf()),
-        Arc::clone(&schedule_manager),
-    ));
+    let orchestrator = Arc::new(
+        OrchestratorBuilder::new(
+            router,
+            publisher.clone(),
+            memory.clone(),
+            Arc::new(NativeExecutor),
+            workspace_dir.clone(),
+            Arc::clone(&schedule_manager),
+        )
+        .agents(config.agents.clone())
+        .personas(personas)
+        .skill_registry(skill_registry)
+        .approval_registry(approval_registry.clone())
+        .embedding_provider(embedding_provider)
+        .brave_api_key(brave_api_key)
+        .project_root(root.to_path_buf())
+        .build(),
+    );
 
     let rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let gateway = Arc::new(Gateway::new(

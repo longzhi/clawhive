@@ -62,9 +62,168 @@ pub struct Orchestrator {
     language_prefs: LanguagePrefs,
 }
 
+/// Builder for [`Orchestrator`]. Use [`OrchestratorBuilder::new`] to start,
+/// call optional setters, then call [`OrchestratorBuilder::build`].
+pub struct OrchestratorBuilder {
+    router: LlmRouter,
+    bus: BusPublisher,
+    memory: Arc<MemoryStore>,
+    runtime: Arc<dyn TaskExecutor>,
+    workspace_root: std::path::PathBuf,
+    schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
+    // Optional with defaults
+    agents: Vec<FullAgentConfig>,
+    personas: HashMap<String, Persona>,
+    session_mgr: Option<SessionManager>,
+    skill_registry: Option<SkillRegistry>,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    brave_api_key: Option<String>,
+    project_root: Option<std::path::PathBuf>,
+    // Allow overriding auto-derived workspace I/O (e.g. in tests with pre-populated stores)
+    file_store: Option<MemoryFileStore>,
+    session_writer: Option<SessionWriter>,
+    session_reader: Option<SessionReader>,
+    search_index: Option<SearchIndex>,
+}
+
+impl OrchestratorBuilder {
+    pub fn new(
+        router: LlmRouter,
+        bus: BusPublisher,
+        memory: Arc<MemoryStore>,
+        runtime: Arc<dyn TaskExecutor>,
+        workspace_root: std::path::PathBuf,
+        schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
+    ) -> Self {
+        Self {
+            router,
+            bus,
+            memory,
+            runtime,
+            workspace_root,
+            schedule_manager,
+            agents: vec![],
+            personas: HashMap::new(),
+            session_mgr: None,
+            skill_registry: None,
+            approval_registry: None,
+            embedding_provider: None,
+            brave_api_key: None,
+            project_root: None,
+            file_store: None,
+            session_writer: None,
+            session_reader: None,
+            search_index: None,
+        }
+    }
+
+    pub fn agents(mut self, agents: Vec<FullAgentConfig>) -> Self {
+        self.agents = agents;
+        self
+    }
+
+    pub fn personas(mut self, personas: HashMap<String, Persona>) -> Self {
+        self.personas = personas;
+        self
+    }
+
+    pub fn session_mgr(mut self, session_mgr: SessionManager) -> Self {
+        self.session_mgr = Some(session_mgr);
+        self
+    }
+
+    pub fn skill_registry(mut self, skill_registry: SkillRegistry) -> Self {
+        self.skill_registry = Some(skill_registry);
+        self
+    }
+
+    pub fn approval_registry(mut self, approval_registry: Arc<ApprovalRegistry>) -> Self {
+        self.approval_registry = Some(approval_registry);
+        self
+    }
+
+    pub fn embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embedding_provider = Some(provider);
+        self
+    }
+
+    pub fn brave_api_key(mut self, key: Option<String>) -> Self {
+        self.brave_api_key = key;
+        self
+    }
+
+    pub fn project_root(mut self, root: std::path::PathBuf) -> Self {
+        self.project_root = Some(root);
+        self
+    }
+
+    pub fn file_store(mut self, file_store: MemoryFileStore) -> Self {
+        self.file_store = Some(file_store);
+        self
+    }
+
+    pub fn session_writer(mut self, session_writer: SessionWriter) -> Self {
+        self.session_writer = Some(session_writer);
+        self
+    }
+
+    pub fn session_reader(mut self, session_reader: SessionReader) -> Self {
+        self.session_reader = Some(session_reader);
+        self
+    }
+
+    pub fn search_index(mut self, search_index: SearchIndex) -> Self {
+        self.search_index = Some(search_index);
+        self
+    }
+
+    pub fn build(self) -> Orchestrator {
+        let file_store = self
+            .file_store
+            .unwrap_or_else(|| MemoryFileStore::new(&self.workspace_root));
+        let session_writer = self
+            .session_writer
+            .unwrap_or_else(|| SessionWriter::new(&self.workspace_root));
+        let session_reader = self
+            .session_reader
+            .unwrap_or_else(|| SessionReader::new(&self.workspace_root));
+        let search_index = self
+            .search_index
+            .unwrap_or_else(|| SearchIndex::new(self.memory.db()));
+        let session_mgr = self
+            .session_mgr
+            .unwrap_or_else(|| SessionManager::new(self.memory.clone(), 1800));
+        let embedding_provider = self
+            .embedding_provider
+            .unwrap_or_else(|| Arc::new(clawhive_memory::embedding::StubEmbeddingProvider::new(8)));
+
+        Orchestrator::new(
+            self.router,
+            self.agents,
+            self.personas,
+            session_mgr,
+            self.skill_registry.unwrap_or_default(),
+            self.memory,
+            self.bus,
+            self.approval_registry,
+            self.runtime,
+            file_store,
+            session_writer,
+            session_reader,
+            search_index,
+            embedding_provider,
+            self.workspace_root,
+            self.brave_api_key,
+            self.project_root,
+            self.schedule_manager,
+        )
+    }
+}
+
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    fn new(
         router: LlmRouter,
         agents: Vec<FullAgentConfig>,
         personas: HashMap<String, Persona>,

@@ -3,10 +3,8 @@ use std::sync::Arc;
 
 use clawhive_bus::{EventBus, Topic};
 use clawhive_core::*;
-use clawhive_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
-use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
-use clawhive_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
+use clawhive_memory::SessionReader;
 use clawhive_provider::{AnthropicProvider, LlmMessage, LlmProvider, LlmRequest, ProviderRegistry};
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::ScheduleManager;
@@ -75,7 +73,6 @@ fn make_orchestrator_with_provider(
         "anthropic/claude-sonnet-4-5".to_string(),
     )]);
     let router = LlmRouter::new(registry, aliases, vec![]);
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
     let agents = vec![FullAgentConfig {
         agent_id: "clawhive-main".into(),
         enabled: true,
@@ -95,11 +92,6 @@ fn make_orchestrator_with_provider(
         exec_security: None,
         sandbox: None,
     }];
-    let file_store = MemoryFileStore::new(tmp.path());
-    let session_writer = SessionWriter::new(tmp.path());
-    let session_reader = SessionReader::new(tmp.path());
-    let search_index = SearchIndex::new(memory.db());
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
     let schedule_manager = Arc::new(
         ScheduleManager::new(
             &tmp.path().join("config/schedules.d"),
@@ -109,26 +101,16 @@ fn make_orchestrator_with_provider(
         .unwrap(),
     );
     (
-        Orchestrator::new(
+        OrchestratorBuilder::new(
             router,
-            agents,
-            HashMap::new(),
-            session_mgr,
-            SkillRegistry::new(),
-            memory,
             bus.publisher(),
-            None,
+            memory,
             Arc::new(NativeExecutor),
-            file_store,
-            session_writer,
-            session_reader,
-            search_index,
-            embedding_provider,
             tmp.path().to_path_buf(),
-            None,
-            None,
             schedule_manager,
-        ),
+        )
+        .agents(agents)
+        .build(),
         tmp,
     )
 }

@@ -4,12 +4,9 @@ use std::sync::Arc;
 use clawhive_bus::EventBus;
 use clawhive_core::{
     detect_skill_install_intent, FullAgentConfig, LlmRouter, ModelPolicy, Orchestrator,
-    SecurityMode, SessionManager, SkillRegistry,
+    OrchestratorBuilder, SecurityMode,
 };
-use clawhive_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
-use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
-use clawhive_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
 use clawhive_provider::ProviderRegistry;
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::ScheduleManager;
@@ -69,33 +66,16 @@ fn make_orchestrator() -> (Orchestrator, tempfile::TempDir) {
         .unwrap(),
     );
 
-    let session_mgr = SessionManager::new(memory.clone(), 1800);
-    let file_store = MemoryFileStore::new(tmp.path());
-    let session_writer = SessionWriter::new(tmp.path());
-    let session_reader = SessionReader::new(tmp.path());
-    let search_index = SearchIndex::new(memory.db());
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
-
-    let orchestrator = Orchestrator::new(
+    let orchestrator = OrchestratorBuilder::new(
         router,
-        vec![test_full_agent()],
-        HashMap::new(),
-        session_mgr,
-        SkillRegistry::new(),
-        memory,
         EventBus::new(16).publisher(),
-        None,
+        memory,
         Arc::new(NativeExecutor),
-        file_store,
-        session_writer,
-        session_reader,
-        search_index,
-        embedding_provider,
         tmp.path().to_path_buf(),
-        None,
-        None,
         schedule_manager,
-    );
+    )
+    .agents(vec![test_full_agent()])
+    .build();
 
     (orchestrator, tmp)
 }
