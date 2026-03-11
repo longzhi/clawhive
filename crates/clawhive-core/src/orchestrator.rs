@@ -104,7 +104,6 @@ impl Orchestrator {
         schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
     ) -> Self {
         let router = Arc::new(router);
-        let bus_for_tools = bus.clone();
         let agents_map: HashMap<String, FullAgentConfig> = agents
             .into_iter()
             .map(|a| (a.agent_id.clone(), a))
@@ -133,71 +132,20 @@ impl Orchestrator {
             agent_workspaces.insert(agent_id.clone(), state);
         }
 
-        let mut tool_registry = ToolRegistry::new();
-        tool_registry.register(Box::new(MemorySearchTool::new(
-            search_index.clone(),
-            embedding_provider.clone(),
-        )));
-        tool_registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
-        let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
-            router.clone(),
-            agents_map.clone(),
+        let (tool_registry, default_access_gate) = register_default_tools(
+            &search_index,
+            &embedding_provider,
+            &file_store,
+            &workspace_root,
+            &effective_project_root,
+            &approval_registry,
+            &bus,
+            schedule_manager,
+            brave_api_key,
+            &router,
+            &agents_map,
             personas_for_subagent,
-            3,
-            vec![],
-        ));
-        tool_registry.register(Box::new(super::subagent_tool::SubAgentTool::new(
-            sub_agent_runner,
-            30,
-        )));
-        // Default access gate for the global tool registry
-        let default_access_gate = Arc::new(AccessGate::new(
-            effective_project_root.clone(),
-            effective_project_root.join("access_policy.json"),
-        ));
-        // File tools (read/write/edit) are registered here for their DEFINITIONS only,
-        // so the LLM knows they exist. Actual execution is dispatched per-agent in
-        // execute_tool_for_agent() with the correct workspace root.
-        tool_registry.register(Box::new(ReadFileTool::new(
-            workspace_root.clone(),
-            default_access_gate.clone(),
-        )));
-        tool_registry.register(Box::new(WriteFileTool::new(
-            workspace_root.clone(),
-            default_access_gate.clone(),
-        )));
-        tool_registry.register(Box::new(EditFileTool::new(
-            workspace_root.clone(),
-            default_access_gate.clone(),
-        )));
-        tool_registry.register(Box::new(ExecuteCommandTool::new(
-            workspace_root.clone(),
-            30,
-            default_access_gate.clone(),
-            ExecSecurityConfig::default(),
-            SandboxPolicyConfig::default(),
-            approval_registry.clone(),
-            Some(bus_for_tools.clone()),
-            "global".to_string(),
-        )));
-        // Access control tools
-        tool_registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(ListAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(RevokeAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(WebFetchTool::new()));
-        tool_registry.register(Box::new(ImageTool::new()));
-        tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
-        tool_registry.register(Box::new(crate::skill_tool::SkillTool::new(
-            workspace_root.join("skills"),
-        )));
-        tool_registry.register(Box::new(crate::message_tool::MessageTool::new(
-            bus_for_tools.clone(),
-        )));
-        if let Some(api_key) = brave_api_key {
-            if !api_key.is_empty() {
-                tool_registry.register(Box::new(WebSearchTool::new(api_key)));
-            }
-        }
+        );
 
         Self {
             router: router.clone(),
@@ -1792,6 +1740,87 @@ impl Orchestrator {
             _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)] // transitional: will shrink when OrchestratorBuilder lands
+fn register_default_tools(
+    search_index: &SearchIndex,
+    embedding_provider: &Arc<dyn EmbeddingProvider>,
+    file_store: &MemoryFileStore,
+    workspace_root: &std::path::Path,
+    effective_project_root: &std::path::Path,
+    approval_registry: &Option<Arc<ApprovalRegistry>>,
+    bus: &BusPublisher,
+    schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
+    brave_api_key: Option<String>,
+    router: &Arc<LlmRouter>,
+    agents_map: &HashMap<String, FullAgentConfig>,
+    personas: HashMap<String, Persona>,
+) -> (ToolRegistry, Arc<AccessGate>) {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MemorySearchTool::new(
+        search_index.clone(),
+        embedding_provider.clone(),
+    )));
+    registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
+    let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
+        router.clone(),
+        agents_map.clone(),
+        personas,
+        3,
+        vec![],
+    ));
+    registry.register(Box::new(super::subagent_tool::SubAgentTool::new(
+        sub_agent_runner,
+        30,
+    )));
+    // Default access gate for the global tool registry
+    let default_access_gate = Arc::new(AccessGate::new(
+        effective_project_root.to_path_buf(),
+        effective_project_root.join("access_policy.json"),
+    ));
+    // File tools (read/write/edit) are registered here for their DEFINITIONS only,
+    // so the LLM knows they exist. Actual execution is dispatched per-agent in
+    // execute_tool_for_agent() with the correct workspace root.
+    registry.register(Box::new(ReadFileTool::new(
+        workspace_root.to_path_buf(),
+        default_access_gate.clone(),
+    )));
+    registry.register(Box::new(WriteFileTool::new(
+        workspace_root.to_path_buf(),
+        default_access_gate.clone(),
+    )));
+    registry.register(Box::new(EditFileTool::new(
+        workspace_root.to_path_buf(),
+        default_access_gate.clone(),
+    )));
+    registry.register(Box::new(ExecuteCommandTool::new(
+        workspace_root.to_path_buf(),
+        30,
+        default_access_gate.clone(),
+        ExecSecurityConfig::default(),
+        SandboxPolicyConfig::default(),
+        approval_registry.clone(),
+        Some(bus.clone()),
+        "global".to_string(),
+    )));
+    // Access control tools
+    registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
+    registry.register(Box::new(ListAccessTool::new(default_access_gate.clone())));
+    registry.register(Box::new(RevokeAccessTool::new(default_access_gate.clone())));
+    registry.register(Box::new(WebFetchTool::new()));
+    registry.register(Box::new(ImageTool::new()));
+    registry.register(Box::new(ScheduleTool::new(schedule_manager)));
+    registry.register(Box::new(crate::skill_tool::SkillTool::new(
+        workspace_root.join("skills"),
+    )));
+    registry.register(Box::new(crate::message_tool::MessageTool::new(bus.clone())));
+    if let Some(api_key) = brave_api_key {
+        if !api_key.is_empty() {
+            registry.register(Box::new(WebSearchTool::new(api_key)));
+        }
+    }
+    (registry, default_access_gate)
 }
 
 fn build_messages_from_history(history_messages: &[SessionMessage]) -> Vec<LlmMessage> {
