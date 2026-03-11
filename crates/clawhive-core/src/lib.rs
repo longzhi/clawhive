@@ -34,6 +34,7 @@ pub mod wait_tool;
 pub mod web_fetch_tool;
 pub mod web_search_tool;
 pub mod workspace;
+mod workspace_manager;
 
 pub use access_gate::*;
 pub use approval::*;

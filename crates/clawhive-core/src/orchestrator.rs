@@ -36,18 +36,9 @@ use super::tool::{ConversationMessage, ToolContext, ToolExecutor, ToolRegistry};
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
+use super::workspace_manager::{AgentWorkspaceManager, AgentWorkspaceState};
 
 const SKILL_INSTALL_USAGE_HINT: &str = "请提供 skill 来源路径或 URL。用法: /skill install <source>";
-
-/// Per-agent workspace runtime state: file store, session I/O, search index.
-struct AgentWorkspaceState {
-    workspace: Workspace,
-    file_store: MemoryFileStore,
-    session_writer: SessionWriter,
-    session_reader: SessionReader,
-    search_index: SearchIndex,
-    access_gate: Arc<AccessGate>,
-}
 
 pub struct Orchestrator {
     router: Arc<LlmRouter>,
@@ -64,19 +55,9 @@ pub struct Orchestrator {
     bus: BusPublisher,
     approval_registry: Option<Arc<ApprovalRegistry>>,
     runtime: Arc<dyn TaskExecutor>,
-    #[allow(dead_code)]
-    workspace_root: std::path::PathBuf,
-    /// Per-agent workspace state, keyed by agent_id
-    agent_workspaces: HashMap<String, AgentWorkspaceState>,
-    /// Fallback for agents without a dedicated workspace
-    file_store: MemoryFileStore,
-    session_writer: SessionWriter,
-    session_reader: SessionReader,
-    search_index: SearchIndex,
+    workspaces: AgentWorkspaceManager,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     tool_registry: ToolRegistry,
-    default_workspace_root: std::path::PathBuf,
-    default_access_gate: Arc<AccessGate>,
     skill_install_state: Arc<SkillInstallState>,
     language_prefs: LanguagePrefs,
 }
@@ -112,7 +93,7 @@ impl Orchestrator {
 
         // Build per-agent workspace states
         let effective_project_root = project_root.unwrap_or_else(|| workspace_root.clone());
-        let mut agent_workspaces = HashMap::new();
+        let mut agent_workspace_map = HashMap::new();
         for (agent_id, agent_cfg) in &agents_map {
             let ws = Workspace::resolve(
                 &effective_project_root,
@@ -129,15 +110,30 @@ impl Orchestrator {
                 search_index: SearchIndex::new(memory.db()),
                 access_gate: gate,
             };
-            agent_workspaces.insert(agent_id.clone(), state);
+            agent_workspace_map.insert(agent_id.clone(), state);
         }
+        // Build default workspace state from constructor params
+        let default_ws = Workspace::new(workspace_root.clone());
+        let default_access_gate = Arc::new(AccessGate::new(
+            effective_project_root.clone(),
+            effective_project_root.join("access_policy.json"),
+        ));
+        let default_state = AgentWorkspaceState {
+            workspace: default_ws,
+            file_store,
+            session_writer,
+            session_reader,
+            search_index,
+            access_gate: default_access_gate,
+        };
+        let workspaces = AgentWorkspaceManager::new(agent_workspace_map, default_state);
 
-        let (tool_registry, default_access_gate) = register_default_tools(
-            &search_index,
+        let tool_registry = register_default_tools(
+            workspaces.file_store("__default__"),
+            workspaces.search_index("__default__"),
             &embedding_provider,
-            &file_store,
-            &workspace_root,
-            &effective_project_root,
+            workspaces.workspace_root("__default__").as_path(),
+            workspaces.default_root(),
             &approval_registry,
             &bus,
             schedule_manager,
@@ -164,16 +160,9 @@ impl Orchestrator {
             bus,
             approval_registry,
             runtime,
-            workspace_root,
-            agent_workspaces,
-            file_store,
-            session_writer,
-            session_reader,
-            search_index,
+            workspaces,
             embedding_provider,
             tool_registry,
-            default_workspace_root: effective_project_root,
-            default_access_gate,
             skill_install_state: Arc::new(SkillInstallState::new(900)),
             language_prefs: LanguagePrefs::new(),
         }
@@ -345,7 +334,7 @@ impl Orchestrator {
 
         let resolved = super::skill_install::resolve_skill_source(&source).await?;
         let installed = super::skill_install::install_skill_from_analysis(
-            &self.workspace_root,
+            self.workspaces.default_root(),
             &self.skills_root,
             resolved.local_path(),
             &report,
@@ -373,17 +362,11 @@ impl Orchestrator {
     }
 
     fn workspace_root_for(&self, agent_id: &str) -> std::path::PathBuf {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| ws.workspace.root().to_path_buf())
-            .unwrap_or_else(|| self.default_workspace_root.clone())
+        self.workspaces.workspace_root(agent_id)
     }
 
     fn access_gate_for(&self, agent_id: &str) -> Arc<AccessGate> {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| ws.access_gate.clone())
-            .unwrap_or_else(|| self.default_access_gate.clone())
+        self.workspaces.access_gate(agent_id)
     }
 
     fn active_skill_registry(&self) -> SkillRegistry {
@@ -566,44 +549,25 @@ impl Orchestrator {
         }
     }
 
-    /// Get file store for a specific agent (falls back to global)
     fn file_store_for(&self, agent_id: &str) -> &MemoryFileStore {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.file_store)
-            .unwrap_or(&self.file_store)
+        self.workspaces.file_store(agent_id)
     }
 
-    /// Get session writer for a specific agent (falls back to global)
     fn session_writer_for(&self, agent_id: &str) -> &SessionWriter {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.session_writer)
-            .unwrap_or(&self.session_writer)
+        self.workspaces.session_writer(agent_id)
     }
 
-    /// Get session reader for a specific agent (falls back to global)
     fn session_reader_for(&self, agent_id: &str) -> &SessionReader {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.session_reader)
-            .unwrap_or(&self.session_reader)
+        self.workspaces.session_reader(agent_id)
     }
 
-    /// Get search index for a specific agent (falls back to global)
     fn search_index_for(&self, agent_id: &str) -> &SearchIndex {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.search_index)
-            .unwrap_or(&self.search_index)
+        self.workspaces.search_index(agent_id)
     }
 
     /// Ensure workspace directories exist for all agents
     pub async fn ensure_workspaces(&self) -> Result<()> {
-        for state in self.agent_workspaces.values() {
-            state.workspace.ensure_dirs().await?;
-        }
-        Ok(())
+        self.workspaces.ensure_all().await
     }
 
     /// Get a reference to the hook registry for registering hooks.
@@ -1744,11 +1708,11 @@ impl Orchestrator {
 
 #[allow(clippy::too_many_arguments)] // transitional: will shrink when OrchestratorBuilder lands
 fn register_default_tools(
+    file_store: &MemoryFileStore,
     search_index: &SearchIndex,
     embedding_provider: &Arc<dyn EmbeddingProvider>,
-    file_store: &MemoryFileStore,
     workspace_root: &std::path::Path,
-    effective_project_root: &std::path::Path,
+    default_root: &std::path::Path,
     approval_registry: &Option<Arc<ApprovalRegistry>>,
     bus: &BusPublisher,
     schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
@@ -1756,7 +1720,7 @@ fn register_default_tools(
     router: &Arc<LlmRouter>,
     agents_map: &HashMap<String, FullAgentConfig>,
     personas: HashMap<String, Persona>,
-) -> (ToolRegistry, Arc<AccessGate>) {
+) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(MemorySearchTool::new(
         search_index.clone(),
@@ -1776,8 +1740,8 @@ fn register_default_tools(
     )));
     // Default access gate for the global tool registry
     let default_access_gate = Arc::new(AccessGate::new(
-        effective_project_root.to_path_buf(),
-        effective_project_root.join("access_policy.json"),
+        default_root.to_path_buf(),
+        default_root.join("access_policy.json"),
     ));
     // File tools (read/write/edit) are registered here for their DEFINITIONS only,
     // so the LLM knows they exist. Actual execution is dispatched per-agent in
@@ -1820,7 +1784,7 @@ fn register_default_tools(
             registry.register(Box::new(WebSearchTool::new(api_key)));
         }
     }
-    (registry, default_access_gate)
+    registry
 }
 
 fn build_messages_from_history(history_messages: &[SessionMessage]) -> Vec<LlmMessage> {
