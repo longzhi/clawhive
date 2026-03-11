@@ -877,6 +877,7 @@ dependencies = [
  "chrono",
  "clawhive-auth",
  "clawhive-bus",
+ "clawhive-channels",
  "clawhive-core",
  "clawhive-gateway",
  "clawhive-provider",
