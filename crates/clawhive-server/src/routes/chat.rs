@@ -322,14 +322,38 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                 tracing::debug!(trace_id = %trace_id, agent_id = %agent_id, "chat ws: dispatching inbound to gateway");
 
                                 let gateway = Arc::clone(&gateway);
+                                let bus = Arc::clone(&state.bus);
+                                let out_tx2 = out_tx.clone();
+                                let active_ids = Arc::clone(&active_trace_ids);
                                 tokio::spawn(async move {
-                                    if let Err(error) = gateway.handle_inbound(inbound).await {
-                                        tracing::warn!(
-                                            trace_id = %trace_id,
-                                            agent_id = %agent_id,
-                                            error = %error,
-                                            "failed to handle inbound web chat message"
-                                        );
+                                    match gateway.handle_inbound(inbound).await {
+                                        Ok(outbound) => {
+                                            // For slash commands and other early returns,
+                                            // the orchestrator may not publish ReplyReady.
+                                            // Publish it here as a fallback. If already
+                                            // published, the relay will drop the duplicate
+                                            // (trace_id already removed from active set).
+                                            let _ = bus.publish(BusMessage::ReplyReady {
+                                                outbound: outbound.clone(),
+                                            }).await;
+                                            // Also send directly to ensure delivery
+                                            let trace_id = outbound.trace_id;
+                                            if is_active_trace_id(&active_ids, trace_id).await {
+                                                remove_active_trace_id(&active_ids, trace_id).await;
+                                                let _ = out_tx2.send(ServerMessage::ReplyReady {
+                                                    trace_id: trace_id.to_string(),
+                                                    text: outbound.text,
+                                                });
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                trace_id = %trace_id,
+                                                agent_id = %agent_id,
+                                                error = %error,
+                                                "failed to handle inbound web chat message"
+                                            );
+                                        }
                                     }
                                 });
                             }
