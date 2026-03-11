@@ -34,8 +34,8 @@ export default function Chat() {
 
   const handleSend = (text: string) => {
     if (!activeConversationId || !selectedAgentId) return;
+    const { pendingAttachments, clearPendingAttachments } = useChatStore.getState();
 
-    // Add user message to store immediately for optimistic UI
     addMessage(activeConversationId, {
       id: `user-${Date.now()}`,
       role: "user",
@@ -43,9 +43,16 @@ export default function Chat() {
       timestamp: new Date().toISOString(),
       tool_calls: [],
       is_streaming: false,
+      attachments: pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
     });
 
-    sendMessage(text, selectedAgentId, activeConversationId);
+    sendMessage(
+      text,
+      selectedAgentId,
+      activeConversationId,
+      pendingAttachments.length > 0 ? pendingAttachments : undefined,
+    );
+    clearPendingAttachments();
   };
 
   return (

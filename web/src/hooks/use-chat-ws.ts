@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import ReconnectingWebSocket from "reconnecting-websocket";
 
 import { useChatStore } from "@/stores/chat";
-import type { ClientMessage, ServerMessage } from "@/types/chat";
+import type { AttachmentPayload, ClientMessage, ServerMessage } from "@/types/chat";
 
 export function useChatWebSocket() {
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
@@ -94,7 +94,7 @@ export function useChatWebSocket() {
   ]);
 
   const sendMessage = useCallback(
-    (text: string, agentId: string, conversationId?: string) => {
+    (text: string, agentId: string, conversationId?: string, attachments?: AttachmentPayload[]) => {
       const ws = wsRef.current;
 
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -105,6 +105,7 @@ export function useChatWebSocket() {
         text,
         agent_id: agentId,
         conversation_id: conversationId,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       ws.send(JSON.stringify(msg));
     },

@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import type { AttachmentPayload } from "@/types/chat";
+
 export interface ToolCallInfo {
   tool_name: string;
   arguments: string;
@@ -15,6 +17,7 @@ export interface ChatMessageItem {
   timestamp: string;
   tool_calls: ToolCallInfo[];
   is_streaming: boolean;
+  attachments?: AttachmentPayload[];
 }
 
 export interface ConversationItem {
@@ -31,6 +34,7 @@ interface ChatState {
   isConnected: boolean;
   isProcessing: boolean;
   selectedAgentId: string | null;
+  pendingAttachments: AttachmentPayload[];
 
   // Actions
   setConversations: (conversations: ConversationItem[]) => void;
@@ -46,6 +50,11 @@ interface ChatState {
   updateToolCall: (conversationId: string, traceId: string, toolName: string, output: string, durationMs: number) => void;
   finalizeMessage: (conversationId: string, traceId: string, text: string) => void;
   addError: (conversationId: string, traceId: string | null, message: string) => void;
+
+  // Attachment actions
+  addPendingAttachment: (attachment: AttachmentPayload) => void;
+  removePendingAttachment: (index: number) => void;
+  clearPendingAttachments: () => void;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -54,12 +63,25 @@ export const useChatStore = create<ChatState>((set) => ({
   isConnected: false,
   isProcessing: false,
   selectedAgentId: null,
+  pendingAttachments: [],
 
   setConversations: (conversations) => set({ conversations }),
   setActiveConversation: (id) => set({ activeConversationId: id }),
   setConnected: (connected) => set({ isConnected: connected }),
   setProcessing: (processing) => set({ isProcessing: processing }),
   setSelectedAgent: (agentId) => set({ selectedAgentId: agentId }),
+
+  addPendingAttachment: (attachment) =>
+    set((state) => ({
+      pendingAttachments: [...state.pendingAttachments, attachment],
+    })),
+
+  removePendingAttachment: (index) =>
+    set((state) => ({
+      pendingAttachments: state.pendingAttachments.filter((_, i) => i !== index),
+    })),
+
+  clearPendingAttachments: () => set({ pendingAttachments: [] }),
 
   addMessage: (conversationId, message) =>
     set((state) => ({

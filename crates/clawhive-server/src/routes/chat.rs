@@ -15,7 +15,7 @@ use axum::{
 };
 use chrono::Utc;
 use clawhive_bus::Topic;
-use clawhive_schema::{BusMessage, InboundMessage};
+use clawhive_schema::{Attachment, AttachmentKind, BusMessage, InboundMessage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
@@ -25,15 +25,68 @@ use crate::{extract_session_token, is_valid_session};
 
 /// Messages sent by the client (browser) to the server via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentPayload {
+    pub kind: String,
+    pub data: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     SendMessage {
         text: String,
         agent_id: String,
         conversation_id: Option<String>,
+        #[serde(default)]
+        attachments: Vec<AttachmentPayload>,
     },
     Cancel,
     Ping,
+}
+
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 5;
+const MAX_ATTACHMENT_DATA_BYTES: usize = 10 * 1024 * 1024;
+
+fn map_attachment(payload: &AttachmentPayload) -> Attachment {
+    let kind = match payload.kind.as_str() {
+        "image" => AttachmentKind::Image,
+        "video" => AttachmentKind::Video,
+        "audio" => AttachmentKind::Audio,
+        "document" => AttachmentKind::Document,
+        _ => AttachmentKind::Other,
+    };
+    Attachment {
+        kind,
+        url: payload.data.clone(),
+        mime_type: payload.mime_type.clone(),
+        file_name: payload.file_name.clone(),
+        size: None,
+    }
+}
+
+fn validate_attachments(attachments: &[AttachmentPayload]) -> Result<(), String> {
+    if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(format!(
+            "Too many attachments: max {} per message",
+            MAX_ATTACHMENTS_PER_MESSAGE
+        ));
+    }
+
+    for (idx, attachment) in attachments.iter().enumerate() {
+        if attachment.data.len() > MAX_ATTACHMENT_DATA_BYTES {
+            return Err(format!(
+                "Attachment {} exceeds {} bytes",
+                idx + 1,
+                MAX_ATTACHMENT_DATA_BYTES
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Messages sent by the server to the client (browser) via WebSocket.
@@ -214,11 +267,29 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ClientMessage>(&text) {
-                            Ok(ClientMessage::SendMessage { text, agent_id, conversation_id }) => {
+                            Ok(ClientMessage::SendMessage {
+                                text,
+                                agent_id,
+                                conversation_id,
+                                attachments,
+                            }) => {
                                 if text.chars().count() > 10_000 {
                                     let _ = out_tx.send(ServerMessage::Error {
                                         trace_id: None,
                                         message: "Message exceeds 10,000 characters".to_string(),
+                                    });
+                                    continue;
+                                }
+
+                                if let Err(error) = validate_attachments(&attachments) {
+                                    tracing::warn!(
+                                        attachment_count = attachments.len(),
+                                        error = %error,
+                                        "chat ws: attachment validation failed"
+                                    );
+                                    let _ = out_tx.send(ServerMessage::Error {
+                                        trace_id: None,
+                                        message: error,
                                     });
                                     continue;
                                 }
@@ -238,7 +309,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     is_mention: false,
                                     mention_target: None,
                                     message_id: None,
-                                    attachments: Vec::new(),
+                                    attachments: attachments.iter().map(map_attachment).collect(),
                                     group_context: None,
                                     message_source: None,
                                 };
@@ -1177,5 +1248,97 @@ mod tests {
         assert_eq!(tool_calls[0].tool_name, "web_search");
         assert!(!tool_calls[0].is_running);
         assert!(tool_calls[0].output.is_some());
+    }
+
+    #[test]
+    fn map_attachment_maps_image_kind() {
+        let payload = super::AttachmentPayload {
+            kind: "image".to_string(),
+            data: "base64-image".to_string(),
+            mime_type: Some("image/png".to_string()),
+            file_name: Some("pic.png".to_string()),
+        };
+
+        let attachment = super::map_attachment(&payload);
+        assert!(matches!(attachment.kind, super::AttachmentKind::Image));
+        assert_eq!(attachment.url, "base64-image");
+        assert_eq!(attachment.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(attachment.file_name.as_deref(), Some("pic.png"));
+    }
+
+    #[test]
+    fn map_attachment_unknown_kind_falls_back_to_other() {
+        let payload = super::AttachmentPayload {
+            kind: "unknown".to_string(),
+            data: "base64-data".to_string(),
+            mime_type: None,
+            file_name: None,
+        };
+
+        let attachment = super::map_attachment(&payload);
+        assert!(matches!(attachment.kind, super::AttachmentKind::Other));
+    }
+
+    #[test]
+    fn send_message_serde_without_attachments_defaults_to_empty() {
+        let msg = serde_json::from_str::<super::ClientMessage>(
+            r#"{"type":"send_message","text":"hi","agent_id":"agent-1","conversation_id":null}"#,
+        )
+        .unwrap();
+
+        match msg {
+            super::ClientMessage::SendMessage { attachments, .. } => {
+                assert!(attachments.is_empty());
+            }
+            _ => panic!("expected send_message variant"),
+        }
+    }
+
+    #[test]
+    fn send_message_serde_with_single_attachment() {
+        let msg = serde_json::from_str::<super::ClientMessage>(
+            r#"{"type":"send_message","text":"hi","agent_id":"agent-1","conversation_id":"conv-1","attachments":[{"kind":"image","data":"base64-image","mime_type":"image/png","file_name":"pic.png"}]}"#,
+        )
+        .unwrap();
+
+        match msg {
+            super::ClientMessage::SendMessage { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].kind, "image");
+                assert_eq!(attachments[0].data, "base64-image");
+                assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
+                assert_eq!(attachments[0].file_name.as_deref(), Some("pic.png"));
+            }
+            _ => panic!("expected send_message variant"),
+        }
+    }
+
+    #[test]
+    fn validate_attachments_rejects_too_many_or_too_large() {
+        let too_many = vec![
+            super::AttachmentPayload {
+                kind: "image".to_string(),
+                data: "x".to_string(),
+                mime_type: None,
+                file_name: None,
+            };
+            6
+        ];
+        let too_large = vec![super::AttachmentPayload {
+            kind: "image".to_string(),
+            data: "x".repeat(10 * 1024 * 1024 + 1),
+            mime_type: None,
+            file_name: None,
+        }];
+        let valid = vec![super::AttachmentPayload {
+            kind: "image".to_string(),
+            data: "x".repeat(10 * 1024 * 1024),
+            mime_type: None,
+            file_name: None,
+        }];
+
+        assert!(super::validate_attachments(&too_many).is_err());
+        assert!(super::validate_attachments(&too_large).is_err());
+        assert!(super::validate_attachments(&valid).is_ok());
     }
 }

@@ -79,9 +79,49 @@ function MessageBubble({ message }: { message: ChatMessageItem }) {
           : "bg-muted"
       )}>
         {isUser ? (
-          <p className="text-sm whitespace-pre-wrap">{message.text}</p>
+          <>
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                {message.attachments.map((att, i) => (
+                  <a
+                    key={`${att.file_name ?? "img"}-${i}`}
+                    href={`data:${att.mime_type};base64,${att.data}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    <img
+                      src={`data:${att.mime_type};base64,${att.data}`}
+                      alt={att.file_name ?? "attachment"}
+                      className="max-h-48 max-w-[240px] rounded border border-primary-foreground/20 object-cover transition-opacity hover:opacity-80"
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
+            {message.text && <p className="text-sm whitespace-pre-wrap">{message.text}</p>}
+          </>
         ) : (
           <>
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                {message.attachments.map((att, i) => (
+                  <a
+                    key={`${att.file_name ?? "img"}-${i}`}
+                    href={`data:${att.mime_type};base64,${att.data}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    <img
+                      src={`data:${att.mime_type};base64,${att.data}`}
+                      alt={att.file_name ?? "attachment"}
+                      className="max-h-48 max-w-[240px] rounded border border-border object-cover transition-opacity hover:opacity-80"
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
             {message.tool_calls.length > 0 && (
               <ToolCallPanel toolCalls={message.tool_calls} />
             )}
