@@ -7,11 +7,24 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::state::AppState;
+use crate::webhook_auth::{generate_api_key, hash_api_key};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_channels).put(update_channels))
         .route("/status", get(get_channels_status))
+        .route(
+            "/webhook/connectors",
+            post(create_webhook_source).get(list_webhook_sources),
+        )
+        .route(
+            "/webhook/connectors/{source_id}",
+            delete(delete_webhook_source),
+        )
+        .route(
+            "/webhook/connectors/{source_id}/rotate-key",
+            post(rotate_webhook_source_key),
+        )
         .route("/{kind}/connectors", post(add_connector))
         .route("/{kind}/connectors/{id}", delete(remove_connector))
 }
@@ -51,6 +64,15 @@ struct AddConnectorRequest {
     groups: Option<Vec<String>>,
     #[serde(default)]
     require_mention: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CreateWebhookSourceRequest {
+    source_id: String,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 async fn get_channels(
@@ -258,6 +280,252 @@ fn connectors_mut<'a>(
         .as_sequence_mut()
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
+
+fn webhook_sources_mut(
+    root: &mut serde_yaml::Value,
+) -> Result<&mut Vec<serde_yaml::Value>, axum::http::StatusCode> {
+    let channels = root["channels"]
+        .as_mapping_mut()
+        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let webhook_key = serde_yaml::Value::String("webhook".to_string());
+    if !channels.contains_key(&webhook_key) {
+        let mut webhook = serde_yaml::Mapping::new();
+        webhook.insert(
+            serde_yaml::Value::String("enabled".to_string()),
+            serde_yaml::Value::Bool(true),
+        );
+        webhook.insert(
+            serde_yaml::Value::String("sources".to_string()),
+            serde_yaml::Value::Sequence(Vec::new()),
+        );
+        channels.insert(webhook_key.clone(), serde_yaml::Value::Mapping(webhook));
+    }
+
+    let webhook_map = channels
+        .get_mut(&webhook_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    webhook_map.insert(
+        serde_yaml::Value::String("enabled".to_string()),
+        serde_yaml::Value::Bool(true),
+    );
+
+    let sources = webhook_map
+        .entry(serde_yaml::Value::String("sources".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+
+    sources
+        .as_sequence_mut()
+        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn masked_key_from_auth(auth: &serde_yaml::Mapping) -> Option<String> {
+    let key_prefix = auth
+        .get(serde_yaml::Value::String("key_prefix".to_string()))
+        .and_then(serde_yaml::Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            auth.get(serde_yaml::Value::String("key".to_string()))
+                .and_then(serde_yaml::Value::as_str)
+                .map(|full| full.chars().take(8).collect::<String>())
+        });
+
+    key_prefix.map(|prefix| format!("{prefix}..."))
+}
+
+async fn create_webhook_source(
+    State(state): State<AppState>,
+    Json(body): Json<CreateWebhookSourceRequest>,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), axum::http::StatusCode> {
+    if body.source_id.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let api_key = generate_api_key();
+    let key_hash = hash_api_key(&api_key);
+    let key_prefix: String = api_key.chars().take(8).collect();
+
+    let mut main = load_main_config(&state)?;
+    let sources = webhook_sources_mut(&mut main)?;
+    sources.retain(|item| {
+        item["source_id"]
+            .as_str()
+            .map(|source_id| source_id != body.source_id)
+            .unwrap_or(true)
+    });
+
+    let mut auth = serde_yaml::Mapping::new();
+    auth.insert(
+        serde_yaml::Value::String("method".to_string()),
+        serde_yaml::Value::String("api_key".to_string()),
+    );
+    auth.insert(
+        serde_yaml::Value::String("key_hash".to_string()),
+        serde_yaml::Value::String(key_hash),
+    );
+    auth.insert(
+        serde_yaml::Value::String("key_prefix".to_string()),
+        serde_yaml::Value::String(key_prefix),
+    );
+
+    let mut source = serde_yaml::Mapping::new();
+    source.insert(
+        serde_yaml::Value::String("source_id".to_string()),
+        serde_yaml::Value::String(body.source_id.clone()),
+    );
+    source.insert(
+        serde_yaml::Value::String("format".to_string()),
+        serde_yaml::Value::String(body.format.unwrap_or_else(|| "raw".to_string())),
+    );
+    if let Some(description) = body.description {
+        source.insert(
+            serde_yaml::Value::String("description".to_string()),
+            serde_yaml::Value::String(description),
+        );
+    }
+    source.insert(
+        serde_yaml::Value::String("auth".to_string()),
+        serde_yaml::Value::Mapping(auth),
+    );
+
+    sources.push(serde_yaml::Value::Mapping(source));
+    write_main_config(&state, &main)?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({
+            "source_id": body.source_id,
+            "api_key": api_key,
+        })),
+    ))
+}
+
+async fn list_webhook_sources(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<serde_json::Value>>, axum::http::StatusCode> {
+    let main = load_main_config(&state)?;
+
+    let sources = main["channels"]["webhook"]["sources"]
+        .as_sequence()
+        .cloned()
+        .unwrap_or_default();
+
+    let items = sources
+        .into_iter()
+        .filter_map(|source| {
+            let map = source.as_mapping()?;
+            let source_id = map
+                .get(serde_yaml::Value::String("source_id".to_string()))
+                .and_then(serde_yaml::Value::as_str)?;
+
+            let format = map
+                .get(serde_yaml::Value::String("format".to_string()))
+                .and_then(serde_yaml::Value::as_str)
+                .unwrap_or("raw")
+                .to_string();
+
+            let description = map
+                .get(serde_yaml::Value::String("description".to_string()))
+                .and_then(serde_yaml::Value::as_str)
+                .map(ToString::to_string);
+
+            let api_key_masked = map
+                .get(serde_yaml::Value::String("auth".to_string()))
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(masked_key_from_auth)
+                .unwrap_or_else(|| "".to_string());
+
+            Some(serde_json::json!({
+                "source_id": source_id,
+                "format": format,
+                "description": description,
+                "api_key_masked": api_key_masked,
+            }))
+        })
+        .collect();
+
+    Ok(Json(items))
+}
+
+async fn delete_webhook_source(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let mut main = load_main_config(&state)?;
+    let sources = webhook_sources_mut(&mut main)?;
+    let before = sources.len();
+
+    sources.retain(|item| {
+        item["source_id"]
+            .as_str()
+            .map(|existing| existing != source_id)
+            .unwrap_or(true)
+    });
+
+    if sources.len() == before {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    write_main_config(&state, &main)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "source_id": source_id,
+    })))
+}
+
+async fn rotate_webhook_source_key(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let mut main = load_main_config(&state)?;
+    let sources = webhook_sources_mut(&mut main)?;
+
+    let Some(source) = sources.iter_mut().find(|source| {
+        source["source_id"]
+            .as_str()
+            .map(|existing| existing == source_id)
+            .unwrap_or(false)
+    }) else {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    };
+
+    let Some(source_map) = source.as_mapping_mut() else {
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    };
+
+    let api_key = generate_api_key();
+    let key_hash = hash_api_key(&api_key);
+    let key_prefix: String = api_key.chars().take(8).collect();
+
+    let auth = source_map
+        .entry(serde_yaml::Value::String("auth".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    let Some(auth_map) = auth.as_mapping_mut() else {
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    };
+
+    auth_map.insert(
+        serde_yaml::Value::String("method".to_string()),
+        serde_yaml::Value::String("api_key".to_string()),
+    );
+    auth_map.insert(
+        serde_yaml::Value::String("key_hash".to_string()),
+        serde_yaml::Value::String(key_hash),
+    );
+    auth_map.remove(serde_yaml::Value::String("key".to_string()));
+    auth_map.insert(
+        serde_yaml::Value::String("key_prefix".to_string()),
+        serde_yaml::Value::String(key_prefix),
+    );
+
+    write_main_config(&state, &main)?;
+    Ok(Json(serde_json::json!({
+        "source_id": source_id,
+        "api_key": api_key,
+    })))
+}
+
 async fn add_connector(
     State(state): State<AppState>,
     Path(kind): Path<String>,
@@ -407,7 +675,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{Request, StatusCode},
         Router,
     };
@@ -471,6 +739,11 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn read_main_yaml(root: &std::path::Path) -> serde_yaml::Value {
+        let content = std::fs::read_to_string(root.join("config/main.yaml")).expect("read yaml");
+        serde_yaml::from_str(&content).expect("parse yaml")
+    }
+
     #[tokio::test]
     async fn test_get_channels_status() {
         let (app, _) = setup_test_app();
@@ -526,5 +799,204 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(read_connectors_len(&root, "telegram"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_webhook_source_returns_plaintext_key_once() {
+        let (app, root) = setup_test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/channels/webhook/connectors")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"source_id":"alerts","format":"json","description":"Alert source"}"#,
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse body json");
+        let api_key = json["api_key"].as_str().expect("api_key string");
+        assert!(api_key.starts_with("whk_"));
+
+        let main = read_main_yaml(&root);
+        let source = &main["channels"]["webhook"]["sources"][0];
+        assert_eq!(source["source_id"], "alerts");
+        assert_eq!(source["format"], "json");
+        assert_eq!(source["description"], "Alert source");
+        assert_eq!(source["auth"]["method"], "api_key");
+        assert!(source["auth"]["key_hash"]
+            .as_str()
+            .expect("key_hash present")
+            .starts_with("sha256:"));
+        assert!(source["auth"]["key"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_list_webhook_sources_masks_key_prefix() {
+        let (app, root) = setup_test_app();
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/channels/webhook/connectors")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"source_id":"alerts"}"#))
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = to_bytes(create_response.into_body(), usize::MAX)
+            .await
+            .expect("read create body bytes");
+        let create_json: serde_json::Value =
+            serde_json::from_slice(&create_body).expect("parse create body");
+        let api_key = create_json["api_key"].as_str().expect("api_key string");
+        let expected_prefix: String = api_key.chars().take(8).collect();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/channels/webhook/connectors")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body bytes");
+        let sources: Vec<serde_json::Value> =
+            serde_json::from_slice(&body).expect("parse body json");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["source_id"], "alerts");
+        assert_eq!(
+            sources[0]["api_key_masked"],
+            format!("{expected_prefix}...")
+        );
+
+        let main = read_main_yaml(&root);
+        assert!(
+            main["channels"]["webhook"]["sources"][0]["auth"]["key_hash"]
+                .as_str()
+                .expect("key_hash")
+                .starts_with("sha256:")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_webhook_source_removes_from_sources() {
+        let (app, root) = setup_test_app();
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/channels/webhook/connectors")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"source_id":"alerts"}"#))
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/channels/webhook/connectors/alerts")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let main = read_main_yaml(&root);
+        let sources = main["channels"]["webhook"]["sources"]
+            .as_sequence()
+            .expect("sources sequence");
+        assert!(sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rotate_webhook_source_key_updates_hash_and_returns_new_key() {
+        let (app, root) = setup_test_app();
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/channels/webhook/connectors")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"source_id":"alerts"}"#))
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = to_bytes(create_response.into_body(), usize::MAX)
+            .await
+            .expect("read create body bytes");
+        let create_json: serde_json::Value =
+            serde_json::from_slice(&create_body).expect("parse create body");
+        let first_key = create_json["api_key"]
+            .as_str()
+            .expect("first key")
+            .to_string();
+
+        let before = read_main_yaml(&root);
+        let first_hash = before["channels"]["webhook"]["sources"][0]["auth"]["key_hash"]
+            .as_str()
+            .expect("first hash")
+            .to_string();
+
+        let rotate_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/channels/webhook/connectors/alerts/rotate-key")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(rotate_response.status(), StatusCode::OK);
+        let rotate_body = to_bytes(rotate_response.into_body(), usize::MAX)
+            .await
+            .expect("read rotate body bytes");
+        let rotate_json: serde_json::Value =
+            serde_json::from_slice(&rotate_body).expect("parse rotate body");
+        let second_key = rotate_json["api_key"]
+            .as_str()
+            .expect("second key")
+            .to_string();
+        assert_ne!(first_key, second_key);
+
+        let after = read_main_yaml(&root);
+        let second_hash = after["channels"]["webhook"]["sources"][0]["auth"]["key_hash"]
+            .as_str()
+            .expect("second hash")
+            .to_string();
+        assert_ne!(first_hash, second_hash);
+        assert!(second_hash.starts_with("sha256:"));
     }
 }
