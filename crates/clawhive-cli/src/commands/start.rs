@@ -514,6 +514,19 @@ async fn start_bot(
         }
     }
 
+    // Webhook sources (no ChannelBot needed — uses HTTP endpoint in clawhive-server)
+    if let Some(webhook_config) = &config.main.channels.webhook {
+        if webhook_config.enabled {
+            for source in &webhook_config.sources {
+                tracing::info!(
+                    source_id = %source.source_id,
+                    format = %source.format,
+                    "Registered webhook source"
+                );
+            }
+        }
+    }
+
     if bots.is_empty() {
         tracing::warn!("No channel bots configured or enabled. HTTP server is running for setup.");
         eprintln!("  No channel bots configured yet.");
