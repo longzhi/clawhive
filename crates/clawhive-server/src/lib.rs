@@ -1,6 +1,7 @@
 pub mod frontend;
 pub mod routes;
 pub mod state;
+pub mod webhook_auth;
 
 use anyhow::Result;
 use axum::{

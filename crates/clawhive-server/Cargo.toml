@@ -19,6 +19,10 @@ async-stream.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+rand.workspace = true
+hex.workspace = true
 bcrypt = "0.17"
 reqwest.workspace = true
 clawhive-schema = { path = "../clawhive-schema" }

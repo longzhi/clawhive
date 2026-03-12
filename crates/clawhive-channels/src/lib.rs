@@ -31,3 +31,6 @@ pub mod wecom;
 
 #[cfg(feature = "web_console")]
 pub mod web_console;
+
+#[cfg(feature = "webhook")]
+pub mod webhook;

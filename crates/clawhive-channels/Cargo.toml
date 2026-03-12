@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["telegram", "discord", "feishu", "dingtalk", "wecom", "web_console"]
+default = ["telegram", "discord", "feishu", "dingtalk", "wecom", "web_console", "webhook"]
 telegram = ["dep:teloxide", "dep:log"]
 discord = ["dep:serenity"]
 slack = ["dep:slack-morphism"]
@@ -15,6 +15,7 @@ whatsapp = ["dep:whatsapp-rust", "dep:whatsapp-rust-tokio-transport", "dep:whats
 feishu = ["dep:tokio-tungstenite", "dep:prost", "dep:futures-util", "dep:url"]
 dingtalk = ["dep:tokio-tungstenite", "dep:futures-util"]
 wecom = ["dep:tokio-tungstenite", "dep:futures-util"]
+webhook = []
 
 [dependencies]
 anyhow.workspace = true
