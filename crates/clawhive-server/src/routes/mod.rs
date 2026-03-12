@@ -9,6 +9,7 @@ pub mod schedules;
 pub mod sessions;
 pub mod setup;
 pub mod skills;
+pub mod webhook;
 
 use axum::Router;
 
