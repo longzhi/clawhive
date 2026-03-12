@@ -73,12 +73,19 @@ impl PayloadNormalizer for GenericNormalizer {
         let labels = payload.get("labels").and_then(Value::as_object);
         if let Some(labels) = labels {
             if !labels.is_empty() {
-                let keys = labels
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(":");
-                return format!("source:{source_id}:event:{keys}");
+                let mut pairs: Vec<String> = labels
+                    .iter()
+                    .map(|(k, v)| {
+                        let v_str = v
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| v.to_string());
+                        format!("{k}={v_str}")
+                    })
+                    .collect();
+                pairs.sort();
+                let scope_key = pairs.join(":");
+                return format!("source:{source_id}:event:{scope_key}");
             }
         }
 
@@ -431,8 +438,9 @@ mod tests {
         });
         let scope = GenericNormalizer.derive_scope(&payload, "webhook");
         assert!(scope.starts_with("source:webhook:event:"));
-        assert!(scope.contains("team"));
-        assert!(scope.contains("service"));
+        // Should include key=value pairs, sorted alphabetically
+        assert!(scope.contains("service=gateway"));
+        assert!(scope.contains("team=platform"));
     }
 
     #[test]

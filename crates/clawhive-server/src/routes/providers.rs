@@ -364,6 +364,8 @@ mod tests {
                 enable_openai_oauth_callback_listener: true,
                 daemon_mode: false,
                 port: 3000,
+                webhook_config: Arc::new(std::sync::RwLock::new(None)),
+                routing_config: Arc::new(std::sync::RwLock::new(None)),
             },
             tmp,
         )

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Json, Router,
@@ -13,8 +13,13 @@ use uuid::Uuid;
 use crate::state::AppState;
 use crate::webhook_auth;
 
+/// Maximum webhook request body size: 1 MB.
+const MAX_BODY_SIZE: usize = 1024 * 1024;
+
 pub fn webhook_router() -> Router<AppState> {
-    Router::new().route("/{source_id}", post(handle_webhook))
+    Router::new()
+        .route("/{source_id}", post(handle_webhook))
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
 }
 
 async fn handle_webhook(
@@ -29,6 +34,16 @@ async fn handle_webhook(
         .iter()
         .find(|source| source.source_id == source_id)
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Validate auth method
+    if source.auth.method != "api_key" {
+        tracing::warn!(
+            source_id = %source_id,
+            method = %source.auth.method,
+            "unsupported auth method for webhook source"
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
     let provided_key = webhook_auth::extract_api_key(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let stored = source
@@ -118,27 +133,18 @@ async fn handle_webhook(
 }
 
 fn load_webhook_config(state: &AppState) -> Result<WebhookChannelConfig, StatusCode> {
-    let path = state.root.join("config/main.yaml");
-    let content = std::fs::read_to_string(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let main: serde_yaml::Value =
-        serde_yaml::from_str(&content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let webhook_val = &main["channels"]["webhook"];
-    if webhook_val.is_null() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let cfg: WebhookChannelConfig = serde_yaml::from_value(webhook_val.clone())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !cfg.enabled {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    Ok(cfg)
+    state
+        .webhook_config
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 fn find_delivery_for_webhook(state: &AppState, source_id: &str) -> Option<DeliveryRoutingConfig> {
-    let path = state.root.join("config/routing.yaml");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let routing: clawhive_core::config::RoutingConfig = serde_yaml::from_str(&content).ok()?;
+    let routing = state.routing_config.read().unwrap();
     let delivery = routing
+        .as_ref()?
         .bindings
         .iter()
         .find(|binding| binding.channel_type == "webhook" && binding.connector_id == source_id)
@@ -204,15 +210,23 @@ bindings: []
     }
 
     fn test_state(dir: &std::path::Path) -> AppState {
-        AppState {
+        let state = AppState {
             root: dir.to_path_buf(),
             bus: Arc::new(EventBus::new(16)),
             gateway: None,
             web_password_hash: Arc::new(RwLock::new(None)),
             session_store: Arc::new(RwLock::new(HashMap::new())),
+            pending_openai_oauth: Arc::new(RwLock::new(HashMap::new())),
+            openai_oauth_config: crate::state::default_openai_oauth_config(),
+            enable_openai_oauth_callback_listener: false,
             daemon_mode: false,
             port: 8848,
-        }
+            webhook_config: Arc::new(RwLock::new(None)),
+            routing_config: Arc::new(RwLock::new(None)),
+        };
+        state.load_webhook_config_from_disk();
+        state.load_routing_config_from_disk();
+        state
     }
 
     #[tokio::test]

@@ -10,18 +10,11 @@ const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 /// Generate a new API key: `whk_` + 32 crypto-random Base62 chars.
 pub fn generate_api_key() -> String {
     let mut rng = OsRng;
-    let mut random_bytes = [0_u8; KEY_RANDOM_BYTES];
-    rng.fill(&mut random_bytes);
-
-    let random_part: String = random_bytes
-        .iter()
-        .flat_map(|byte| {
-            let hi = (byte / 62) as usize;
-            let lo = (byte % 62) as usize;
-            [BASE62[hi] as char, BASE62[lo] as char]
-        })
-        .collect();
-
+    let mut random_part = String::with_capacity(KEY_RANDOM_BYTES);
+    for _ in 0..KEY_RANDOM_BYTES {
+        let idx = rng.gen_range(0..BASE62.len());
+        random_part.push(BASE62[idx] as char);
+    }
     format!("{KEY_PREFIX}{random_part}")
 }
 
@@ -55,12 +48,13 @@ pub fn verify_api_key(provided_key: &str, stored: &str) -> bool {
 /// Extract API key from headers: `Authorization: Bearer <key>` or `X-API-Key: <key>`.
 pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get("authorization") {
-        let bearer = value.to_str().ok()?;
-        let mut parts = bearer.split_whitespace();
-        let scheme = parts.next()?;
-        let token = parts.next()?;
-        if scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none() {
-            return Some(token.to_string());
+        if let Ok(bearer) = value.to_str() {
+            let mut parts = bearer.split_whitespace();
+            if let (Some(scheme), Some(token)) = (parts.next(), parts.next()) {
+                if scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none() {
+                    return Some(token.to_string());
+                }
+            }
         }
     }
 
@@ -83,7 +77,7 @@ mod tests {
     fn generate_api_key_has_whk_prefix() {
         let key = generate_api_key();
         assert!(key.starts_with(KEY_PREFIX));
-        assert!(key.len() > 40);
+        assert_eq!(key.len(), KEY_PREFIX.len() + KEY_RANDOM_BYTES);
     }
 
     #[test]

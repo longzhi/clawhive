@@ -384,7 +384,11 @@ async fn start_bot(
         enable_openai_oauth_callback_listener: true,
         daemon_mode: false,
         port,
+        webhook_config: Arc::new(RwLock::new(None)),
+        routing_config: Arc::new(RwLock::new(None)),
     };
+    http_state.load_webhook_config_from_disk();
+    http_state.load_routing_config_from_disk();
     let http_addr = format!("0.0.0.0:{port}");
     tokio::spawn(async move {
         if let Err(err) = clawhive_server::serve(http_state, &http_addr).await {

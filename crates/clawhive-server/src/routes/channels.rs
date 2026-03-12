@@ -1,3 +1,4 @@
+use axum::http::StatusCode;
 use axum::{
     extract::{Path, State},
     routing::{delete, get, post},
@@ -93,18 +94,13 @@ async fn update_channels(
     State(state): State<AppState>,
     Json(channels): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let path = state.root.join("config/main.yaml");
-    let content = std::fs::read_to_string(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    let mut val: serde_yaml::Value = serde_yaml::from_str(&content)
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut val = load_main_config(&state)?;
 
     let channels_yaml: serde_yaml::Value = serde_json::from_value(channels.clone())
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
     val["channels"] = channels_yaml;
 
-    let yaml =
-        serde_yaml::to_string(&val).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    write_main_config(&state, &val)?;
 
     Ok(Json(channels))
 }
@@ -234,7 +230,9 @@ fn write_main_config(
     let path = state.root.join("config/main.yaml");
     let yaml =
         serde_yaml::to_string(val).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+    std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.refresh_webhook_cache(val);
+    Ok(())
 }
 
 fn load_main_config(state: &AppState) -> Result<serde_yaml::Value, axum::http::StatusCode> {
@@ -374,9 +372,18 @@ async fn create_webhook_source(
         serde_yaml::Value::String("source_id".to_string()),
         serde_yaml::Value::String(body.source_id.clone()),
     );
+    let format = match body.format.as_deref() {
+        Some("raw") | Some("generic") | Some("alertmanager") | Some("github") | None => {
+            body.format.unwrap_or_else(|| "raw".to_string())
+        }
+        Some(unknown) => {
+            tracing::warn!(format = %unknown, "unsupported webhook format");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
     source.insert(
         serde_yaml::Value::String("format".to_string()),
-        serde_yaml::Value::String(body.format.unwrap_or_else(|| "raw".to_string())),
+        serde_yaml::Value::String(format),
     );
     if let Some(description) = body.description {
         source.insert(
@@ -721,6 +728,8 @@ mod tests {
             enable_openai_oauth_callback_listener: true,
             daemon_mode: false,
             port: 3000,
+            webhook_config: Arc::new(std::sync::RwLock::new(None)),
+            routing_config: Arc::new(std::sync::RwLock::new(None)),
         };
         (
             Router::new()
@@ -812,7 +821,7 @@ mod tests {
                     .uri("/api/channels/webhook/connectors")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"source_id":"alerts","format":"json","description":"Alert source"}"#,
+                        r#"{"source_id":"alerts","format":"raw","description":"Alert source"}"#,
                     ))
                     .expect("build request"),
             )
@@ -830,7 +839,7 @@ mod tests {
         let main = read_main_yaml(&root);
         let source = &main["channels"]["webhook"]["sources"][0];
         assert_eq!(source["source_id"], "alerts");
-        assert_eq!(source["format"], "json");
+        assert_eq!(source["format"], "raw");
         assert_eq!(source["description"], "Alert source");
         assert_eq!(source["auth"]["method"], "api_key");
         assert!(source["auth"]["key_hash"]
