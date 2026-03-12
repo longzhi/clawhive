@@ -53,13 +53,18 @@ async fn handle_webhook(
     let conversation_scope = normalizer.derive_scope(&payload, &source_id);
     let trace_id = Uuid::new_v4();
 
+    let text = match &source.prompt {
+        Some(prompt) => format!("{prompt}\n\n---\n\n{}", normalized.text),
+        None => normalized.text,
+    };
+
     let inbound = InboundMessage {
         trace_id,
         channel_type: "webhook".to_string(),
         connector_id: source_id.clone(),
         conversation_scope,
         user_scope: format!("webhook:{source_id}"),
-        text: normalized.text,
+        text,
         at: Utc::now(),
         thread_id: None,
         is_mention: false,

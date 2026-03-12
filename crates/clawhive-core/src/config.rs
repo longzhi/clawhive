@@ -165,6 +165,9 @@ pub struct WebhookSourceConfig {
     pub format: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Instruction prompt prepended to normalized payload before sending to agent.
+    #[serde(default)]
+    pub prompt: Option<String>,
     pub auth: WebhookAuthConfig,
     #[serde(default)]
     pub created_at: Option<String>,
