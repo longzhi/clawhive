@@ -150,6 +150,48 @@ pub struct WeComChannelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookAuthConfig {
+    pub method: String,
+    #[serde(default)]
+    pub key_hash: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSourceConfig {
+    pub source_id: String,
+    #[serde(default = "default_raw_format")]
+    pub format: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub auth: WebhookAuthConfig,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+fn default_raw_format() -> String {
+    "raw".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub sources: Vec<WebhookSourceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryRoutingConfig {
+    pub mode: String,
+    pub channel: String,
+    pub connector_id: String,
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelsConfig {
     pub telegram: Option<TelegramChannelConfig>,
     pub discord: Option<DiscordChannelConfig>,
@@ -159,6 +201,8 @@ pub struct ChannelsConfig {
     pub dingtalk: Option<DingTalkChannelConfig>,
     #[serde(default)]
     pub wecom: Option<WeComChannelConfig>,
+    #[serde(default)]
+    pub webhook: Option<WebhookChannelConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -224,6 +268,7 @@ impl Default for MainConfig {
                 feishu: None,
                 dingtalk: None,
                 wecom: None,
+                webhook: None,
             },
             embedding: EmbeddingConfig::default(),
             tools: ToolsConfig::default(),
@@ -246,6 +291,8 @@ pub struct RoutingBinding {
     #[serde(rename = "match")]
     pub match_rule: MatchRule,
     pub agent_id: String,
+    #[serde(default)]
+    pub delivery: Option<DeliveryRoutingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,6 +747,18 @@ fn resolve_main_env(main: &mut MainConfig) {
         }
     }
 
+    if let Some(webhook) = &mut main.channels.webhook {
+        for source in &mut webhook.sources {
+            source.source_id = resolve_env_var(&source.source_id);
+            if let Some(key) = &mut source.auth.key {
+                *key = resolve_env_var(key);
+            }
+            if let Some(key_hash) = &mut source.auth.key_hash {
+                *key_hash = resolve_env_var(key_hash);
+            }
+        }
+    }
+
     main.embedding.api_key = resolve_env_var(&main.embedding.api_key);
     main.embedding.base_url = resolve_env_var(&main.embedding.base_url);
     main.embedding.model = resolve_env_var(&main.embedding.model);
@@ -718,6 +777,14 @@ fn resolve_routing_env(routing: &mut RoutingConfig) {
             *pattern = resolve_env_var(pattern);
         }
         binding.agent_id = resolve_env_var(&binding.agent_id);
+        if let Some(delivery) = &mut binding.delivery {
+            delivery.mode = resolve_env_var(&delivery.mode);
+            delivery.channel = resolve_env_var(&delivery.channel);
+            delivery.connector_id = resolve_env_var(&delivery.connector_id);
+            if let Some(target) = &mut delivery.target {
+                *target = resolve_env_var(target);
+            }
+        }
     }
 }
 
@@ -903,6 +970,93 @@ channels: {}
     }
 
     #[test]
+    fn webhook_channel_config_serde_roundtrip() {
+        let yaml = r#"
+enabled: true
+sources:
+  - source_id: alertmanager
+    format: alertmanager
+    description: "Alertmanager production alerts"
+    auth:
+      method: api_key
+      key_hash: "sha256:abcdef1234567890"
+  - source_id: my-script
+    format: generic
+    description: "Custom deploy notifications"
+    auth:
+      method: api_key
+      key: "${WEBHOOK_MY_SCRIPT_KEY}"
+"#;
+        let config: WebhookChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.sources[0].source_id, "alertmanager");
+        assert_eq!(config.sources[0].format, "alertmanager");
+        assert_eq!(
+            config.sources[0].auth.key_hash,
+            Some("sha256:abcdef1234567890".to_string())
+        );
+        assert_eq!(config.sources[1].format, "generic");
+        assert!(config.sources[1].auth.key.is_some());
+    }
+
+    #[test]
+    fn routing_delivery_config_serde_roundtrip() {
+        let yaml = r#"
+default_agent_id: main-agent
+bindings:
+  - channel_type: webhook
+    connector_id: alertmanager
+    match:
+      kind: group
+    agent_id: devops-bot
+    delivery:
+      mode: announce
+      channel: discord
+      connector_id: discord_main
+      target: "guild:xxx:channel:ops-alerts"
+"#;
+        let config: RoutingConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.bindings.len(), 1);
+        let binding = &config.bindings[0];
+        assert_eq!(binding.channel_type, "webhook");
+        let delivery = binding.delivery.as_ref().unwrap();
+        assert_eq!(delivery.mode, "announce");
+        assert_eq!(delivery.channel, "discord");
+        assert_eq!(
+            delivery.target,
+            Some("guild:xxx:channel:ops-alerts".to_string())
+        );
+    }
+
+    #[test]
+    fn routing_without_delivery_still_works() {
+        let yaml = r#"
+default_agent_id: main-agent
+bindings:
+  - channel_type: telegram
+    connector_id: tg_main
+    match:
+      kind: dm
+    agent_id: main-agent
+"#;
+        let config: RoutingConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.bindings[0].delivery.is_none());
+    }
+
+    #[test]
+    fn webhook_source_default_format_is_raw() {
+        let yaml = r#"
+source_id: test
+auth:
+  method: api_key
+  key: "test-key"
+"#;
+        let config: WebhookSourceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.format, "raw");
+    }
+
+    #[test]
     fn validate_config_missing_default_agent() {
         let config = ClawhiveConfig {
             main: MainConfig {
@@ -922,6 +1076,7 @@ channels: {}
                     feishu: None,
                     dingtalk: None,
                     wecom: None,
+                    webhook: None,
                 },
                 embedding: EmbeddingConfig::default(),
                 tools: ToolsConfig::default(),
