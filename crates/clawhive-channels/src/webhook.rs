@@ -346,7 +346,8 @@ fn pretty_json(payload: &Value) -> String {
 
 fn truncate_text(mut text: String, max_bytes: usize) -> String {
     if text.len() > max_bytes {
-        text.truncate(max_bytes);
+        let safe_end = text.floor_char_boundary(max_bytes);
+        text.truncate(safe_end);
     }
     text
 }
@@ -603,5 +604,27 @@ mod tests {
         assert_eq!(github, "repo:org/repo");
         assert_eq!(alertmanager, "alert:A:fp");
         assert!(fallback.starts_with("source:unknown:event:"));
+    }
+
+    #[test]
+    fn truncate_text_safe_on_multibyte_boundary() {
+        // "你好世界" is 4 CJK chars = 12 bytes (3 bytes each)
+        let text = "你好世界".to_string();
+        assert_eq!(text.len(), 12);
+
+        // Truncate at byte 4 — falls in the middle of "好" (bytes 3..6)
+        // Without floor_char_boundary, this would panic
+        let result = super::truncate_text(text.clone(), 4);
+        // Should truncate to the nearest valid char boundary (byte 3 = end of "你")
+        assert_eq!(result, "你");
+        assert_eq!(result.len(), 3);
+
+        // Truncate at exact boundary should work fine
+        let result = super::truncate_text(text.clone(), 6);
+        assert_eq!(result, "你好");
+
+        // Truncate larger than string should return original
+        let result = super::truncate_text(text.clone(), 100);
+        assert_eq!(result, "你好世界");
     }
 }

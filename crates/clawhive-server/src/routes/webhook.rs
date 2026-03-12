@@ -118,18 +118,38 @@ fn load_webhook_config(state: &AppState) -> Result<WebhookChannelConfig, StatusC
     let main: serde_yaml::Value =
         serde_yaml::from_str(&content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let webhook_val = &main["channels"]["webhook"];
-    serde_yaml::from_value(webhook_val.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    if webhook_val.is_null() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let cfg: WebhookChannelConfig = serde_yaml::from_value(webhook_val.clone())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !cfg.enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(cfg)
 }
 
 fn find_delivery_for_webhook(state: &AppState, source_id: &str) -> Option<DeliveryRoutingConfig> {
     let path = state.root.join("config/routing.yaml");
     let content = std::fs::read_to_string(&path).ok()?;
     let routing: clawhive_core::config::RoutingConfig = serde_yaml::from_str(&content).ok()?;
-    routing
+    let delivery = routing
         .bindings
         .iter()
         .find(|binding| binding.channel_type == "webhook" && binding.connector_id == source_id)
-        .and_then(|binding| binding.delivery.clone())
+        .and_then(|binding| binding.delivery.clone())?;
+    // Validate delivery mode — only "announce" is currently supported
+    match delivery.mode.as_str() {
+        "announce" => Some(delivery),
+        unknown => {
+            tracing::warn!(
+                source_id = %source_id,
+                mode = %unknown,
+                "unsupported delivery mode, skipping delivery"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -282,5 +302,96 @@ bindings: []
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    fn setup_disabled_webhook_config(dir: &std::path::Path) {
+        let config_dir = dir.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let main_yaml = r#"
+app:
+  name: test
+runtime:
+  max_concurrent: 4
+features:
+  multi_agent: false
+  sub_agent: false
+  tui: false
+  cli: false
+channels:
+  telegram: null
+  discord: null
+  webhook:
+    enabled: false
+    sources:
+      - source_id: test-source
+        format: raw
+        auth:
+          method: api_key
+          key: "whk_testkey1234567890"
+"#;
+        std::fs::write(config_dir.join("main.yaml"), main_yaml).unwrap();
+
+        let routing_yaml = r#"
+default_agent_id: test-agent
+bindings: []
+"#;
+        std::fs::write(config_dir.join("routing.yaml"), routing_yaml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn webhook_returns_404_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_disabled_webhook_config(tmp.path());
+        let state = test_state(tmp.path());
+        let app = webhook_router().with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/test-source")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer whk_testkey1234567890")
+            .body(Body::from(r#"{"key": "value"}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn webhook_returns_404_when_no_webhook_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let main_yaml = r#"
+app:
+  name: test
+runtime:
+  max_concurrent: 4
+features:
+  multi_agent: false
+  sub_agent: false
+  tui: false
+  cli: false
+channels:
+  telegram: null
+  discord: null
+"#;
+        std::fs::write(config_dir.join("main.yaml"), main_yaml).unwrap();
+
+        let state = test_state(tmp.path());
+        let app = webhook_router().with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/test-source")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer whk_testkey1234567890")
+            .body(Body::from(r#"{"key": "value"}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
