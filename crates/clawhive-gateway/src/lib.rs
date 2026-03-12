@@ -187,7 +187,7 @@ impl Gateway {
         self.routing.default_agent_id.clone()
     }
 
-    async fn handle_inbound_for_agent(
+    pub async fn handle_inbound_for_agent(
         &self,
         inbound: InboundMessage,
         agent_id: &str,
