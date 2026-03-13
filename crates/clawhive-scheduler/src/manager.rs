@@ -8,14 +8,14 @@ use chrono::{TimeZone, Utc};
 use clawhive_bus::EventBus;
 use clawhive_schema::{
     BusMessage, ScheduledDeliveryInfo, ScheduledDeliveryMode, ScheduledDeliveryStatus,
-    ScheduledFailureDestination, ScheduledRunStatus, ScheduledTaskPayload,
+    ScheduledFailureDestination, ScheduledRunStatus, ScheduledSessionMode, ScheduledTaskPayload,
 };
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 use crate::{
     compute_next_run_at_ms, error_backoff_ms, DeliveryMode, DeliveryStatus, HistoryStore,
-    RunRecord, RunStatus, ScheduleConfig, ScheduleState, ScheduleType, StateStore,
+    RunRecord, RunStatus, ScheduleConfig, ScheduleState, ScheduleType, SessionMode, StateStore,
 };
 
 const MAX_SLEEP_MS: u64 = 60_000;
@@ -50,6 +50,8 @@ struct CompletionEvent {
     ended_at_ms: i64,
     delivery_status: ScheduledDeliveryStatus,
     delivery_error: Option<String>,
+    response: Option<String>,
+    session_key: Option<String>,
 }
 
 fn to_scheduled_payload(config: &ScheduleConfig) -> ScheduledTaskPayload {
@@ -107,6 +109,10 @@ fn build_trigger_message(config: &ScheduleConfig) -> BusMessage {
         agent_id: config.agent_id.clone(),
         payload: to_scheduled_payload(config),
         delivery: to_scheduled_delivery(config),
+        session_mode: match config.session_mode {
+            SessionMode::Isolated => ScheduledSessionMode::Isolated,
+            SessionMode::Main => ScheduledSessionMode::Main,
+        },
         triggered_at: Utc::now(),
     }
 }
@@ -221,7 +227,7 @@ impl ScheduleManager {
                     self.check_and_trigger().await;
                 }
                 maybe_msg = completion_rx.recv() => {
-                    if let Some(BusMessage::ScheduledTaskCompleted { schedule_id, status, error, started_at, ended_at, delivery_status, delivery_error, .. }) = maybe_msg {
+                    if let Some(BusMessage::ScheduledTaskCompleted { schedule_id, status, error, started_at, ended_at, delivery_status, delivery_error, response, session_key }) = maybe_msg {
                         let completion = CompletionEvent {
                             status,
                             error,
@@ -229,6 +235,8 @@ impl ScheduleManager {
                             ended_at_ms: ended_at.timestamp_millis(),
                             delivery_status,
                             delivery_error,
+                            response,
+                            session_key,
                         };
                         self.apply_completion(
                             &schedule_id,
@@ -474,6 +482,8 @@ impl ScheduleManager {
                     status: run_status,
                     error: entry.state.last_error.clone(),
                     duration_ms,
+                    response: completion.response,
+                    session_key: completion.session_key,
                 })
                 .await;
         }
@@ -646,6 +656,8 @@ mod tests {
                     ended_at_ms: ended,
                     delivery_status: ScheduledDeliveryStatus::NotRequested,
                     delivery_error: None,
+                    response: None,
+                    session_key: None,
                 },
             )
             .await;
@@ -679,6 +691,8 @@ mod tests {
                     ended_at_ms: ended,
                     delivery_status: ScheduledDeliveryStatus::NotRequested,
                     delivery_error: None,
+                    response: None,
+                    session_key: None,
                 },
             )
             .await;
@@ -719,6 +733,8 @@ mod tests {
                     ended_at_ms: ended,
                     delivery_status: ScheduledDeliveryStatus::NotRequested,
                     delivery_error: None,
+                    response: None,
+                    session_key: None,
                 },
             )
             .await;

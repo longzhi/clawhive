@@ -119,8 +119,8 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
         conn.execute(
             r#"INSERT INTO run_history
-               (schedule_id, started_at, ended_at, status, error, duration_ms)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+               (schedule_id, started_at, ended_at, status, error, duration_ms, response, session_key)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
             params![
                 record.schedule_id,
                 record.started_at.to_rfc3339(),
@@ -128,6 +128,8 @@ impl SqliteStore {
                 format_run_status(&record.status),
                 record.error,
                 record.duration_ms as i64,
+                record.response,
+                record.session_key,
             ],
         )?;
         Ok(())
@@ -137,7 +139,7 @@ impl SqliteStore {
     pub async fn recent_runs(&self, schedule_id: &str, limit: usize) -> Result<Vec<RunRecord>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            r#"SELECT schedule_id, started_at, ended_at, status, error, duration_ms
+            r#"SELECT schedule_id, started_at, ended_at, status, error, duration_ms, response, session_key
                FROM run_history
                WHERE schedule_id = ?1
                ORDER BY started_at DESC
@@ -173,6 +175,8 @@ impl SqliteStore {
                 status: parse_run_status(&row.get::<_, String>(3)?),
                 error: row.get(4)?,
                 duration_ms: row.get::<_, i64>(5)? as u64,
+                response: row.get(6)?,
+                session_key: row.get(7)?,
             })
         })?;
 
@@ -396,6 +400,13 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
             r#"
             ALTER TABLE schedule_states ADD COLUMN last_delivery_status TEXT;
             ALTER TABLE schedule_states ADD COLUMN last_delivery_error TEXT;
+            "#,
+        ),
+        (
+            4,
+            r#"
+            ALTER TABLE run_history ADD COLUMN response TEXT;
+            ALTER TABLE run_history ADD COLUMN session_key TEXT;
             "#,
         ),
     ];

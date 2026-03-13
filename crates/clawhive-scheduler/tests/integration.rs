@@ -77,6 +77,51 @@ payload:
     ));
 }
 
+#[tokio::test]
+async fn schedule_manager_propagates_session_mode_to_bus_event() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let config_dir = temp.path().join("config/schedules.d");
+    let data_dir = temp.path().join("data/schedules");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let yaml = r#"
+schedule_id: test-main-mode
+enabled: true
+name: "Main Mode"
+schedule:
+  kind: every
+  interval_ms: 60000
+agent_id: test-agent
+session_mode: main
+payload:
+  kind: agent_turn
+  message: "Hello from main mode"
+  timeout_seconds: 300
+"#;
+    std::fs::write(config_dir.join("test-main-mode.yaml"), yaml).unwrap();
+
+    let bus = Arc::new(EventBus::new(32));
+    let manager = ScheduleManager::new(&config_dir, &data_dir, Arc::clone(&bus)).unwrap();
+    let mut rx = bus.subscribe(Topic::ScheduledTaskTriggered).await;
+
+    manager.trigger_now("test-main-mode").await.unwrap();
+
+    let msg = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for trigger")
+        .expect("channel closed");
+
+    assert!(matches!(
+        msg,
+        BusMessage::ScheduledTaskTriggered {
+            schedule_id,
+            session_mode: clawhive_schema::ScheduledSessionMode::Main,
+            ..
+        } if schedule_id == "test-main-mode"
+    ));
+}
+
 #[test]
 fn error_backoff_and_state_transition_work() {
     let mut entry = ScheduleEntry {

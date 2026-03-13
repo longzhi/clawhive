@@ -62,6 +62,10 @@ pub struct RunRecord {
     pub status: RunStatus,
     pub error: Option<String>,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub response: Option<String>,
+    #[serde(default)]
+    pub session_key: Option<String>,
 }
 
 #[cfg(test)]
