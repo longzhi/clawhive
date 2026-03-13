@@ -12,6 +12,7 @@ use axum::{
     Json, Router,
 };
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -92,6 +93,10 @@ fn read_internal_cli_token(root: &std::path::Path) -> Option<String> {
     } else {
         Some(token.to_string())
     }
+}
+
+fn verify_internal_cli_token(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 /// Quick check: system needs setup if no provider yaml or no enabled agent.
@@ -207,7 +212,7 @@ async fn auth_middleware(State(state): State<AppState>, request: Request, next: 
             .is_some_and(|provided| {
                 read_internal_cli_token(&state.root)
                     .as_deref()
-                    .is_some_and(|expected| provided == expected)
+                    .is_some_and(|expected| verify_internal_cli_token(provided, expected))
             })
     {
         return next.run(request).await;
@@ -258,7 +263,7 @@ mod tests {
     use clawhive_bus::EventBus;
     use tower::ServiceExt;
 
-    use crate::{create_router, state::AppState};
+    use crate::{create_router, state::AppState, verify_internal_cli_token};
 
     fn setup_state(web_password_hash: Option<String>) -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -573,5 +578,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn internal_cli_token_verification_rejects_mismatch() {
+        assert!(verify_internal_cli_token("token-a", "token-a"));
+        assert!(!verify_internal_cli_token("token-a", "token-b"));
+        assert!(!verify_internal_cli_token("token-a", "token-a-extra"));
     }
 }
