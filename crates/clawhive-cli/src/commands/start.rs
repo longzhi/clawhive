@@ -19,7 +19,8 @@ use clawhive_gateway::{
 
 use crate::runtime::bootstrap::{bootstrap, build_embedding_provider, build_router_from_config};
 use crate::runtime::pid::{
-    check_and_clean_pid, is_process_running, read_pid_file, remove_pid_file, write_pid_file,
+    check_and_clean_pid, is_process_running, read_pid_file, remove_pid_file, remove_port_file,
+    write_pid_file, write_port_file,
 };
 use crate::runtime::skeleton::ensure_skeleton_config;
 
@@ -145,6 +146,7 @@ fn stop_process(root: &Path) -> Result<bool> {
     if !is_process_running(pid) {
         println!("Process {pid} is not running. Cleaning up stale PID file.");
         remove_pid_file(root);
+        remove_port_file(root);
         return Ok(false);
     }
 
@@ -160,6 +162,7 @@ fn stop_process(root: &Path) -> Result<bool> {
         std::thread::sleep(Duration::from_millis(500));
         if !is_process_running(pid) {
             remove_pid_file(root);
+            remove_port_file(root);
             println!("Stopped.");
             return Ok(true);
         }
@@ -174,6 +177,7 @@ fn stop_process(root: &Path) -> Result<bool> {
     }
     std::thread::sleep(Duration::from_millis(500));
     remove_pid_file(root);
+    remove_port_file(root);
     println!("Killed.");
     Ok(true)
 }
@@ -187,6 +191,7 @@ async fn start_bot(
     // PID file: check stale → write
     check_and_clean_pid(root)?;
     write_pid_file(root)?;
+    write_port_file(root, port)?;
     tracing::info!("PID file written (pid: {})", std::process::id());
 
     let (bus, memory, gateway, config, schedule_manager, wait_task_manager, approval_registry) =
@@ -614,10 +619,12 @@ async fn start_bot(
     tokio::select! {
         result = bot_future => {
             remove_pid_file(&root_for_cleanup);
+            remove_port_file(&root_for_cleanup);
             result?;
         }
         _ = shutdown_signal => {
             remove_pid_file(&root_for_cleanup);
+            remove_port_file(&root_for_cleanup);
             tracing::info!("PID file cleaned up. Goodbye.");
         }
     }

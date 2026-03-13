@@ -6,6 +6,10 @@ pub(crate) fn pid_file_path(root: &Path) -> PathBuf {
     root.join("clawhive.pid")
 }
 
+pub(crate) fn port_file_path(root: &Path) -> PathBuf {
+    root.join("clawhive.port")
+}
+
 pub(crate) fn write_pid_file(root: &Path) -> Result<()> {
     let path = pid_file_path(root);
     std::fs::write(&path, std::process::id().to_string())?;
@@ -26,6 +30,27 @@ pub(crate) fn read_pid_file(root: &Path) -> Result<Option<u32>> {
 
 pub(crate) fn remove_pid_file(root: &Path) {
     let _ = std::fs::remove_file(pid_file_path(root));
+}
+
+pub(crate) fn write_port_file(root: &Path, port: u16) -> Result<()> {
+    std::fs::write(port_file_path(root), port.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn read_port_file(root: &Path) -> Result<Option<u16>> {
+    let path = port_file_path(root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let port = content.trim().parse::<u16>()?;
+            Ok(Some(port))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub(crate) fn remove_port_file(root: &Path) {
+    let _ = std::fs::remove_file(port_file_path(root));
 }
 
 pub(crate) fn is_process_running(pid: u32) -> bool {
@@ -60,6 +85,17 @@ mod tests {
         remove_pid_file(tmp.path());
         let pid = read_pid_file(tmp.path()).unwrap();
         assert_eq!(pid, None);
+    }
+
+    #[test]
+    fn port_file_write_read_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_port_file(tmp.path(), 8848).unwrap();
+        let port = read_port_file(tmp.path()).unwrap();
+        assert_eq!(port, Some(8848));
+        remove_port_file(tmp.path());
+        let port = read_port_file(tmp.path()).unwrap();
+        assert_eq!(port, None);
     }
 
     #[test]
