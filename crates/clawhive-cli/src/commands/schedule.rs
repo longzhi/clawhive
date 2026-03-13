@@ -162,6 +162,16 @@ fn format_history_record(record: &RunRecord) -> String {
     out
 }
 
+fn build_schedule_run_url(port: u16, schedule_id: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}"))?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("failed to construct schedule run URL"))?
+        .extend(["api", "schedules"])
+        .push(schedule_id)
+        .push("run");
+    Ok(url.to_string())
+}
+
 async fn run_schedule_via_daemon(root: &Path, schedule_id: &str) -> Result<()> {
     let pid = read_pid_file(root)?.ok_or_else(|| {
         anyhow!("clawhive daemon is not running. Start it with `clawhive up` first.")
@@ -174,7 +184,7 @@ async fn run_schedule_via_daemon(root: &Path, schedule_id: &str) -> Result<()> {
 
     let port = read_port_file(root)?.unwrap_or(DEFAULT_PORT);
     let token = ensure_internal_cli_token(root)?;
-    let url = format!("http://127.0.0.1:{port}/api/schedules/{schedule_id}/run");
+    let url = build_schedule_run_url(port, schedule_id)?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
@@ -237,7 +247,7 @@ mod tests {
     use chrono::TimeZone;
     use clawhive_scheduler::{RunRecord, RunStatus, SessionMode};
 
-    use super::{format_history_record, format_session_mode};
+    use super::{build_schedule_run_url, format_history_record, format_session_mode};
 
     #[test]
     fn history_format_includes_response_and_session_key() {
@@ -263,5 +273,14 @@ mod tests {
     fn session_mode_format_is_stable() {
         assert_eq!(format_session_mode(&SessionMode::Isolated), "isolated");
         assert_eq!(format_session_mode(&SessionMode::Main), "main");
+    }
+
+    #[test]
+    fn schedule_run_url_encodes_schedule_id() {
+        let url = build_schedule_run_url(8848, "daily digest/#1").unwrap();
+        assert_eq!(
+            url,
+            "http://127.0.0.1:8848/api/schedules/daily%20digest%2F%231/run"
+        );
     }
 }

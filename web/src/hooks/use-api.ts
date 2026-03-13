@@ -149,6 +149,8 @@ export interface ScheduleRunHistoryItem {
   status: "ok" | "error" | "skipped";
   error: string | null;
   duration_ms: number;
+  response: string | null;
+  session_key: string | null;
 }
 
 // Setup types
