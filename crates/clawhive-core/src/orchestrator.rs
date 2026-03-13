@@ -1022,10 +1022,10 @@ impl Orchestrator {
         if is_scheduled_task {
             system_prompt.push_str(
                 "\n\n## Scheduled Task Execution\n\
-                 This is an automated scheduled task. You are executing real actions, not generating example output.\n\
-                 - Steps that involve reading data, writing files, or running commands MUST be performed through tool calls.\n\
-                 - Only report actions you have actually performed through tool calls. Never fabricate results.\n\
-                 - If the task only requires generating text (e.g. a reminder or greeting), respond directly without tools.",
+                 This request comes from a scheduled workflow. Complete it normally and follow the task instructions.\n\
+                 - Use tool calls when a step requires reading data, writing files, or running commands.\n\
+                 - Do not claim actions that were not actually performed.\n\
+                 - If the task only requires text output (for example, a reminder), respond directly.",
             );
         }
 
@@ -1549,6 +1549,7 @@ impl Orchestrator {
                     scheduled_task_retries,
                     total_tool_calls,
                     tool_uses.len(),
+                    &resp.text,
                 ) {
                     scheduled_task_retries += 1;
                     tracing::warn!(
@@ -2224,16 +2225,38 @@ fn should_retry_fabricated_scheduled_response(
     retry_count: u32,
     total_tool_calls: usize,
     current_tool_calls: usize,
+    response_text: &str,
 ) -> bool {
     // Only retry when the agent has made ZERO tool calls across the entire
     // session. If tools were already called in prior iterations (e.g. the agent
     // ran a pipeline and is now composing a text summary), the current zero-tool
     // iteration is legitimate — not hallucination.
     const MAX_RETRIES: u32 = 2;
+    let text = response_text.to_lowercase();
+    let claims_execution_without_evidence = [
+        "i ran",
+        "i executed",
+        "i wrote",
+        "i saved",
+        "i updated",
+        "i created",
+        "i called",
+        "已执行",
+        "已运行",
+        "已写入",
+        "已保存",
+        "已更新",
+        "已创建",
+        "已经完成",
+    ]
+    .iter()
+    .any(|k| text.contains(k));
+
     is_scheduled_task
         && retry_count < MAX_RETRIES
         && total_tool_calls == 0
         && current_tool_calls == 0
+        && claims_execution_without_evidence
 }
 
 fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {
@@ -2450,6 +2473,33 @@ Body"#,
         assert!(!should_inject_web_search_reminder(false, false, false, 0));
         assert!(!should_inject_web_search_reminder(true, false, true, 0));
         assert!(!should_inject_web_search_reminder(true, false, false, 1));
+    }
+
+    #[test]
+    fn scheduled_retry_only_when_claiming_execution_without_tools() {
+        assert!(should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            0,
+            0,
+            "I executed all steps and saved the file.",
+        ));
+
+        assert!(!should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            0,
+            0,
+            "以下是今日技术摘要：...",
+        ));
+
+        assert!(!should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            1,
+            0,
+            "I executed all steps and saved the file.",
+        ));
     }
 
     #[test]
