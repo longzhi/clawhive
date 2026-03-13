@@ -571,6 +571,9 @@ async fn handle_scheduled_task(
                 (Some(ct), Some(ci), Some(cs), ScheduledSessionMode::Main) => {
                     (ct.clone(), ci.clone(), cs.clone())
                 }
+                (Some(ct), Some(ci), None, ScheduledSessionMode::Main) => {
+                    (ct.clone(), ci.clone(), format!("schedule:{}", schedule_id))
+                }
                 (Some(ct), Some(ci), _, ScheduledSessionMode::Isolated) => (
                     ct.clone(),
                     ci.clone(),
@@ -1783,6 +1786,72 @@ mod tests {
             let key = session_key.expect("expected session key");
             assert!(resp.contains("scheduler:sched-main-fallback-test:schedule:sched-main-fallback-test:user:scheduler"), "expected stable scheduler fallback scope in response, got: {resp}");
             assert_eq!(key, "scheduler:sched-main-fallback-test:schedule:sched-main-fallback-test:user:scheduler");
+        } else {
+            panic!("Expected BusMessage::ScheduledTaskCompleted");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_turn_main_mode_without_scope_keeps_real_channel_identity() {
+        let (gw, _tmp) = make_gateway();
+        let sched_bus = Arc::new(EventBus::new(16));
+        let mut completed_rx = sched_bus.subscribe(Topic::ScheduledTaskCompleted).await;
+
+        let _handle = spawn_scheduled_task_listener(Arc::new(gw), sched_bus.clone());
+        tokio::task::yield_now().await;
+
+        sched_bus
+            .publish(BusMessage::ScheduledTaskTriggered {
+                schedule_id: "sched-main-partial-source-test".into(),
+                agent_id: "clawhive-main".into(),
+                payload: clawhive_schema::ScheduledTaskPayload::AgentTurn {
+                    message: "/model".into(),
+                    model: None,
+                    thinking: None,
+                    timeout_seconds: 30,
+                    light_context: false,
+                },
+                delivery: clawhive_schema::ScheduledDeliveryInfo {
+                    mode: clawhive_schema::ScheduledDeliveryMode::None,
+                    channel: None,
+                    connector_id: None,
+                    source_channel_type: Some("telegram".into()),
+                    source_connector_id: Some("tg_main".into()),
+                    source_conversation_scope: None,
+                    source_user_scope: Some("user:tg_user".into()),
+                    webhook_url: None,
+                    failure_destination: None,
+                    best_effort: true,
+                },
+                session_mode: clawhive_schema::ScheduledSessionMode::Main,
+                triggered_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), completed_rx.recv())
+            .await
+            .expect("timed out waiting for ScheduledTaskCompleted")
+            .expect("channel closed");
+
+        if let BusMessage::ScheduledTaskCompleted {
+            response,
+            session_key,
+            ..
+        } = msg
+        {
+            let resp = response.expect("expected a response from /model command");
+            let key = session_key.expect("expected session key");
+            assert!(
+                resp.contains(
+                    "telegram:tg_main:schedule:sched-main-partial-source-test:user:tg_user"
+                ),
+                "expected real channel identity with stable fallback scope, got: {resp}"
+            );
+            assert_eq!(
+                key,
+                "telegram:tg_main:schedule:sched-main-partial-source-test:user:tg_user"
+            );
         } else {
             panic!("Expected BusMessage::ScheduledTaskCompleted");
         }
