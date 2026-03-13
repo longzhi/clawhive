@@ -203,6 +203,14 @@ pub enum ScheduledRunStatus {
     Skipped,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ScheduledSessionMode {
+    #[serde(rename = "isolated")]
+    Isolated,
+    #[serde(rename = "main")]
+    Main,
+}
+
 /// Decision from human approval UI
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ApprovalDecision {
@@ -290,6 +298,7 @@ pub enum BusMessage {
         agent_id: String,
         payload: ScheduledTaskPayload,
         delivery: ScheduledDeliveryInfo,
+        session_mode: ScheduledSessionMode,
         triggered_at: DateTime<Utc>,
     },
     ScheduledTaskCompleted {
@@ -303,6 +312,8 @@ pub enum BusMessage {
         #[serde(default)]
         delivery_error: Option<String>,
         response: Option<String>,
+        #[serde(default)]
+        session_key: Option<String>,
     },
     DeliverAnnounce {
         channel_type: String,
