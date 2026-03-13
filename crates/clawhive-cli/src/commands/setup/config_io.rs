@@ -97,10 +97,6 @@ pub(super) fn save_main_config(config_root: &Path, config: &MainConfig) -> Resul
     Ok(())
 }
 
-pub(super) fn provider_models_for_id(provider_id: &str) -> Vec<String> {
-    clawhive_schema::provider_presets::provider_models_for_id(provider_id)
-}
-
 pub(super) fn format_model_label(model_id: &str) -> String {
     let parts: Vec<&str> = model_id.splitn(2, '/').collect();
     if parts.len() == 2 {

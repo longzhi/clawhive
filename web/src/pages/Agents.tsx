@@ -38,7 +38,7 @@ function NewAgentDialog() {
   const { data: providers } = useProviders();
 
   // Collect all models from configured providers
-  const allModels = providers?.flatMap((p) => p.models) ?? [];
+  const allModels = providers?.flatMap((p) => p.models.map((m) => `${p.provider_id}/${m}`)) ?? [];
 
   const reset = () => {
     setAgentId("");
@@ -178,7 +178,7 @@ function AgentDetailDialog({
   const { data: detail, isLoading } = useAgent(agentId);
   const updateAgent = useUpdateAgent();
   const { data: providers } = useProviders();
-  const allModels = providers?.flatMap((p) => p.models) ?? [];
+  const allModels = providers?.flatMap((p) => p.models.map((m) => `${p.provider_id}/${m}`)) ?? [];
 
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<AgentDetail | null>(null);

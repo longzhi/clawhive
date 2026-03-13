@@ -166,6 +166,7 @@ export interface CreateProviderRequest {
   api_base: string;
   api_key?: string;
   auth_profile?: string;
+  provider_type?: string;
   models: string[];
 }
 

@@ -5,9 +5,7 @@ use anyhow::Result;
 use console::Term;
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 
-use super::config_io::{
-    format_model_label, input_or_back, input_or_back_with_default, provider_models_for_id,
-};
+use super::config_io::{format_model_label, input_or_back, input_or_back_with_default};
 use super::scan::ConfigState;
 use super::ui::print_done;
 
@@ -64,8 +62,8 @@ pub(super) fn handle_add_agent(
 
     let mut models = Vec::new();
     for p in &state.providers {
-        for m in provider_models_for_id(&p.provider_id) {
-            models.push(m);
+        for m in &p.models {
+            models.push(format!("{}/{}", p.provider_id, m));
         }
     }
     if models.is_empty() {

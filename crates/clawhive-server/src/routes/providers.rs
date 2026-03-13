@@ -33,6 +33,8 @@ pub struct CreateProviderRequest {
     #[serde(default)]
     pub auth_profile: Option<String>,
     #[serde(default)]
+    pub provider_type: Option<String>,
+    #[serde(default)]
     pub models: Vec<String>,
 }
 
@@ -153,6 +155,13 @@ async fn create_provider(
         val.insert(
             serde_yaml::Value::String("auth_profile".to_string()),
             serde_yaml::Value::String(auth_profile),
+        );
+    }
+
+    if let Some(pt) = body.provider_type.filter(|t| !t.trim().is_empty()) {
+        val.insert(
+            serde_yaml::Value::String("provider_type".to_string()),
+            serde_yaml::Value::String(pt),
         );
     }
 
@@ -504,5 +513,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_custom_provider_writes_provider_type() {
+        let (state, _tmp) = setup_state();
+        let app = router().with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"provider_id":"my-vllm","provider_type":"custom","api_base":"http://localhost:8000/v1","models":["llama-3"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let content =
+            std::fs::read_to_string(state.root.join("config/providers.d/my-vllm.yaml")).unwrap();
+        assert!(content.contains("provider_type: custom"));
+        assert!(content.contains("my-vllm"));
+        assert!(content.contains("http://localhost:8000/v1"));
     }
 }

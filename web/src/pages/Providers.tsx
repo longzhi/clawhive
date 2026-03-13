@@ -191,6 +191,8 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const [selected, setSelected] = useState<ProviderPreset | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [apiBase, setApiBase] = useState("");
+  const [customProviderId, setCustomProviderId] = useState("");
+  const [customModelInput, setCustomModelInput] = useState("");
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [customModels, setCustomModels] = useState<string[]>([]);
   const createProvider = useCreateProvider();
@@ -203,6 +205,8 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const hasOpenAiOAuth =
     authStatus?.profiles.some((profile) => profile.kind === "OpenAiOAuth") ?? false;
 
+  const isCustom = selected?.id === "custom";
+
   const presetModelIds = (preset: ProviderPreset) =>
     preset.models.map((model) => model.id);
 
@@ -210,6 +214,8 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
     setSelected(null);
     setApiKey("");
     setApiBase("");
+    setCustomProviderId("");
+    setCustomModelInput("");
     setSelectedModels(new Set());
     setCustomModels([]);
   };
@@ -217,8 +223,15 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const handleSelect = (p: ProviderPreset) => {
     setSelected(p);
     setApiBase(p.api_base);
-    setSelectedModels(new Set(presetModelIds(p)));
-    setCustomModels([]);
+    if (p.id === "custom") {
+      setSelectedModels(new Set());
+      setCustomModels([]);
+      setCustomProviderId("");
+      setCustomModelInput("");
+    } else {
+      setSelectedModels(new Set(presetModelIds(p)));
+      setCustomModels([]);
+    }
   };
 
   const toggleModel = (model: string) => {
@@ -232,19 +245,33 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
 
   const handleSubmit = async () => {
     if (!selected) return;
-    const modelList = Array.from(selectedModels);
     try {
-      await createProvider.mutateAsync({
-        provider_id: selected.id,
-        api_base: apiBase || selected.api_base,
-        api_key: selected.needs_key ? apiKey || undefined : undefined,
-        auth_profile:
-          selected.id === "openai-chatgpt"
-            ? openAiOAuthProfileName
-            : undefined,
-        models: modelList.length > 0 ? modelList : presetModelIds(selected),
-      });
-      toast.success(`Provider ${selected.name} added`);
+      if (isCustom) {
+        const models = customModelInput.trim()
+          ? [customModelInput.trim()]
+          : [];
+        await createProvider.mutateAsync({
+          provider_id: customProviderId,
+          provider_type: "custom",
+          api_base: apiBase,
+          api_key: apiKey || undefined,
+          models,
+        });
+        toast.success(`Custom provider ${customProviderId} added`);
+      } else {
+        const modelList = Array.from(selectedModels);
+        await createProvider.mutateAsync({
+          provider_id: selected.id,
+          api_base: apiBase || selected.api_base,
+          api_key: selected.needs_key ? apiKey || undefined : undefined,
+          auth_profile:
+            selected.id === "openai-chatgpt"
+              ? openAiOAuthProfileName
+              : undefined,
+          models: modelList.length > 0 ? modelList : presetModelIds(selected),
+        });
+        toast.success(`Provider ${selected.name} added`);
+      }
       reset();
       setOpen(false);
     } catch (e: unknown) {
@@ -256,6 +283,10 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
       }
     }
   };
+
+  const submitDisabled = isCustom
+    ? !customProviderId.trim() || !apiBase.trim() || !customModelInput.trim() || createProvider.isPending
+    : !selected || createProvider.isPending || (selected.needs_key && !apiKey) || (selected.id === "openai-chatgpt" && !hasOpenAiOAuth);
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset(); }}>
@@ -273,7 +304,7 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
 
         <div className="grid grid-cols-3 gap-2">
           {(presets ?? []).map((p) => {
-            const exists = existingIds.has(p.id);
+            const exists = p.id !== "custom" && existingIds.has(p.id);
             return (
               <button
                 key={p.id}
@@ -294,7 +325,57 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
           })}
         </div>
 
-        {selected && (
+        {selected && isCustom && (
+          <div className="space-y-3 rounded-lg border p-4">
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Provider ID
+              </label>
+              <Input
+                placeholder="e.g. my-vllm, local-llm"
+                value={customProviderId}
+                onChange={(e) => setCustomProviderId(e.target.value.replace(/[^a-z0-9-]/g, ""))}
+                className="mt-1 font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                API Base URL
+              </label>
+              <Input
+                placeholder="e.g. http://localhost:8000/v1"
+                value={apiBase}
+                onChange={(e) => setApiBase(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                API Key <span className="normal-case font-normal">(optional)</span>
+              </label>
+              <Input
+                type="password"
+                placeholder="Leave empty if not needed"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Model
+              </label>
+              <Input
+                placeholder="e.g. meta-llama/Llama-3.3-70B-Instruct"
+                value={customModelInput}
+                onChange={(e) => setCustomModelInput(e.target.value)}
+                className="mt-1 font-mono"
+              />
+            </div>
+          </div>
+        )}
+
+        {selected && !isCustom && (
           <div className="space-y-3 rounded-lg border p-4">
             {selected.id === "openai-chatgpt" && (
               <OpenAiOAuthSetup />
@@ -344,12 +425,7 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
         <DialogFooter>
           <Button
             onClick={handleSubmit}
-            disabled={
-              !selected ||
-              createProvider.isPending ||
-              (selected.needs_key && !apiKey) ||
-              (selected.id === "openai-chatgpt" && !hasOpenAiOAuth)
-            }
+            disabled={submitDisabled}
           >
             {createProvider.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add Provider"}
           </Button>

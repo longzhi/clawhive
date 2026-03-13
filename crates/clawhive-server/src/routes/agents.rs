@@ -23,9 +23,11 @@ pub struct AgentDetail {
     pub enabled: bool,
     pub identity: AgentIdentity,
     pub model_policy: ModelPolicy,
+    #[serde(default)]
     pub tool_policy: ToolPolicy,
+    #[serde(default)]
     pub memory_policy: MemoryPolicy,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_agent: Option<SubAgentPolicy>,
 }
 
@@ -38,18 +40,39 @@ pub struct AgentIdentity {
 #[derive(Serialize, Deserialize)]
 pub struct ModelPolicy {
     pub primary: String,
+    #[serde(default)]
     pub fallbacks: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct ToolPolicy {
+    #[serde(default)]
     pub allow: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct MemoryPolicy {
+    #[serde(default = "default_memory_mode")]
     pub mode: String,
+    #[serde(default = "default_memory_write_scope")]
     pub write_scope: String,
+}
+
+impl Default for MemoryPolicy {
+    fn default() -> Self {
+        Self {
+            mode: "standard".to_string(),
+            write_scope: "all".to_string(),
+        }
+    }
+}
+
+fn default_memory_mode() -> String {
+    "standard".to_string()
+}
+
+fn default_memory_write_scope() -> String {
+    "all".to_string()
 }
 
 #[derive(Serialize, Deserialize)]

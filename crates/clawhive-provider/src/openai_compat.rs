@@ -82,9 +82,14 @@ pub fn qianfan(api_key: impl Into<String>) -> OpenAiProvider {
     OpenAiProvider::new(api_key, "https://qianfan.baidubce.com/v2")
 }
 
-/// Custom OpenAI-compatible endpoint
+/// Custom OpenAI-compatible endpoint.
+///
+/// `strip_reasoning` is enabled so that `reasoning_effort` is never sent —
+/// most third-party OpenAI-compatible APIs reject unknown parameters.
 pub fn custom(api_key: impl Into<String>, base_url: impl Into<String>) -> OpenAiProvider {
-    OpenAiProvider::new(api_key, base_url)
+    let mut p = OpenAiProvider::new(api_key, base_url);
+    p.set_strip_reasoning(true);
+    p
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub enum AuthSummary {
 pub struct ProviderInfo {
     pub provider_id: String,
     pub auth_summary: AuthSummary,
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,8 @@ struct RawProviderYaml {
     api_key: Option<String>,
     #[serde(default)]
     auth_profile: Option<String>,
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 pub fn scan_config(root: &Path) -> ConfigState {
@@ -100,6 +103,7 @@ fn scan_providers(config_dir: &Path) -> Vec<ProviderInfo> {
             providers.push(ProviderInfo {
                 provider_id: provider.provider_id,
                 auth_summary,
+                models: provider.models,
             });
         }
     }

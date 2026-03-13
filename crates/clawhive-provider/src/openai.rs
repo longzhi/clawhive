@@ -15,6 +15,9 @@ pub struct OpenAiProvider {
     api_key: String,
     api_base: String,
     auth_profile: Option<AuthProfile>,
+    /// When true, omit `reasoning_effort` from API requests (for custom
+    /// OpenAI-compatible endpoints that don't support it).
+    strip_reasoning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,7 +74,12 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             api_base: api_base.into().trim_end_matches('/').to_string(),
             auth_profile,
+            strip_reasoning: false,
         }
+    }
+
+    pub fn set_strip_reasoning(&mut self, strip: bool) {
+        self.strip_reasoning = strip;
     }
 
     fn auth_bearer_token(&self) -> &str {
@@ -82,7 +90,11 @@ impl OpenAiProvider {
         }
     }
 
-    pub(crate) fn to_api_request(request: LlmRequest, stream: bool) -> ApiRequest {
+    pub(crate) fn to_api_request(
+        request: LlmRequest,
+        stream: bool,
+        strip_reasoning: bool,
+    ) -> ApiRequest {
         let tools = if request.tools.is_empty() {
             None
         } else {
@@ -102,9 +114,13 @@ impl OpenAiProvider {
             )
         };
 
-        let reasoning_effort = request
-            .thinking_level
-            .map(|level| level.openai_reasoning_effort().to_string());
+        let reasoning_effort = if strip_reasoning {
+            None
+        } else {
+            request
+                .thinking_level
+                .map(|level| level.openai_reasoning_effort().to_string())
+        };
 
         ApiRequest {
             model: request.model,
@@ -128,7 +144,7 @@ impl OpenAiProvider {
 impl LlmProvider for OpenAiProvider {
     async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
         let url = format!("{}/chat/completions", self.api_base);
-        let payload = Self::to_api_request(request, false);
+        let payload = Self::to_api_request(request, false, self.strip_reasoning);
 
         let resp = match self
             .client
@@ -170,7 +186,7 @@ impl LlmProvider for OpenAiProvider {
         request: LlmRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         let url = format!("{}/chat/completions", self.api_base);
-        let payload = Self::to_api_request(request, true);
+        let payload = Self::to_api_request(request, true, self.strip_reasoning);
 
         let resp = match self
             .client
@@ -714,7 +730,7 @@ mod tests {
             thinking_level: None,
         };
 
-        let api = OpenAiProvider::to_api_request(req, false);
+        let api = OpenAiProvider::to_api_request(req, false, false);
         let json = serde_json::to_value(api).unwrap();
         assert!(json["tools"].is_array());
         assert_eq!(json["messages"][1]["role"], "assistant");
@@ -725,7 +741,7 @@ mod tests {
     #[test]
     fn to_api_request_includes_system_as_first_message() {
         let req = LlmRequest::simple("gpt-4o-mini".into(), Some("be concise".into()), "hi".into());
-        let api = OpenAiProvider::to_api_request(req, false);
+        let api = OpenAiProvider::to_api_request(req, false, false);
         assert_eq!(api.messages[0].role, "system");
         assert_eq!(
             api.messages[0].content,
@@ -844,7 +860,7 @@ mod tests {
             tools: vec![],
             thinking_level: None,
         };
-        let api = OpenAiProvider::to_api_request(req, false);
+        let api = OpenAiProvider::to_api_request(req, false, false);
         assert_eq!(api.messages[0].role, "tool");
         assert_eq!(api.messages[0].tool_call_id.as_deref(), Some("call_1"));
     }
@@ -1020,7 +1036,7 @@ mod tests {
             tools: vec![],
             thinking_level: Some(crate::ThinkingLevel::High),
         };
-        let api_req = OpenAiProvider::to_api_request(req, false);
+        let api_req = OpenAiProvider::to_api_request(req, false, false);
         let json = serde_json::to_value(&api_req).unwrap();
         assert_eq!(json["reasoning_effort"], "high");
     }
@@ -1035,8 +1051,26 @@ mod tests {
             tools: vec![],
             thinking_level: None,
         };
-        let api_req = OpenAiProvider::to_api_request(req, false);
+        let api_req = OpenAiProvider::to_api_request(req, false, false);
         let json = serde_json::to_value(&api_req).unwrap();
         assert!(json.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn to_api_request_strips_reasoning_effort_when_flag_set() {
+        let req = LlmRequest {
+            model: "o4-mini".into(),
+            system: None,
+            messages: vec![LlmMessage::user("test")],
+            max_tokens: 128,
+            tools: vec![],
+            thinking_level: Some(crate::ThinkingLevel::High),
+        };
+        let api_req = OpenAiProvider::to_api_request(req, false, true);
+        let json = serde_json::to_value(&api_req).unwrap();
+        assert!(
+            json.get("reasoning_effort").is_none(),
+            "reasoning_effort should be stripped for custom providers"
+        );
     }
 }

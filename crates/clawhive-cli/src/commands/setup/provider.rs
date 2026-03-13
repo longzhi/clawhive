@@ -35,6 +35,7 @@ pub(super) enum ProviderId {
     MiniMax,
     Volcengine,
     Qianfan,
+    Custom,
 }
 
 pub(super) const ALL_PROVIDERS: &[ProviderId] = &[
@@ -54,6 +55,7 @@ pub(super) const ALL_PROVIDERS: &[ProviderId] = &[
     ProviderId::MiniMax,
     ProviderId::Volcengine,
     ProviderId::Qianfan,
+    ProviderId::Custom,
 ];
 
 impl ProviderId {
@@ -75,6 +77,7 @@ impl ProviderId {
             Self::MiniMax => "minimax",
             Self::Volcengine => "volcengine",
             Self::Qianfan => "qianfan",
+            Self::Custom => "custom",
         }
     }
 
@@ -103,7 +106,7 @@ impl ProviderId {
     }
 
     fn needs_custom_base_url(self) -> bool {
-        matches!(self, Self::AzureOpenAi)
+        matches!(self, Self::AzureOpenAi | Self::Custom)
     }
 }
 
@@ -124,6 +127,12 @@ pub(super) async fn handle_add_provider(
         Some(p) => p,
         None => return Ok(()),
     };
+
+    // Custom providers have a separate flow — they can be added multiple times
+    // with different IDs, so skip the "already configured" check.
+    if provider == ProviderId::Custom {
+        return handle_add_custom_provider(config_root, term, theme).await;
+    }
 
     // For OpenAI we allow separate API-key ("openai") and OAuth ("openai-chatgpt")
     // configs to coexist, so only block when both are already present.
@@ -431,6 +440,73 @@ fn generate_provider_yaml(
     }
 }
 
+async fn handle_add_custom_provider(
+    config_root: &Path,
+    term: &Term,
+    theme: &ColorfulTheme,
+) -> Result<()> {
+    // 1. Ask for a unique provider ID (slug)
+    let custom_id = match input_or_back(theme, "Provider ID (e.g. my-vllm, local-llm)")? {
+        Some(id) if !id.is_empty() => id,
+        Some(_) => anyhow::bail!("Provider ID cannot be empty"),
+        None => return Ok(()),
+    };
+
+    // 2. API base URL (required)
+    let api_base = match input_or_back(theme, "API base URL (e.g. http://localhost:8000/v1)")? {
+        Some(b) if !b.is_empty() => b,
+        Some(_) => anyhow::bail!("API base URL cannot be empty"),
+        None => return Ok(()),
+    };
+
+    // 3. API key (optional — local servers may not need one)
+    let api_key: String = Input::with_theme(theme)
+        .with_prompt("API key (leave empty if not needed)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    // 4. Model name
+    let model = match input_or_back(theme, "Model name (e.g. meta-llama/Llama-3.3-70B-Instruct)")? {
+        Some(m) if !m.is_empty() => m,
+        Some(_) => anyhow::bail!("Model name cannot be empty"),
+        None => return Ok(()),
+    };
+
+    let yaml = generate_custom_provider_yaml(&custom_id, &api_base, &api_key, &model);
+
+    let providers_dir = config_root.join("config/providers.d");
+    fs::create_dir_all(&providers_dir)
+        .with_context(|| format!("failed to create {}", providers_dir.display()))?;
+    let target = providers_dir.join(format!("{custom_id}.yaml"));
+    fs::write(&target, &yaml).with_context(|| format!("failed to write {}", target.display()))?;
+
+    print_done(
+        term,
+        &format!(
+            "Custom provider saved: {}",
+            display_rel(config_root, &target)
+        ),
+    );
+    Ok(())
+}
+
+fn generate_custom_provider_yaml(
+    provider_id: &str,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+) -> String {
+    if api_key.is_empty() {
+        format!(
+            "provider_id: {provider_id}\nprovider_type: custom\nenabled: true\napi_base: {api_base}\nmodels:\n  - {model}\n",
+        )
+    } else {
+        format!(
+            "provider_id: {provider_id}\nprovider_type: custom\nenabled: true\napi_base: {api_base}\napi_key: \"{api_key}\"\nmodels:\n  - {model}\n",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::config_io::ensure_required_dirs;
@@ -494,8 +570,11 @@ mod tests {
 
     #[test]
     fn provider_model_aliases_are_fully_qualified() {
-        use super::super::config_io::provider_models_for_id;
+        use clawhive_schema::provider_presets::provider_models_for_id;
         for provider in ALL_PROVIDERS {
+            if *provider == ProviderId::Custom {
+                continue;
+            }
             let models = provider_models_for_id(provider.as_str());
             let prefix = provider.as_str();
             assert!(
@@ -510,8 +589,11 @@ mod tests {
 
     #[test]
     fn provider_models_for_id_returns_known_provider_models() {
-        use super::super::config_io::provider_models_for_id;
+        use clawhive_schema::provider_presets::provider_models_for_id;
         for provider in ALL_PROVIDERS {
+            if *provider == ProviderId::Custom {
+                continue;
+            }
             let models = provider_models_for_id(provider.as_str());
             assert!(
                 !models.is_empty(),
@@ -544,5 +626,41 @@ mod tests {
         let updated = std::fs::read_to_string(&target).expect("read updated provider file");
         assert!(updated.contains("provider_id: openai"));
         assert!(!updated.contains("old: value"));
+    }
+
+    #[test]
+    fn custom_provider_yaml_without_key() {
+        let yaml = generate_custom_provider_yaml(
+            "my-vllm",
+            "http://localhost:8000/v1",
+            "",
+            "meta-llama/Llama-3.3-70B",
+        );
+        assert!(yaml.contains("provider_id: my-vllm"));
+        assert!(yaml.contains("provider_type: custom"));
+        assert!(yaml.contains("api_base: http://localhost:8000/v1"));
+        assert!(yaml.contains("meta-llama/Llama-3.3-70B"));
+        assert!(!yaml.contains("api_key"));
+    }
+
+    #[test]
+    fn custom_provider_yaml_with_key() {
+        let yaml = generate_custom_provider_yaml(
+            "remote-llm",
+            "https://my-server.example.com/v1",
+            "sk-custom-key",
+            "my-model",
+        );
+        assert!(yaml.contains("provider_id: remote-llm"));
+        assert!(yaml.contains("provider_type: custom"));
+        assert!(yaml.contains("api_key: \"sk-custom-key\""));
+        assert!(yaml.contains("my-model"));
+    }
+
+    #[test]
+    fn custom_provider_models_returns_empty() {
+        use clawhive_schema::provider_presets::provider_models_for_id;
+        let models = provider_models_for_id("custom");
+        assert!(models.is_empty());
     }
 }

@@ -289,6 +289,15 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
             m("ernie-3.5-8k", 8_192, 4096, false, false),
         ],
     },
+    ProviderPreset {
+        id: "custom",
+        name: "Custom (OpenAI Compatible)",
+        api_base: "",
+        needs_key: false,
+        needs_base_url: true,
+        default_model: "",
+        models: &[],
+    },
 ];
 
 /// Look up a provider preset by id.

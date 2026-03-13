@@ -315,6 +315,8 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub auth_profile: Option<String>,
     #[serde(default)]
+    pub provider_type: Option<String>,
+    #[serde(default)]
     pub models: Vec<String>,
 }
 

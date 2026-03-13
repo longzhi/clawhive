@@ -21,7 +21,7 @@ use clawhive_memory::embedding::{
 };
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
-    minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
+    custom, minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
     AnthropicProvider, AzureOpenAiProvider, LlmProvider, LlmRequest, LlmResponse,
     OpenAiChatGptProvider, OpenAiProvider, ProviderRegistry, StreamChunk,
 };
@@ -805,7 +805,21 @@ pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRout
                 }
             }
             _ => {
-                tracing::warn!("Unknown provider: {}", provider_config.provider_id);
+                if provider_config.provider_type.as_deref() == Some("custom") {
+                    let api_key = provider_config
+                        .api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
+                        .unwrap_or_default();
+                    let provider = Arc::new(custom(api_key, provider_config.api_base.clone()));
+                    registry.register(&provider_config.provider_id, provider);
+                    tracing::info!(
+                        provider_id = %provider_config.provider_id,
+                        "custom OpenAI-compatible provider registered"
+                    );
+                } else {
+                    tracing::warn!("Unknown provider: {}", provider_config.provider_id);
+                }
             }
         }
     }
@@ -1041,6 +1055,7 @@ mod tests {
                     api_base: "https://api.openai.com/v1".to_string(),
                     api_key: None,
                     auth_profile: Some("named-openai".to_string()),
+                    provider_type: None,
                     models: Vec::new(),
                 },
                 ProviderConfig {
@@ -1049,6 +1064,7 @@ mod tests {
                     api_base: "https://chatgpt.com/backend-api/codex".to_string(),
                     api_key: None,
                     auth_profile: None,
+                    provider_type: None,
                     models: Vec::new(),
                 },
                 ProviderConfig {
@@ -1057,6 +1073,7 @@ mod tests {
                     api_base: "https://api.anthropic.com".to_string(),
                     api_key: None,
                     auth_profile: Some("anthropic-session".to_string()),
+                    provider_type: None,
                     models: Vec::new(),
                 },
                 ProviderConfig {
@@ -1065,6 +1082,7 @@ mod tests {
                     api_base: "https://api.openai.com/v1".to_string(),
                     api_key: None,
                     auth_profile: Some("disabled-openai".to_string()),
+                    provider_type: None,
                     models: Vec::new(),
                 },
             ],
