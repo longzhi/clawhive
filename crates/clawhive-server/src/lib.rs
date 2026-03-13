@@ -21,6 +21,8 @@ pub(crate) const SESSION_COOKIE_NAME: &str = "clawhive_session";
 pub(crate) const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const SETUP_COOKIE_NAME: &str = "clawhive_setup";
 pub(crate) const SETUP_TTL: Duration = Duration::from_secs(30 * 60);
+const INTERNAL_CLI_TOKEN_HEADER: &str = "x-clawhive-cli-token";
+const INTERNAL_CLI_TOKEN_FILE: &str = "data/cli_internal_token";
 
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -75,6 +77,21 @@ fn is_setup_wizard_path(path: &str) -> bool {
         "/api/auth/openai/",
     ];
     setup_paths.iter().any(|p| path.starts_with(p))
+}
+
+fn is_schedule_run_path(path: &str) -> bool {
+    path.starts_with("/api/schedules/") && path.ends_with("/run")
+}
+
+fn read_internal_cli_token(root: &std::path::Path) -> Option<String> {
+    let path = root.join(INTERNAL_CLI_TOKEN_FILE);
+    let token = std::fs::read_to_string(path).ok()?;
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
 }
 
 /// Quick check: system needs setup if no provider yaml or no enabled agent.
@@ -179,6 +196,22 @@ pub(crate) fn is_valid_session(state: &AppState, token: &str) -> bool {
 
 async fn auth_middleware(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
+
+    if is_schedule_run_path(path)
+        && request
+            .headers()
+            .get(INTERNAL_CLI_TOKEN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some_and(|provided| {
+                read_internal_cli_token(&state.root)
+                    .as_deref()
+                    .is_some_and(|expected| provided == expected)
+            })
+    {
+        return next.run(request).await;
+    }
 
     if !path.starts_with("/api/")
         || is_exempt_path(path, &state)
@@ -507,5 +540,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn schedule_run_allows_internal_cli_token_without_cookie() {
+        let (state, tmp) = setup_state(Some(hash_password("correct")));
+
+        std::fs::create_dir_all(tmp.path().join("config/schedules.d")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("data/schedules")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("data")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/schedules.d/daily.yaml"),
+            "schedule_id: daily\nenabled: true\nname: Daily\nschedule:\n  kind: every\n  interval_ms: 60000\nagent_id: clawhive-main\nsession_mode: isolated\npayload:\n  kind: direct_deliver\n  text: test\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("data/schedules/state.json"), "{}").unwrap();
+
+        let token = "test-internal-token";
+        std::fs::write(tmp.path().join("data/cli_internal_token"), token).unwrap();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/schedules/daily/run")
+                    .header("x-clawhive-cli-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 }

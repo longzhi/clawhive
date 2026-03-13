@@ -34,6 +34,8 @@ pub struct ScheduleRunHistoryItem {
     pub status: RunStatus,
     pub error: Option<String>,
     pub duration_ms: u64,
+    pub response: Option<String>,
+    pub session_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +141,8 @@ pub async fn schedule_history(
                 status: record.status,
                 error: record.error,
                 duration_ms: record.duration_ms,
+                response: record.response,
+                session_key: record.session_key,
             })
             .collect(),
     ))
@@ -231,7 +235,10 @@ async fn delete_schedule(
 mod tests {
     use std::sync::Arc;
 
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
     use clawhive_bus::EventBus;
     use tower::ServiceExt;
 
@@ -435,5 +442,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn history_includes_response_and_session_key() {
+        let (state, _tmp) = setup_state();
+        write_file(
+            &state.root.join("data/schedules/runs/daily.jsonl"),
+            r#"{"schedule_id":"daily","started_at":"2026-03-13T00:00:00Z","ended_at":"2026-03-13T00:00:05Z","status":"ok","error":null,"duration_ms":5000,"response":"final notify body","session_key":"discord:my_discord_bot:schedule:daily:uuid:user:1"}
+"#,
+        );
+
+        let app = router().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/daily/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json[0]["response"], "final notify body");
+        assert_eq!(
+            json[0]["session_key"],
+            "discord:my_discord_bot:schedule:daily:uuid:user:1"
+        );
     }
 }
