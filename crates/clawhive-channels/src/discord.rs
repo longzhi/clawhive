@@ -3,10 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
-use clawhive_schema::{
-    Attachment, AttachmentKind, BusMessage, GroupContext, GroupMember, InboundMessage,
-    OutboundMessage,
-};
+use clawhive_schema::{Attachment, AttachmentKind, BusMessage, InboundMessage, OutboundMessage};
 use serenity::all::{
     ButtonStyle, ChannelId, Client, Command, CommandInteraction, CommandOptionType,
     ComponentInteraction, Context, CreateActionRow, CreateButton, CreateCommand,
@@ -54,7 +51,6 @@ impl DiscordAdapter {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         }
     }
@@ -334,35 +330,6 @@ impl EventHandler for DiscordHandler {
                 file_name: Some(att.filename.clone()),
                 size: Some(att.size as u64),
             });
-        }
-
-        // Populate group context for guild channels
-        if let Some(gid) = msg.guild_id {
-            let mut group_ctx = GroupContext {
-                name: None,
-                is_group: true,
-                members: vec![],
-            };
-
-            // Fetch guild info (cached) - includes channel name and members
-            if let Some(guild) = ctx.cache.guild(gid) {
-                // Get channel name
-                if let Some(channel) = guild.channels.get(&channel_id) {
-                    group_ctx.name = Some(channel.name.clone());
-                }
-
-                // Get guild members
-                for member in guild.members.values() {
-                    group_ctx.members.push(GroupMember {
-                        id: member.user.id.to_string(),
-                        name: member.display_name().to_string(),
-                        is_bot: member.user.bot,
-                        agent_id: None, // Will be matched by orchestrator
-                    });
-                }
-            }
-
-            inbound.group_context = Some(group_ctx);
         }
 
         let _ = channel_id.broadcast_typing(&ctx.http).await;

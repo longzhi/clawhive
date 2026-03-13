@@ -101,7 +101,6 @@ impl DingTalkAdapter {
             mention_target: None,
             message_id: Some(msg.msg_id.clone()),
             attachments: vec![],
-            group_context: None,
             message_source: None,
         }
     }

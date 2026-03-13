@@ -44,7 +44,6 @@ impl WhatsAppAdapter {
             mention_target: None,
             message_id,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         }
     }

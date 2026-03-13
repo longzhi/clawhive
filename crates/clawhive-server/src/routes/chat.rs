@@ -179,8 +179,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     mention_target: None,
                                     message_id: None,
                                     attachments: attachments.iter().map(map_attachment).collect(),
-                                    group_context: None,
-                                    message_source: None,
+                                                            message_source: None,
                                 };
 
                                 {

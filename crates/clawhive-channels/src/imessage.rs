@@ -44,7 +44,6 @@ impl IMessageAdapter {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         }
     }
