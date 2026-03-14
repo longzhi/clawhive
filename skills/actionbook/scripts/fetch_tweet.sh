@@ -4,7 +4,7 @@
 
 set -e
 
-ACTIONBOOK="/tmp/actionbook/packages/actionbook-rs/target/release/actionbook"
+ACTIONBOOK="$(command -v actionbook)" || { echo "actionbook not found in PATH"; exit 1; }
 TWEET_URL="$1"
 OUTPUT="${2:-tweet_output.txt}"
 

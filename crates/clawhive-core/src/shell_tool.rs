@@ -472,6 +472,25 @@ pub fn augment_path_like_host(current_path: &str, candidates: &[String]) -> Stri
     }
 }
 
+/// On macOS `/tmp`, `/var`, `/etc` are symlinks to `/private/{…}`.
+/// Returns the alternate form so sandbox patterns cover both.
+fn macos_symlink_alias(path: &str) -> Option<String> {
+    for prefix in &["/tmp", "/var", "/etc"] {
+        let private = format!("/private{prefix}");
+        if let Some(rest) = path.strip_prefix(private.as_str()) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return Some(format!("{prefix}{rest}"));
+            }
+        }
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return Some(format!("{private}{rest}"));
+            }
+        }
+    }
+    None
+}
+
 fn base_permissions(
     workspace: &Path,
     extra_dirs: &[(PathBuf, AccessLevel)],
@@ -487,12 +506,22 @@ fn base_permissions(
 
     for (dir, level) in extra_dirs {
         let dir_self = dir.display().to_string();
-        let pattern = format!("{dir_self}/**");
-        read_patterns.push(dir_self.clone());
-        read_patterns.push(pattern.clone());
-        if *level == AccessLevel::Rw {
-            write_patterns.push(dir_self);
-            write_patterns.push(pattern);
+
+        // Collect the canonical path and its symlink alias (if any).
+        // On macOS /tmp, /var, /etc are symlinks to /private/{…}; the sandbox
+        // checks literal strings, so we must include both forms.
+        let mut paths = vec![dir_self.clone()];
+        if let Some(alias) = macos_symlink_alias(&dir_self) {
+            paths.push(alias);
+        }
+
+        for p in &paths {
+            read_patterns.push(p.clone());
+            read_patterns.push(format!("{p}/**"));
+            if *level == AccessLevel::Rw {
+                write_patterns.push(p.clone());
+                write_patterns.push(format!("{p}/**"));
+            }
         }
     }
 

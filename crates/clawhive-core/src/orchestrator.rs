@@ -1738,6 +1738,13 @@ impl Orchestrator {
             total_loop_ms = loop_started.elapsed().as_millis() as u64,
             "tool_use_loop exhausted iterations, requesting final answer without tools"
         );
+
+        // Add a nudge so the LLM produces a text reply instead of empty content
+        messages.push(LlmMessage::user(
+            "You have reached the maximum number of tool iterations. \
+             Please provide your final response to the user based on the information gathered above."
+        ));
+
         let final_req = LlmRequest {
             model: primary.into(),
             system: system.clone(),
@@ -1746,10 +1753,33 @@ impl Orchestrator {
             tools: vec![],
             thinking_level,
         };
-        let resp = self
+        let mut resp = self
             .router
             .chat_with_tools(primary, fallbacks, final_req)
             .await?;
+
+        // Fallback: if the LLM still returned empty, extract the last successful
+        // tool result so the user sees *something* useful.
+        if resp.text.trim().is_empty() {
+            tracing::warn!(
+                agent_id = %agent_id,
+                "final answer still empty after nudge, extracting last tool result as fallback"
+            );
+            let fallback = messages
+                .iter()
+                .rev()
+                .flat_map(|m| m.content.iter())
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } if !is_error && !content.trim().is_empty() => Some(content.clone()),
+                    _ => None,
+                });
+            if let Some(text) = fallback {
+                resp.text = text;
+            }
+        }
+
         Ok((resp, messages))
     }
 
