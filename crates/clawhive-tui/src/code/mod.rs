@@ -520,7 +520,6 @@ pub(crate) async fn run(
                 mention_target: None,
                 message_id: None,
                 attachments: vec![],
-                group_context: None,
                 message_source: None,
             };
             if let Err(err) = gateway_bg.handle_inbound(inbound).await {

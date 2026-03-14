@@ -86,7 +86,6 @@ async fn handle_webhook(
         mention_target: None,
         message_id: None,
         attachments: vec![],
-        group_context: None,
         message_source: Some("webhook_event".to_string()),
     };
 

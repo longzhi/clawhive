@@ -470,7 +470,6 @@ async fn handle_scheduled_task(
                 mention_target: None,
                 message_id: None,
                 attachments: vec![],
-                group_context: None,
                 message_source: None,
             };
             let session_key = SessionKey::from_inbound(&inbound).0;
@@ -613,7 +612,6 @@ async fn handle_scheduled_task(
                 mention_target: None,
                 message_id: None,
                 attachments: vec![],
-                group_context: None,
                 message_source: Some("scheduled_task".into()),
             };
             let session_key = SessionKey::from_inbound(&inbound).0;
@@ -1170,7 +1168,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         let out = gw.handle_inbound(inbound).await.unwrap();
@@ -1193,7 +1190,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
@@ -1225,7 +1221,6 @@ mod tests {
             mention_target: Some("@mybot".into()),
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-builder");
@@ -1290,7 +1285,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-dm");
@@ -1322,7 +1316,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");
@@ -1354,7 +1347,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-group");
@@ -1380,7 +1372,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
 
@@ -1408,7 +1399,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
 
@@ -1472,7 +1462,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
 
@@ -1500,7 +1489,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
 
@@ -1541,7 +1529,6 @@ mod tests {
             mention_target: None,
             message_id: None,
             attachments: vec![],
-            group_context: None,
             message_source: None,
         };
         assert_eq!(gw.resolve_agent(&inbound), "clawhive-main");

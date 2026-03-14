@@ -39,7 +39,6 @@ pub(crate) async fn run(cmd: TaskCommands, root: &Path) -> Result<()> {
                 mention_target: None,
                 message_id: None,
                 attachments: vec![],
-                group_context: None,
                 message_source: None,
             };
             match gateway.handle_inbound(inbound).await {

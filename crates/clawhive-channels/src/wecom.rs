@@ -142,7 +142,6 @@ impl WeComAdapter {
             mention_target: None,
             message_id: Some(body.msgid.clone()),
             attachments: vec![],
-            group_context: None,
             message_source: None,
         }
     }

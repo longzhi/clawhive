@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use arc_swap::ArcSwap;
 use clawhive_bus::BusPublisher;
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::file_store::MemoryFileStore;
@@ -48,7 +49,7 @@ pub struct Orchestrator {
     session_locks: super::session_lock::SessionLockManager,
     context_manager: super::context::ContextManager,
     hook_registry: super::hooks::HookRegistry,
-    skill_registry: SkillRegistry,
+    skill_registry: ArcSwap<SkillRegistry>,
     skills_root: std::path::PathBuf,
     #[allow(dead_code)]
     memory: Arc<MemoryStore>,
@@ -287,6 +288,8 @@ impl Orchestrator {
         };
         let workspaces = AgentWorkspaceManager::new(agent_workspace_map, default_state);
 
+        let skills_root = workspace_root.join("skills");
+        let skill_registry = ArcSwap::from_pointee(skill_registry);
         let tool_registry = register_default_tools(
             workspaces.file_store("__default__"),
             workspaces.search_index("__default__"),
@@ -313,7 +316,7 @@ impl Orchestrator {
                 super::context::ContextConfig::default(),
             ),
             hook_registry: super::hooks::HookRegistry::new(),
-            skills_root: workspace_root.join("skills"),
+            skills_root,
             skill_registry,
             memory,
             bus,
@@ -499,6 +502,7 @@ impl Orchestrator {
             &report,
             true,
         )?;
+        self.reload_skills();
 
         let text = format!(
             "Installed skill '{}' to {} (findings: {}, high-risk: {}).",
@@ -528,14 +532,27 @@ impl Orchestrator {
         self.workspaces.access_gate(agent_id)
     }
 
-    fn active_skill_registry(&self) -> SkillRegistry {
-        SkillRegistry::load_from_dir(&self.skills_root).unwrap_or_else(|e| {
-            tracing::warn!(
-                "Failed to reload skills from {}: {e}",
-                self.skills_root.display()
-            );
-            self.skill_registry.clone()
-        })
+    fn active_skill_registry(&self) -> Arc<SkillRegistry> {
+        self.skill_registry.load_full()
+    }
+
+    pub fn reload_skills(&self) {
+        match SkillRegistry::load_from_dir(&self.skills_root) {
+            Ok(registry) => {
+                self.skill_registry.store(Arc::new(registry));
+                tracing::info!(
+                    skills_root = %self.skills_root.display(),
+                    "skill registry reloaded"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    skills_root = %self.skills_root.display(),
+                    error = %e,
+                    "failed to reload skill registry, keeping cached version"
+                );
+            }
+        }
     }
 
     fn forced_skill_names(input: &str) -> Option<Vec<String>> {
@@ -881,18 +898,7 @@ impl Orchestrator {
         let system_prompt = self
             .personas
             .get(agent_id)
-            .map(|p| {
-                // Inject group members context if available
-                if let Some(ref group_ctx) = inbound.group_context {
-                    let group_md = format_group_context_md(group_ctx, &self.personas);
-                    if !group_md.is_empty() {
-                        let mut persona_clone = p.clone();
-                        persona_clone.group_members_context = group_md;
-                        return persona_clone.assembled_system_prompt();
-                    }
-                }
-                p.assembled_system_prompt()
-            })
+            .map(Persona::assembled_system_prompt)
             .unwrap_or_default();
         let active_skills = self.active_skill_registry();
         let skill_summary = active_skills.summary_prompt();
@@ -1622,6 +1628,7 @@ impl Orchestrator {
                 ),
             }
             .with_recent_messages(recent_messages);
+            let ctx = ctx.with_skill_registry(self.active_skill_registry());
             let ctx = if let Some((ref ch, ref co, ref cv, ref us)) = source_info {
                 ctx.with_source(ch.clone(), co.clone(), cv.clone())
                     .with_source_user_scope(us.clone())
@@ -1731,6 +1738,13 @@ impl Orchestrator {
             total_loop_ms = loop_started.elapsed().as_millis() as u64,
             "tool_use_loop exhausted iterations, requesting final answer without tools"
         );
+
+        // Add a nudge so the LLM produces a text reply instead of empty content
+        messages.push(LlmMessage::user(
+            "You have reached the maximum number of tool iterations. \
+             Please provide your final response to the user based on the information gathered above."
+        ));
+
         let final_req = LlmRequest {
             model: primary.into(),
             system: system.clone(),
@@ -1739,10 +1753,33 @@ impl Orchestrator {
             tools: vec![],
             thinking_level,
         };
-        let resp = self
+        let mut resp = self
             .router
             .chat_with_tools(primary, fallbacks, final_req)
             .await?;
+
+        // Fallback: if the LLM still returned empty, extract the last successful
+        // tool result so the user sees *something* useful.
+        if resp.text.trim().is_empty() {
+            tracing::warn!(
+                agent_id = %agent_id,
+                "final answer still empty after nudge, extracting last tool result as fallback"
+            );
+            let fallback = messages
+                .iter()
+                .rev()
+                .flat_map(|m| m.content.iter())
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } if !is_error && !content.trim().is_empty() => Some(content.clone()),
+                    _ => None,
+                });
+            if let Some(text) = fallback {
+                resp.text = text;
+            }
+        }
+
         Ok((resp, messages))
     }
 
@@ -2019,9 +2056,7 @@ fn register_default_tools(
     registry.register(Box::new(WebFetchTool::new()));
     registry.register(Box::new(ImageTool::new()));
     registry.register(Box::new(ScheduleTool::new(schedule_manager)));
-    registry.register(Box::new(crate::skill_tool::SkillTool::new(
-        workspace_root.join("skills"),
-    )));
+    registry.register(Box::new(crate::skill_tool::SkillTool::new()));
     registry.register(Box::new(crate::message_tool::MessageTool::new(bus.clone())));
     if let Some(api_key) = brave_api_key {
         if !api_key.is_empty() {
@@ -2286,76 +2321,6 @@ fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<Convers
 
     collected.reverse();
     collected
-}
-
-/// Format group context as markdown for injection into system prompt.
-fn format_group_context_md(
-    group_ctx: &GroupContext,
-    personas: &HashMap<String, Persona>,
-) -> String {
-    if !group_ctx.is_group || group_ctx.members.is_empty() {
-        return String::new();
-    }
-
-    let mut lines = vec!["## 当前群聊成员 / Current Group Members".to_string()];
-    lines.push(String::new());
-
-    // Separate agents and humans
-    let mut agents_in_group = Vec::new();
-    let mut humans_in_group = Vec::new();
-
-    for member in &group_ctx.members {
-        if member.is_bot {
-            // Try to find matching persona by name
-            let agent_id = personas
-                .iter()
-                .find(|(_, p)| p.name == member.name)
-                .map(|(id, _)| id.clone());
-            agents_in_group.push((member, agent_id));
-        } else {
-            humans_in_group.push(member);
-        }
-    }
-
-    if !agents_in_group.is_empty() {
-        lines.push("**Agents in this chat:**".to_string());
-        for (member, agent_id) in &agents_in_group {
-            let id_info = agent_id
-                .as_ref()
-                .map(|id| format!(" (agent: {})", id))
-                .unwrap_or_default();
-            lines.push(format!("- 🤖 {}{}", member.name, id_info));
-        }
-        lines.push(String::new());
-    }
-
-    if !humans_in_group.is_empty() {
-        lines.push("**Humans in this chat:**".to_string());
-        for member in &humans_in_group {
-            lines.push(format!("- 👤 {}", member.name));
-        }
-        lines.push(String::new());
-    }
-
-    // List agents NOT in this chat (from known personas)
-    let agents_in_chat: std::collections::HashSet<_> = agents_in_group
-        .iter()
-        .filter_map(|(_, id)| id.as_ref())
-        .collect();
-    let agents_not_in_chat: Vec<_> = personas
-        .iter()
-        .filter(|(id, _)| !agents_in_chat.contains(id))
-        .collect();
-
-    if !agents_not_in_chat.is_empty() {
-        lines.push("**Other agents (not in this chat, @ to collaborate):**".to_string());
-        for (agent_id, persona) in agents_not_in_chat {
-            let emoji = persona.emoji.as_deref().unwrap_or("🤖");
-            lines.push(format!("- {} {} ({})", emoji, persona.name, agent_id));
-        }
-    }
-
-    lines.join("\n")
 }
 
 #[cfg(test)]

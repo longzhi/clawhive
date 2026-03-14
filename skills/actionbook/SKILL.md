@@ -260,20 +260,7 @@ actionbook browser eval '
 
 ## Installation
 
-Actionbook binary is located at:
-```
-/tmp/actionbook/packages/actionbook-rs/target/release/actionbook
-```
-
-Create an alias for convenience:
-```bash
-alias actionbook='/tmp/actionbook/packages/actionbook-rs/target/release/actionbook'
-```
-
-Or copy to PATH:
-```bash
-sudo cp /tmp/actionbook/packages/actionbook-rs/target/release/actionbook /usr/local/bin/
-```
+Ensure `actionbook` is in your `PATH`. The skill declares `requires.bins: [actionbook]` and will not activate if the binary is missing.
 
 ## Resources
 

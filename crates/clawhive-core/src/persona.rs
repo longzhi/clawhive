@@ -24,10 +24,6 @@ pub struct Persona {
     pub bootstrap_md: String,
     /// MEMORY.md - Long-term curated knowledge
     pub memory_md: String,
-    /// Peers context - information about other agents (auto-generated)
-    pub peers_context: String,
-    /// Group members context - who's in the current chat (injected per-message)
-    pub group_members_context: String,
 }
 
 impl Persona {
@@ -153,29 +149,7 @@ impl Persona {
             }
         }
 
-        // Peer agents (for multi-agent collaboration)
-        if !self.peers_context.is_empty() {
-            parts.push(format!("\n{}", self.peers_context));
-        }
-
-        // Group members (injected per-message for group chats)
-        if !self.group_members_context.is_empty() {
-            parts.push(format!("\n{}", self.group_members_context));
-        }
-
         parts.join("\n")
-    }
-
-    /// Set peers context (usually from PeerRegistry).
-    pub fn with_peers_context(mut self, context: String) -> Self {
-        self.peers_context = context;
-        self
-    }
-
-    /// Set group members context (for current chat).
-    pub fn with_group_members_context(mut self, context: String) -> Self {
-        self.group_members_context = context;
-        self
     }
 
     /// Returns the heartbeat task content (may be empty).
@@ -235,8 +209,6 @@ pub fn load_persona_from_workspace(
         heartbeat_md,
         bootstrap_md,
         memory_md,
-        peers_context: String::new(),
-        group_members_context: String::new(),
     })
 }
 
@@ -278,8 +250,6 @@ pub fn load_persona(
         heartbeat_md: String::new(),
         bootstrap_md: String::new(),
         memory_md: String::new(),
-        peers_context: String::new(),
-        group_members_context: String::new(),
     })
 }
 
@@ -407,8 +377,6 @@ mod tests {
             heartbeat_md: String::new(),
             bootstrap_md: String::new(),
             memory_md: String::new(),
-            peers_context: String::new(),
-            group_members_context: String::new(),
         }
     }
 
@@ -446,19 +414,6 @@ mod tests {
             ..persona.clone()
         };
         assert!(persona2.has_heartbeat_tasks());
-    }
-
-    #[test]
-    fn assembled_system_prompt_includes_peers() {
-        let persona = Persona {
-            agents_md: "You are helpful.".into(),
-            peers_context: "## 你的同事\n- **🦀 小螃蟹1号** (Code Engineer)".into(),
-            ..make_persona()
-        };
-
-        let assembled = persona.assembled_system_prompt();
-        assert!(assembled.contains("你的同事"));
-        assert!(assembled.contains("小螃蟹1号"));
     }
 
     #[test]

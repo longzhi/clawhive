@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use clawhive_provider::ToolDef;
 
 use super::config::SecurityMode;
 use super::policy::{PolicyContext, ToolOrigin};
+use super::skill::SkillRegistry;
 
 /// Output from a tool execution.
 pub struct ToolOutput {
@@ -50,6 +52,7 @@ pub struct ToolContext {
     source_user_scope: Option<String>,
     /// Session key for the current conversation
     session_key: String,
+    skill_registry: Option<Arc<SkillRegistry>>,
 }
 
 impl ToolContext {
@@ -70,6 +73,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -83,6 +87,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -98,6 +103,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -114,6 +120,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -130,6 +137,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -150,6 +158,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -167,6 +176,7 @@ impl ToolContext {
             source_conversation_scope: None,
             source_user_scope: None,
             session_key: String::new(),
+            skill_registry: None,
         }
     }
 
@@ -219,6 +229,11 @@ impl ToolContext {
         self
     }
 
+    pub fn with_skill_registry(mut self, skill_registry: Arc<SkillRegistry>) -> Self {
+        self.skill_registry = Some(skill_registry);
+        self
+    }
+
     // ============================================================
     // Accessors
     // ============================================================
@@ -251,6 +266,10 @@ impl ToolContext {
     /// Get the session key for the current conversation.
     pub fn session_key(&self) -> &str {
         &self.session_key
+    }
+
+    pub fn skill_registry(&self) -> Option<&Arc<SkillRegistry>> {
+        self.skill_registry.as_ref()
     }
 
     /// Get recent messages up to a limit.

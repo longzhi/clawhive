@@ -345,8 +345,11 @@ fn parse_frontmatter(raw: &str) -> Result<(SkillFrontmatter, String)> {
 
 #[cfg(test)]
 mod tests {
+    use arc_swap::ArcSwap;
+
     use super::*;
     use std::fs;
+    use std::sync::Arc;
 
     #[test]
     fn parse_frontmatter_extracts_fields() {
@@ -562,6 +565,40 @@ Body"#,
         let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
         let perms = registry.merged_permissions().unwrap();
         assert_eq!(perms.exec.iter().filter(|e| *e == "sh").count(), 1);
+    }
+
+    #[test]
+    fn skill_registry_arcswap_cache_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("test-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: A test skill\n---\n# Test Skill\nContent here.",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        assert!(registry.get("test-skill").is_some());
+
+        let cache = ArcSwap::from_pointee(registry);
+        let cached = cache.load_full();
+        assert!(cached.get("test-skill").is_some());
+
+        let new_dir = dir.path().join("new-skill");
+        std::fs::create_dir(&new_dir).unwrap();
+        std::fs::write(
+            new_dir.join("SKILL.md"),
+            "---\nname: new-skill\ndescription: New\n---\n# New",
+        )
+        .unwrap();
+
+        let still_cached = cache.load_full();
+        assert!(still_cached.get("new-skill").is_none());
+
+        let reloaded = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        cache.store(Arc::new(reloaded));
+        assert!(cache.load_full().get("new-skill").is_some());
     }
 
     #[test]

@@ -1,19 +1,20 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use clawhive_provider::ToolDef;
 
-use crate::skill::SkillRegistry;
 use crate::tool::{ToolContext, ToolExecutor, ToolOutput};
 
-pub struct SkillTool {
-    skills_root: PathBuf,
-}
+pub struct SkillTool;
 
 impl SkillTool {
-    pub fn new(skills_root: PathBuf) -> Self {
-        Self { skills_root }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SkillTool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -54,7 +55,13 @@ impl ToolExecutor for SkillTool {
             });
         }
 
-        let registry = SkillRegistry::load_from_dir(&self.skills_root).unwrap_or_default();
+        let Some(registry) = _ctx.skill_registry() else {
+            return Ok(ToolOutput {
+                content: "Error: active skill registry is unavailable.".into(),
+                is_error: true,
+            });
+        };
+
         match registry.get(name) {
             Some(skill) => {
                 if let Some(file_path) = file {
@@ -118,9 +125,13 @@ impl ToolExecutor for SkillTool {
 
 #[cfg(test)]
 mod tests {
+    use arc_swap::ArcSwap;
+
     use super::*;
+    use crate::skill::SkillRegistry;
     use crate::tool::{ToolContext, ToolExecutor};
     use std::fs;
+    use std::sync::Arc;
 
     fn create_test_skills_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -134,11 +145,16 @@ mod tests {
         dir
     }
 
+    fn context_with_registry(skills_dir: &std::path::Path) -> ToolContext {
+        let registry = SkillRegistry::load_from_dir(skills_dir).unwrap();
+        ToolContext::builtin().with_skill_registry(Arc::new(registry))
+    }
+
     #[tokio::test]
     async fn execute_returns_skill_content() {
         let dir = create_test_skills_dir();
-        let tool = SkillTool::new(dir.path().to_path_buf());
-        let ctx = ToolContext::builtin();
+        let tool = SkillTool::new();
+        let ctx = context_with_registry(dir.path());
         let input = serde_json::json!({"name": "weather"});
         let output = tool.execute(input, &ctx).await.unwrap();
         assert!(!output.is_error);
@@ -149,8 +165,8 @@ mod tests {
     #[tokio::test]
     async fn execute_returns_error_for_unknown_skill() {
         let dir = create_test_skills_dir();
-        let tool = SkillTool::new(dir.path().to_path_buf());
-        let ctx = ToolContext::builtin();
+        let tool = SkillTool::new();
+        let ctx = context_with_registry(dir.path());
         let input = serde_json::json!({"name": "nonexistent"});
         let output = tool.execute(input, &ctx).await.unwrap();
         assert!(output.is_error);
@@ -160,8 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn definition_has_correct_schema() {
-        let dir = create_test_skills_dir();
-        let tool = SkillTool::new(dir.path().to_path_buf());
+        let tool = SkillTool::new();
         let def = tool.definition();
         assert_eq!(def.name, "skill");
         assert!(def.description.contains("skill"));
@@ -176,8 +191,8 @@ mod tests {
         fs::create_dir_all(&refs_dir).unwrap();
         fs::write(refs_dir.join("api.md"), "# Weather API\nEndpoint docs here").unwrap();
 
-        let tool = SkillTool::new(dir.path().to_path_buf());
-        let ctx = ToolContext::builtin();
+        let tool = SkillTool::new();
+        let ctx = context_with_registry(dir.path());
         let input = serde_json::json!({"name": "weather", "file": "references/api.md"});
         let output = tool.execute(input, &ctx).await.unwrap();
         assert!(!output.is_error);
@@ -191,8 +206,8 @@ mod tests {
         fs::create_dir_all(&refs_dir).unwrap();
         fs::write(refs_dir.join("api.md"), "docs").unwrap();
 
-        let tool = SkillTool::new(dir.path().to_path_buf());
-        let ctx = ToolContext::builtin();
+        let tool = SkillTool::new();
+        let ctx = context_with_registry(dir.path());
         let input = serde_json::json!({"name": "weather", "file": "nonexistent.md"});
         let output = tool.execute(input, &ctx).await.unwrap();
         assert!(output.is_error);
@@ -206,12 +221,38 @@ mod tests {
         fs::create_dir_all(&refs_dir).unwrap();
         fs::write(refs_dir.join("api.md"), "docs").unwrap();
 
-        let tool = SkillTool::new(dir.path().to_path_buf());
-        let ctx = ToolContext::builtin();
+        let tool = SkillTool::new();
+        let ctx = context_with_registry(dir.path());
         let input = serde_json::json!({"name": "weather"});
         let output = tool.execute(input, &ctx).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("Reference files available"));
         assert!(output.content.contains("references/api.md"));
+    }
+
+    #[tokio::test]
+    async fn execute_uses_cached_registry_until_reload() {
+        let dir = create_test_skills_dir();
+        let registry = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let cache = ArcSwap::from_pointee(registry);
+        let tool = SkillTool::new();
+        let ctx = ToolContext::builtin().with_skill_registry(cache.load_full());
+
+        let new_skill_dir = dir.path().join("calendar");
+        fs::create_dir_all(&new_skill_dir).unwrap();
+        fs::write(
+            new_skill_dir.join("SKILL.md"),
+            "---\nname: calendar\ndescription: Calendar skill\n---\n# Calendar",
+        )
+        .unwrap();
+
+        let output = tool
+            .execute(serde_json::json!({"name": "calendar"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("calendar"));
+        assert!(output.content.contains("weather"));
     }
 }
