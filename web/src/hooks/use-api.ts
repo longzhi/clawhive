@@ -786,6 +786,37 @@ export function useDeleteChatConversation() {
   });
 }
 
+// Config status polling
+export function useConfigStatus() {
+  return useQuery({
+    queryKey: ["config-status"],
+    queryFn: () =>
+      apiFetch<{
+        running_generation: number;
+        has_pending_changes: boolean;
+        changed_files: string[];
+      }>("/api/admin/config-status"),
+    refetchInterval: 5000,
+  });
+}
+
+// Reload config mutation
+export function useReloadConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<{
+        generation: number;
+        config_view_applied: boolean;
+        channel_results: unknown[];
+        warnings: string[];
+      }>("/api/admin/reload-config", { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["config-status"] });
+    },
+  });
+}
+
 export function useChatMessages(conversationId: string | null) {
   return useQuery({
     queryKey: ["chat-messages", conversationId],

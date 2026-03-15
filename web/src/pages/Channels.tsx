@@ -8,7 +8,6 @@ import { MessageCircle, Loader2, Key, Trash2, Plus, ExternalLink } from "lucide-
 import { type ConnectorConfig, useChannelStatus, useChannels, useRemoveConnector, useUpdateChannels, useAddConnector } from "@/hooks/use-api";
 import { toast } from "sonner";
 import { AddConnectorDialog } from "@/components/channels/add-connector-dialog";
-import { RestartBanner } from "@/components/restart-banner";
 import {
   Dialog,
   DialogContent,
@@ -277,7 +276,6 @@ export default function ChannelsPage() {
   const updateChannels = useUpdateChannels();
   const removeConnector = useRemoveConnector();
   const [tokens, setTokens] = useState<Record<string, string>>({});
-  const [restartRequired, setRestartRequired] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ kind: string; id: string } | null>(null);
 
   const statusMap = new Map((statuses ?? []).map((item) => [`${item.kind}:${item.connector_id}`, item.status]));
@@ -303,7 +301,6 @@ export default function ChannelsPage() {
     }
     try {
       await updateChannels.mutateAsync(updated);
-      setRestartRequired(true);
       toast.success(`${CHANNEL_META[channelKey]?.label ?? channelKey} ${enabled ? "enabled" : "disabled"}`);
     } catch {
       toast.error(`Failed to update ${channelKey}`);
@@ -322,7 +319,6 @@ export default function ChannelsPage() {
     }
     try {
       await updateChannels.mutateAsync(updated);
-      setRestartRequired(true);
       toast.success("Token saved");
       setTokens(prev => ({ ...prev, [tokenKey]: "" }));
     } catch {
@@ -333,7 +329,6 @@ export default function ChannelsPage() {
   const handleRemoveConnector = async (channelKey: string, connectorId: string) => {
     try {
       await removeConnector.mutateAsync({ kind: channelKey, connectorId });
-      setRestartRequired(true);
       toast.success("Connector removed");
     } catch {
       toast.error("Failed to remove connector");
@@ -345,8 +340,6 @@ export default function ChannelsPage() {
 
   return (
     <div className="space-y-6">
-      <RestartBanner visible={restartRequired} />
-
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold">Channels</h2>
@@ -354,7 +347,7 @@ export default function ChannelsPage() {
         </div>
         <div className="flex items-center gap-4">
           <UpdatedAgo dataUpdatedAt={statusesUpdatedAt} />
-          <AddChannelDialog existingKinds={existingKinds} onDone={() => setRestartRequired(true)} />
+          <AddChannelDialog existingKinds={existingKinds} onDone={() => {}} />
         </div>
       </div>
 
@@ -374,7 +367,7 @@ export default function ChannelsPage() {
                 <CardDescription>{meta.description}</CardDescription>
               </div>
               <div className="flex items-center gap-4">
-                <AddConnectorDialog kind={key} label={meta.label} onAdded={() => setRestartRequired(true)} />
+                <AddConnectorDialog kind={key} label={meta.label} onAdded={() => {}} />
                 <Switch
                   checked={enabled}
                   onCheckedChange={(checked) => handleToggle(key, checked)}
@@ -466,7 +459,6 @@ export default function ChannelsPage() {
             { kind: deleteTarget.kind, connectorId: deleteTarget.id },
             {
               onSuccess: () => {
-                setRestartRequired(true);
                 toast.success("Connector removed");
                 setDeleteTarget(null);
               },
