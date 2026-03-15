@@ -290,11 +290,14 @@ fn build_bot_factory() -> BotFactory {
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let db_path = std::path::PathBuf::from(
-                config["db_path"]
-                    .as_str()
-                    .unwrap_or("~/.clawhive/data/whatsapp.db"),
-            );
+            let raw_db_path = config["db_path"]
+                .as_str()
+                .unwrap_or("~/.clawhive/data/whatsapp.db")
+                .to_string();
+            let db_path = expand_tilde(&raw_db_path);
+            if let Some(parent) = db_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             Ok(Box::pin(async move {
                 clawhive_channels::whatsapp::start_whatsapp(connector_id, db_path, gateway, bus)
                     .await
@@ -781,4 +784,13 @@ async fn start_bot(
     }
 
     Ok(())
+}
+
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
 }
