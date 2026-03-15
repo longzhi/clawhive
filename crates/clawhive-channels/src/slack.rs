@@ -198,7 +198,7 @@ impl SlackBot {
             }
 
             // Extract text
-            let text = msg.content.text.as_ref().map(|t| t.as_str()).unwrap_or("");
+            let text = msg.content.text.as_deref().unwrap_or("");
 
             if text.is_empty() {
                 continue;
@@ -232,7 +232,7 @@ pub async fn send_slack_message(
     let session = client.open_session(token);
 
     let mut request = SlackApiChatPostMessageRequest::new(
-        SlackChannelId(channel.to_string()).into(),
+        SlackChannelId(channel.to_string()),
         SlackMessageContent::new().with_text(text.to_string()),
     );
 
