@@ -280,11 +280,9 @@ export default function ChannelsPage() {
 
   const statusMap = new Map((statuses ?? []).map((item) => [`${item.kind}:${item.connector_id}`, item.status]));
 
-  // Dynamic channel keys: merge known meta + any keys from backend
-  const channelKeys = Array.from(new Set([
-    ...Object.keys(CHANNEL_META),
-    ...Object.keys(channels ?? {}),
-  ]));
+  const channelKeys = Object.entries(channels ?? {})
+    .filter(([, ch]) => ch != null)
+    .map(([kind]) => kind);
 
   // Only consider a channel kind as "existing" if it has at least one connector
   const existingKinds = new Set(
