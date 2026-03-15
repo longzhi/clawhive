@@ -720,6 +720,7 @@ dependencies = [
  "flate2",
  "futures-core",
  "libc",
+ "log",
  "openssl",
  "qrcode",
  "reqwest 0.12.28",

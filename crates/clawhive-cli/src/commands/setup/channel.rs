@@ -605,6 +605,9 @@ fn run_whatsapp_pairing(config_root: &Path) -> Result<()> {
     println!("\n  {ARROW} Connecting to WhatsApp...");
     println!("  Scan the QR code with your phone: WhatsApp → Linked Devices → Link a Device\n");
 
+    let prev_log_level = log::max_level();
+    log::set_max_level(log::LevelFilter::Off);
+
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             let (tx, mut rx) = tokio::sync::mpsc::channel(4);
@@ -644,9 +647,12 @@ fn run_whatsapp_pairing(config_root: &Path) -> Result<()> {
         })
     });
 
+    log::set_max_level(prev_log_level);
+
     match result {
         Ok(true) => {
             print_done(&Term::stdout(), "WhatsApp paired successfully!");
+            println!("  {ARROW} Reload the daemon to activate: kill -HUP $(cat ~/.clawhive/data/clawhive.pid)");
         }
         Ok(false) => {
             print_done(

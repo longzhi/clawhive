@@ -34,6 +34,7 @@ clawhive-provider = { path = "../clawhive-provider" }
 clawhive-gateway = { path = "../clawhive-gateway" }
 clawhive-schema = { path = "../clawhive-schema" }
 clawhive-channels = { path = "../clawhive-channels", features = ["slack", "whatsapp", "imessage"] }
+log = "0.4"
 qrcode = "0.14"
 clawhive-runtime = { path = "../clawhive-runtime" }
 clawhive-tui = { path = "../clawhive-tui" }
