@@ -205,6 +205,33 @@ fn scan_main_and_routing(config_dir: &Path) -> (Vec<ChannelInfo>, Option<String>
                 }
             }
 
+            if let Some(slack) = main.channels.slack {
+                for connector in slack.connectors {
+                    channels.push(ChannelInfo {
+                        channel_type: "slack".to_string(),
+                        connector_id: connector.connector_id,
+                    });
+                }
+            }
+
+            if let Some(whatsapp) = main.channels.whatsapp {
+                for connector in whatsapp.connectors {
+                    channels.push(ChannelInfo {
+                        channel_type: "whatsapp".to_string(),
+                        connector_id: connector.connector_id,
+                    });
+                }
+            }
+
+            if let Some(imessage) = main.channels.imessage {
+                for connector in imessage.connectors {
+                    channels.push(ChannelInfo {
+                        channel_type: "imessage".to_string(),
+                        connector_id: connector.connector_id,
+                    });
+                }
+            }
+
             if let Some(ws) = &main.tools.web_search {
                 tools.web_search_enabled = ws.enabled;
                 tools.web_search_provider = ws.provider.clone();
