@@ -1608,8 +1608,6 @@ impl Orchestrator {
                     continue;
                 }
 
-                // Layer 2: Detect scheduled task hallucination — agent claims
-                // to have performed actions but made zero tool calls.
                 if should_retry_fabricated_scheduled_response(
                     is_scheduled_task,
                     scheduled_task_retries,
@@ -1623,7 +1621,7 @@ impl Orchestrator {
                         iteration = iteration_no,
                         retry_count = scheduled_task_retries,
                         response_len = resp.text.len(),
-                        "tool_use_loop: scheduled task response has no tool calls, injecting retry {}/2",
+                        "tool_use_loop: scheduled task fabrication, injecting retry {}/2",
                         scheduled_task_retries
                     );
                     messages.push(LlmMessage {
@@ -1638,6 +1636,31 @@ impl Orchestrator {
                         "to begin the work. Do NOT reply with text \u{2014} your next message ",
                         "MUST contain tool_use blocks.",
                     )));
+                    continue;
+                }
+
+                if should_retry_incomplete_scheduled_thought(
+                    is_scheduled_task,
+                    scheduled_task_retries,
+                    total_tool_calls,
+                    &resp.text,
+                ) {
+                    scheduled_task_retries += 1;
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        iteration = iteration_no,
+                        retry_count = scheduled_task_retries,
+                        response_len = resp.text.len(),
+                        "tool_use_loop: scheduled task incomplete thought, continuing"
+                    );
+                    messages.push(LlmMessage {
+                        role: "assistant".into(),
+                        content: resp.content.clone(),
+                    });
+                    messages.push(LlmMessage::user(
+                        "[SYSTEM] You stopped mid-task with a planning statement instead of producing output. \
+                         Continue executing — use tools to complete the task and produce the final deliverable.",
+                    ));
                     continue;
                 }
 
@@ -2378,6 +2401,38 @@ fn should_retry_fabricated_scheduled_response(
         && total_tool_calls == 0
         && current_tool_calls == 0
         && claims_execution_without_evidence
+}
+
+fn should_retry_incomplete_scheduled_thought(
+    is_scheduled_task: bool,
+    retry_count: u32,
+    total_tool_calls: usize,
+    response_text: &str,
+) -> bool {
+    const MAX_RETRIES: u32 = 2;
+    if !is_scheduled_task || retry_count >= MAX_RETRIES || total_tool_calls == 0 {
+        return false;
+    }
+
+    let text = response_text.to_lowercase();
+    let is_short = response_text.len() < 500;
+    let has_intent_phrase = [
+        "let me ",
+        "now let me",
+        "i will ",
+        "i'll ",
+        "let me write",
+        "let me compile",
+        "let me create",
+        "let me generate",
+        "让我",
+        "我来",
+        "接下来",
+    ]
+    .iter()
+    .any(|k| text.contains(k));
+
+    is_short && has_intent_phrase
 }
 
 fn collect_recent_messages(messages: &[LlmMessage], limit: usize) -> Vec<ConversationMessage> {
