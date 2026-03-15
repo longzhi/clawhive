@@ -184,9 +184,8 @@ function AgentDetailDialog({
   const [editData, setEditData] = useState<AgentDetail | null>(null);
   const [confirmDisable, setConfirmDisable] = useState(false);
 
-  // tool/fallback add inputs
+  // tool add input
   const [newTool, setNewTool] = useState("");
-  const [newFallback, setNewFallback] = useState("");
 
   const current = isEditing && editData ? editData : detail;
 
@@ -200,7 +199,6 @@ function AgentDetailDialog({
     setIsEditing(false);
     setEditData(null);
     setNewTool("");
-    setNewFallback("");
   };
 
   const saveChanges = async () => {
@@ -211,7 +209,6 @@ function AgentDetailDialog({
       setIsEditing(false);
       setEditData(null);
       setNewTool("");
-      setNewFallback("");
     } catch {
       toast.error("Failed to update agent");
     }
@@ -245,17 +242,13 @@ function AgentDetailDialog({
     setEditData({ ...editData, tool_policy: { allow: editData.tool_policy.allow.filter((t) => t !== tool) } });
   };
 
-  const addFallback = () => {
-    if (!editData || !newFallback.trim()) return;
-    const trimmed = newFallback.trim();
-    if (editData.model_policy.fallbacks.includes(trimmed)) return;
-    setEditData({ ...editData, model_policy: { ...editData.model_policy, fallbacks: [...editData.model_policy.fallbacks, trimmed] } });
-    setNewFallback("");
-  };
-
-  const removeFallback = (model: string) => {
+  const toggleFallback = (model: string) => {
     if (!editData) return;
-    setEditData({ ...editData, model_policy: { ...editData.model_policy, fallbacks: editData.model_policy.fallbacks.filter((m) => m !== model) } });
+    const current = editData.model_policy.fallbacks;
+    const updated = current.includes(model)
+      ? current.filter((m) => m !== model)
+      : [...current, model];
+    setEditData({ ...editData, model_policy: { ...editData.model_policy, fallbacks: updated } });
   };
 
   return (
@@ -391,37 +384,44 @@ function AgentDetailDialog({
 
                 <div className="space-y-2">
                   <Label className="text-xs text-muted-foreground uppercase tracking-wide">Fallback Models</Label>
-                  <div className="flex flex-wrap gap-1.5 min-h-[2rem]">
-                    {current.model_policy.fallbacks.length === 0 && !isEditing && (
-                      <span className="text-xs text-muted-foreground">No fallbacks configured</span>
-                    )}
-                    {current.model_policy.fallbacks.map((m) => (
-                      <Badge key={m} variant="secondary" className="gap-1 pl-2 pr-1 py-0.5">
-                        <span className="font-mono text-xs">{m}</span>
-                        {isEditing && (
-                          <button
-                            type="button"
-                            onClick={() => removeFallback(m)}
-                            className="ml-0.5 rounded-sm hover:bg-muted-foreground/20"
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        )}
-                      </Badge>
-                    ))}
-                  </div>
-                  {isEditing && (
-                    <div className="flex gap-2">
-                      <Input
-                        className="h-8 text-xs"
-                        placeholder="model name"
-                        value={newFallback}
-                        onChange={(e) => setNewFallback(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && addFallback()}
-                      />
-                      <Button size="sm" variant="outline" onClick={addFallback} disabled={!newFallback.trim()}>
-                        <Plus className="h-3.5 w-3.5" />
-                      </Button>
+                  {isEditing ? (
+                    (() => {
+                      const available = allModels.filter((m) => m !== editData?.model_policy.primary);
+                      return available.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {available.map((m) => {
+                            const selected = editData?.model_policy.fallbacks.includes(m);
+                            return (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => toggleFallback(m)}
+                                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-all ${
+                                  selected
+                                    ? "border-primary bg-primary/10 text-primary"
+                                    : "border-border text-muted-foreground hover:border-primary/40"
+                                }`}
+                              >
+                                {m}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No other models available</p>
+                      );
+                    })()
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5 min-h-[2rem]">
+                      {current.model_policy.fallbacks.length === 0 ? (
+                        <span className="text-xs text-muted-foreground">No fallbacks configured</span>
+                      ) : (
+                        current.model_policy.fallbacks.map((m) => (
+                          <Badge key={m} variant="secondary" className="pl-2 pr-2 py-0.5">
+                            <span className="font-mono text-xs">{m}</span>
+                          </Badge>
+                        ))
+                      )}
                     </div>
                   )}
                 </div>

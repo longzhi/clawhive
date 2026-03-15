@@ -675,12 +675,18 @@ async fn spawn_delivery_listener(
             continue;
         };
 
-        // Parse channel ID from conversation_scope
         let Some(channel_id) = parse_channel_id(&conversation_scope) else {
-            tracing::warn!(
-                "Could not parse channel ID from conversation_scope: {}",
-                conversation_scope
-            );
+            if conversation_scope.starts_with("schedule:") {
+                tracing::debug!(
+                    "Skipping delivery for schedule scope: {}",
+                    conversation_scope
+                );
+            } else {
+                tracing::warn!(
+                    "Could not parse channel ID from conversation_scope: {}",
+                    conversation_scope
+                );
+            }
             continue;
         };
 
@@ -728,10 +734,17 @@ async fn spawn_approval_listener(
         };
 
         let Some(channel_id) = parse_channel_id(&conversation_scope) else {
-            tracing::warn!(
-                "Could not parse channel ID from conversation_scope: {}",
-                conversation_scope
-            );
+            if conversation_scope.starts_with("schedule:") {
+                tracing::debug!(
+                    "Skipping delivery for schedule scope: {}",
+                    conversation_scope
+                );
+            } else {
+                tracing::warn!(
+                    "Could not parse channel ID from conversation_scope: {}",
+                    conversation_scope
+                );
+            }
             continue;
         };
 
@@ -801,10 +814,17 @@ async fn spawn_skill_confirm_listener(
         };
 
         let Some(channel_id) = parse_channel_id(&conversation_scope) else {
-            tracing::warn!(
-                "Could not parse channel ID from conversation_scope: {}",
-                conversation_scope
-            );
+            if conversation_scope.starts_with("schedule:") {
+                tracing::debug!(
+                    "Skipping delivery for schedule scope: {}",
+                    conversation_scope
+                );
+            } else {
+                tracing::warn!(
+                    "Could not parse channel ID from conversation_scope: {}",
+                    conversation_scope
+                );
+            }
             continue;
         };
 

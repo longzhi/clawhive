@@ -897,15 +897,7 @@ pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRout
         .entry("chatgpt".to_string())
         .or_insert_with(|| "openai-chatgpt/gpt-5.3-codex".to_string());
 
-    let mut global_fallbacks = Vec::new();
-    if registry.get("openai").is_ok() {
-        global_fallbacks.push("gpt".to_string());
-    }
-    if registry.get("openai-chatgpt").is_ok() {
-        global_fallbacks.push("chatgpt".to_string());
-    }
-
-    LlmRouter::new(registry, aliases, global_fallbacks)
+    LlmRouter::new(registry, aliases, vec![])
 }
 
 pub(crate) async fn build_embedding_provider(

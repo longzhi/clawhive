@@ -1020,7 +1020,11 @@ impl Orchestrator {
         {
             Ok(msgs) => msgs,
             Err(e) => {
-                tracing::warn!("Failed to load session history: {e}");
+                if e.to_string().contains("No such file") {
+                    tracing::debug!("No session history found (new session): {e}");
+                } else {
+                    tracing::warn!("Failed to load session history: {e}");
+                }
                 Vec::new()
             }
         };
@@ -1030,7 +1034,6 @@ impl Orchestrator {
             .resolve_target_language(&inbound, &history_messages);
         apply_language_policy_prompt(&mut system_prompt, target_language);
 
-        // Build messages from history (no fake memory dialogue)
         let mut messages = build_messages_from_history(&history_messages);
         {
             let preprocessed = self.runtime.preprocess_input(&inbound.text).await?;
@@ -1083,7 +1086,11 @@ impl Orchestrator {
 
         let allowed = Self::forced_allowed_tools(
             forced_skills.as_deref(),
-            agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
+            agent
+                .tool_policy
+                .as_ref()
+                .map(|tp| tp.allow.clone())
+                .filter(|v| !v.is_empty()),
         );
         let source_info = Some((
             inbound.channel_type.clone(),
@@ -1096,6 +1103,7 @@ impl Orchestrator {
             .as_ref()
             .map(|s| s.dangerous_allow_private.clone())
             .unwrap_or_default();
+        let max_response_tokens = if is_scheduled_task { 8192 } else { 2048 };
         let (resp, _messages) = self
             .tool_use_loop(
                 view.as_ref(),
@@ -1104,7 +1112,7 @@ impl Orchestrator {
                 &agent.model_policy.fallbacks,
                 Some(system_prompt),
                 messages,
-                2048,
+                max_response_tokens,
                 allowed.as_deref(),
                 merged_permissions,
                 agent.security.clone(),
@@ -1297,7 +1305,11 @@ impl Orchestrator {
         {
             Ok(msgs) => msgs,
             Err(e) => {
-                tracing::warn!("Failed to load session history: {e}");
+                if e.to_string().contains("No such file") {
+                    tracing::debug!("No session history found (new session): {e}");
+                } else {
+                    tracing::warn!("Failed to load session history: {e}");
+                }
                 Vec::new()
             }
         };
@@ -1349,7 +1361,11 @@ impl Orchestrator {
 
         let allowed_stream = Self::forced_allowed_tools(
             forced_skills.as_deref(),
-            agent.tool_policy.as_ref().map(|tp| tp.allow.clone()),
+            agent
+                .tool_policy
+                .as_ref()
+                .map(|tp| tp.allow.clone())
+                .filter(|v| !v.is_empty()),
         );
         let source_info_stream = Some((
             inbound.channel_type.clone(),
@@ -1639,12 +1655,39 @@ impl Orchestrator {
                     continue;
                 }
 
-                if should_retry_incomplete_scheduled_thought(
-                    is_scheduled_task,
-                    scheduled_task_retries,
-                    total_tool_calls,
-                    &resp.text,
-                ) {
+                if is_scheduled_task
+                    && tool_uses.is_empty()
+                    && resp.stop_reason.as_deref() == Some("length")
+                    && scheduled_task_retries < 2
+                {
+                    scheduled_task_retries += 1;
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        iteration = iteration_no,
+                        retry_count = scheduled_task_retries,
+                        response_len = resp.text.len(),
+                        "tool_use_loop: scheduled task output truncated (stop_reason=length), continuing"
+                    );
+                    messages.push(LlmMessage {
+                        role: "assistant".into(),
+                        content: resp.content.clone(),
+                    });
+                    messages.push(LlmMessage::user(
+                        "[SYSTEM] Your output was truncated due to length limits. \
+                         Do NOT repeat what you already wrote. Continue from where you left off \
+                         and use tools (write_file, execute_command) to complete the remaining steps.",
+                    ));
+                    continue;
+                }
+
+                if tool_uses.is_empty()
+                    && should_retry_incomplete_scheduled_thought(
+                        is_scheduled_task,
+                        scheduled_task_retries,
+                        total_tool_calls,
+                        &resp.text,
+                    )
+                {
                     scheduled_task_retries += 1;
                     tracing::warn!(
                         agent_id = %agent_id,
@@ -1927,7 +1970,11 @@ impl Orchestrator {
                 Some(system_prompt),
                 messages,
                 2048,
-                agent.tool_policy.as_ref().map(|tp| tp.allow.as_slice()),
+                agent
+                    .tool_policy
+                    .as_ref()
+                    .map(|tp| tp.allow.as_slice())
+                    .filter(|v| !v.is_empty()),
                 None,
                 agent.security.clone(),
                 agent
