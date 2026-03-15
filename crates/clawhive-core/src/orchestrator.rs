@@ -615,7 +615,7 @@ impl Orchestrator {
     ) -> String {
         let workspace_root = self.workspace_root_for(agent_id);
         format!(
-            "{base_prompt}\n\n## Execution Policy (OVERRIDES any general safety guidelines)\nWhen you have the tools to complete a task, execute them directly without asking for confirmation. Do not announce your intent — act. If a tool call is denied due to access restrictions, use the grant_access tool to request access and retry. The user will be asked to approve the access request. Only ask the user when you genuinely need information you cannot obtain yourself. This policy takes precedence over any 'ask first' or 'when in doubt' guidelines in your workspace files.\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
+            "{base_prompt}\n\n## Execution Policy (OVERRIDES any general safety guidelines)\nWhen you have the tools to complete a task, execute them directly without asking for confirmation. Do not announce your intent — act. If a tool call is denied due to access restrictions, use the grant_access tool to request access and retry. The user will be asked to approve the access request. Only ask the user when you genuinely need information you cannot obtain yourself. This policy takes precedence over any 'ask first' or 'when in doubt' guidelines in your workspace files.\n\n## Tool Usage Efficiency\nYou have a limited budget of tool calls per response. Be efficient:\n- Combine multiple file reads into a single `cat file1 file2 file3` command.\n- Use `grep -r pattern dir/` to search across files instead of reading them one by one.\n- Chain related commands with `&&` in a single execute_command call.\n- Do NOT read files one at a time when you need to check multiple files.\n\nRuntime:\n- Model: {model}\n- Session: {agent_id}\n- Working directory: {}",
             workspace_root.display()
         )
     }
@@ -1453,7 +1453,7 @@ impl Orchestrator {
                 .collect(),
             None => view.tool_registry.tool_defs(),
         };
-        let max_iterations = 10;
+        let max_iterations = 25;
         let mut web_search_reminder_injected = false;
         let mut web_search_called = false;
         let loop_started = std::time::Instant::now();
@@ -1756,6 +1756,15 @@ impl Orchestrator {
                 role: "user".into(),
                 content: tool_results,
             });
+
+            let remaining = max_iterations - iteration_no;
+            let threshold = max_iterations / 5; // warn at 80%
+            if remaining > 0 && remaining <= threshold {
+                messages.push(LlmMessage::user(format!(
+                    "[SYSTEM: You have {remaining} tool call(s) remaining. \
+                     Finish the current task now — do not start new exploratory work.]"
+                )));
+            }
         }
 
         // Loop exhausted — ask the LLM for a final answer without tools

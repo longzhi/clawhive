@@ -99,13 +99,21 @@ impl ReloadCoordinator {
         let new_cfg = load_config(&self.root.join("config"))?;
         validate_config(&new_cfg)?;
 
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let old_cfg = self.current_config.load_full();
         let diff = ConfigDiff::between(old_cfg.as_ref(), &new_cfg);
+        let current_gen = self.generation.load(Ordering::SeqCst);
 
         if diff.is_empty() {
-            return Ok(ReloadOutcome::no_changes(generation));
+            tracing::debug!(
+                generation = current_gen,
+                old_agents = old_cfg.agents.len(),
+                new_agents = new_cfg.agents.len(),
+                "reload: no config diff detected"
+            );
+            return Ok(ReloadOutcome::no_changes(current_gen));
         }
+
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         let warnings = diff
             .requires_restart
@@ -339,7 +347,7 @@ mod tests {
 
         let outcome = coordinator.reload().await.unwrap();
 
-        assert_eq!(outcome.generation, 1);
+        assert_eq!(outcome.generation, 0);
         assert!(!outcome.config_view_applied);
         assert!(outcome.channel_results.is_empty());
         assert!(outcome.warnings.is_empty());
