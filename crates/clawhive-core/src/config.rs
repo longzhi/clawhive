@@ -150,6 +150,58 @@ pub struct WeComChannelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackConnectorConfig {
+    pub connector_id: String,
+    pub bot_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<SlackConnectorConfig>,
+}
+
+fn default_whatsapp_db_path() -> String {
+    "~/.clawhive/data/whatsapp.db".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppConnectorConfig {
+    pub connector_id: String,
+    #[serde(default = "default_whatsapp_db_path")]
+    pub db_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<WhatsAppConnectorConfig>,
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IMessageConnectorConfig {
+    pub connector_id: String,
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IMessageChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connectors: Vec<IMessageConnectorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookAuthConfig {
     pub method: String,
     #[serde(default)]
@@ -204,6 +256,12 @@ pub struct ChannelsConfig {
     pub dingtalk: Option<DingTalkChannelConfig>,
     #[serde(default)]
     pub wecom: Option<WeComChannelConfig>,
+    #[serde(default)]
+    pub slack: Option<SlackChannelConfig>,
+    #[serde(default)]
+    pub whatsapp: Option<WhatsAppChannelConfig>,
+    #[serde(default)]
+    pub imessage: Option<IMessageChannelConfig>,
     #[serde(default)]
     pub webhook: Option<WebhookChannelConfig>,
 }
@@ -271,6 +329,9 @@ impl Default for MainConfig {
                 feishu: None,
                 dingtalk: None,
                 wecom: None,
+                slack: None,
+                whatsapp: None,
+                imessage: None,
                 webhook: None,
             },
             embedding: EmbeddingConfig::default(),
@@ -752,6 +813,26 @@ fn resolve_main_env(main: &mut MainConfig) {
         }
     }
 
+    if let Some(slack) = &mut main.channels.slack {
+        for connector in &mut slack.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.bot_token = resolve_env_var(&connector.bot_token);
+        }
+    }
+
+    if let Some(whatsapp) = &mut main.channels.whatsapp {
+        for connector in &mut whatsapp.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.db_path = resolve_env_var(&connector.db_path);
+        }
+    }
+
+    if let Some(imessage) = &mut main.channels.imessage {
+        for connector in &mut imessage.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+        }
+    }
+
     if let Some(webhook) = &mut main.channels.webhook {
         for source in &mut webhook.sources {
             source.source_id = resolve_env_var(&source.source_id);
@@ -1081,6 +1162,9 @@ auth:
                     feishu: None,
                     dingtalk: None,
                     wecom: None,
+                    slack: None,
+                    whatsapp: None,
+                    imessage: None,
                     webhook: None,
                 },
                 embedding: EmbeddingConfig::default(),
