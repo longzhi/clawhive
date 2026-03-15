@@ -59,6 +59,7 @@ clawhive start               # start in foreground
 clawhive up                  # start if not already running (always daemon)
 clawhive restart
 clawhive stop
+clawhive reload              # hot-reload config without restart
 
 # Dashboard mode (observability TUI)
 clawhive dashboard
@@ -93,6 +94,7 @@ clawhive auth login openai
 | `start [--tui] [--daemon]` | Start all configured channel bots and HTTP API server |
 | `stop` | Stop a running clawhive process |
 | `restart` | Restart clawhive (stop + start as daemon) |
+| `reload [--agents\|--routing]` | Hot-reload configuration without restart |
 | `chat [--agent <id>]` | Local REPL for testing |
 | `validate` | Validate YAML configuration |
 | `consolidate` | Run memory consolidation manually |
@@ -252,6 +254,7 @@ clawhive start
 clawhive up                 # start if not already running (always daemon)
 clawhive restart
 clawhive stop
+clawhive reload              # hot-reload config without restart
 
 # Dashboard mode (observability TUI)
 clawhive dashboard
