@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ pub struct ReloadCoordinator {
     publisher: BusPublisher,
     schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
     approval_registry: Option<Arc<ApprovalRegistry>>,
+    loaded_hashes: std::sync::RwLock<std::collections::HashMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -40,6 +42,13 @@ pub struct ReloadOutcome {
     pub config_view_applied: bool,
     pub channel_results: Vec<ChannelChangeResult>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfigStatus {
+    pub running_generation: u64,
+    pub has_pending_changes: bool,
+    pub changed_files: Vec<String>,
 }
 
 impl ReloadOutcome {
@@ -67,6 +76,8 @@ impl ReloadCoordinator {
     ) -> Self {
         let initial_generation = orchestrator.config_view().generation;
 
+        let loaded_hashes = disk_file_hashes(&root.join("config"));
+
         Self {
             current_config: ArcSwap::from_pointee(initial_config),
             orchestrator,
@@ -78,6 +89,7 @@ impl ReloadCoordinator {
             publisher,
             schedule_manager,
             approval_registry,
+            loaded_hashes: std::sync::RwLock::new(loaded_hashes),
         }
     }
 
@@ -105,6 +117,7 @@ impl ReloadCoordinator {
 
         self.orchestrator.apply_config_view(new_view);
         self.current_config.store(Arc::new(new_cfg));
+        *self.loaded_hashes.write().unwrap() = disk_file_hashes(&self.root.join("config"));
 
         let channel_results = self.reconcile_channels(&diff).await;
 
@@ -118,6 +131,32 @@ impl ReloadCoordinator {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Compare on-disk config files against the running config snapshot.
+    /// Returns which files differ (if any).
+    pub fn config_status(&self) -> ConfigStatus {
+        let generation = self.generation.load(Ordering::SeqCst);
+        let config_dir = self.root.join("config");
+
+        let running_hashes = self.loaded_hashes.read().unwrap();
+        let disk_hashes = disk_file_hashes(&config_dir);
+
+        let mut changed_files = Vec::new();
+        let all_keys: BTreeSet<&String> = running_hashes.keys().chain(disk_hashes.keys()).collect();
+        for key in all_keys {
+            let running = running_hashes.get(key.as_str());
+            let disk = disk_hashes.get(key.as_str());
+            if running != disk {
+                changed_files.push(key.to_string());
+            }
+        }
+
+        ConfigStatus {
+            running_generation: generation,
+            has_pending_changes: !changed_files.is_empty(),
+            changed_files,
+        }
     }
 
     async fn build_config_view(
@@ -141,6 +180,34 @@ impl ReloadCoordinator {
         let _supervisor = self.supervisor.lock().await;
         Vec::new()
     }
+}
+
+fn disk_file_hashes(config_dir: &Path) -> std::collections::HashMap<String, u64> {
+    use std::hash::{Hash, Hasher};
+    let mut result = std::collections::HashMap::new();
+    for subdir in &["", "agents.d", "providers.d"] {
+        let dir = config_dir.join(subdir);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let rel = if subdir.is_empty() {
+                        path.file_name().unwrap().to_string_lossy().to_string()
+                    } else {
+                        format!("{}/{}", subdir, path.file_name().unwrap().to_string_lossy())
+                    };
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    content.hash(&mut hasher);
+                    result.insert(rel, hasher.finish());
+                }
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
