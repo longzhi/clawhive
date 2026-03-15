@@ -199,6 +199,31 @@ pub async fn start_whatsapp(
                         tracing::info!("WhatsApp pairing successful!");
                     }
                     Event::Message(msg, info) => {
+                        let effective_msg: &wa::Message =
+                            if let Some(ref dsm) = msg.device_sent_message {
+                                let sender_number =
+                                    extract_number_from_jid(&info.source.sender.to_string());
+                                let dest_number = dsm
+                                    .destination_jid
+                                    .as_deref()
+                                    .map(extract_number_from_jid)
+                                    .unwrap_or_default();
+                                if sender_number != dest_number {
+                                    tracing::debug!(
+                                        msg_id = %info.id,
+                                        dest = ?dsm.destination_jid,
+                                        "Skipping device_sent_message (outgoing to another user)"
+                                    );
+                                    return;
+                                }
+                                match dsm.message.as_deref() {
+                                    Some(inner) => inner,
+                                    None => return,
+                                }
+                            } else {
+                                &msg
+                            };
+
                         let chat_jid = info.source.chat.to_string();
                         let sender_jid = info.source.sender.to_string();
                         let is_group = chat_jid.ends_with("@g.us");
@@ -218,7 +243,7 @@ pub async fn start_whatsapp(
                             return;
                         }
 
-                        let text = extract_message_text(&msg);
+                        let text = extract_message_text(effective_msg);
                         if text.is_empty() {
                             tracing::debug!(
                                 sender = %sender_jid,
