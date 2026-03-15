@@ -553,19 +553,19 @@ mod tests {
     #[test]
     fn access_policy_normalizes_allowlist_and_matches_sender_jid() {
         let policy =
-            AccessPolicy::from_config("allowlist", &["+6590898431".to_string()], "disabled", &[]);
+            AccessPolicy::from_config("allowlist", &["+1234567890".to_string()], "disabled", &[]);
 
-        assert!(policy.is_allowed_dm("6590898431@s.whatsapp.net"));
-        assert!(policy.is_allowed_dm("6590898431:0@s.whatsapp.net"));
-        assert!(!policy.is_allowed_dm("1234567890@s.whatsapp.net"));
+        assert!(policy.is_allowed_dm("1234567890@s.whatsapp.net"));
+        assert!(policy.is_allowed_dm("1234567890:0@s.whatsapp.net"));
+        assert!(!policy.is_allowed_dm("9876543210@s.whatsapp.net"));
     }
 
     #[test]
     fn access_policy_group_allowlist_falls_back_to_dm_allowlist() {
         let policy =
-            AccessPolicy::from_config("allowlist", &["+6590898431".to_string()], "allowlist", &[]);
+            AccessPolicy::from_config("allowlist", &["+1234567890".to_string()], "allowlist", &[]);
 
-        assert!(policy.is_allowed_group("6590898431@s.whatsapp.net"));
-        assert!(!policy.is_allowed_group("1234567890@s.whatsapp.net"));
+        assert!(policy.is_allowed_group("1234567890@s.whatsapp.net"));
+        assert!(!policy.is_allowed_group("9876543210@s.whatsapp.net"));
     }
 }

@@ -109,7 +109,7 @@ pub(super) fn handle_add_channel(
         "whatsapp" => {
             let allow_input = match input_or_back_with_default(
                 theme,
-                "Allowed phone numbers (comma-separated, E.164 format, e.g. +6590898431)",
+                "Allowed phone numbers (comma-separated, E.164 format, e.g. +1234567890)",
                 "",
             )? {
                 Some(value) => value,
@@ -919,7 +919,7 @@ mod tests {
             "whatsapp",
             &ChannelConfig {
                 connector_id: "wa-main".into(),
-                allow_from: Some(vec!["+6590898431".into()]),
+                allow_from: Some(vec!["+1234567890".into()]),
                 ..Default::default()
             },
         )
@@ -927,6 +927,6 @@ mod tests {
 
         let content = std::fs::read_to_string(temp.path().join("config/main.yaml")).unwrap();
         assert!(content.contains("wa-main"));
-        assert!(content.contains("+6590898431"));
+        assert!(content.contains("+1234567890"));
     }
 }

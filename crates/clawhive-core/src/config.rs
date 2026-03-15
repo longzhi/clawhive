@@ -1300,8 +1300,8 @@ auth:
         let original_group = std::env::var("CLAWHIVE_TEST_GROUP_ALLOW_FROM").ok();
 
         unsafe {
-            std::env::set_var("CLAWHIVE_TEST_ALLOW_FROM", "+6590898431");
-            std::env::set_var("CLAWHIVE_TEST_GROUP_ALLOW_FROM", "+1234567890");
+            std::env::set_var("CLAWHIVE_TEST_ALLOW_FROM", "+1234567890");
+            std::env::set_var("CLAWHIVE_TEST_GROUP_ALLOW_FROM", "+9876543210");
         }
 
         let mut main = MainConfig::default();
@@ -1320,11 +1320,11 @@ auth:
         resolve_main_env(&mut main);
 
         let connector = &main.channels.whatsapp.as_ref().unwrap().connectors[0];
-        assert_eq!(connector.connector_id, "+6590898431");
-        assert_eq!(connector.dm_policy, "+6590898431");
-        assert_eq!(connector.allow_from, vec!["+6590898431"]);
-        assert_eq!(connector.group_policy, "+1234567890");
-        assert_eq!(connector.group_allow_from, vec!["+1234567890"]);
+        assert_eq!(connector.connector_id, "+1234567890");
+        assert_eq!(connector.dm_policy, "+1234567890");
+        assert_eq!(connector.allow_from, vec!["+1234567890"]);
+        assert_eq!(connector.group_policy, "+9876543210");
+        assert_eq!(connector.group_allow_from, vec!["+9876543210"]);
 
         unsafe {
             match original_allow {
