@@ -34,6 +34,7 @@ pub(super) struct ChannelConfig {
     pub(super) bot_token: Option<String>,
     pub(super) db_path: Option<String>,
     pub(super) poll_interval_secs: Option<u64>,
+    pub(super) allow_from: Option<Vec<String>>,
 }
 
 pub(super) fn handle_add_channel(
@@ -92,6 +93,7 @@ pub(super) fn handle_add_channel(
     let mut secret = None;
     let mut bot_token_str = None;
     let mut poll_interval = None;
+    let mut allow_from = None;
 
     match channel_type {
         "slack" => {
@@ -105,6 +107,21 @@ pub(super) fn handle_add_channel(
             token = String::new();
         }
         "whatsapp" => {
+            let allow_input = match input_or_back_with_default(
+                theme,
+                "Allowed phone numbers (comma-separated, E.164 format, e.g. +6590898431)",
+                "",
+            )? {
+                Some(value) => value,
+                None => return Ok(()),
+            };
+            allow_from = Some(
+                allow_input
+                    .split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect(),
+            );
             token = String::new();
         }
         "imessage" => {
@@ -263,6 +280,7 @@ pub(super) fn handle_add_channel(
         bot_token: bot_token_str,
         db_path: None,
         poll_interval_secs: poll_interval,
+        allow_from,
     };
     add_channel_to_config(config_root, channel_type, &cfg)?;
     print_done(
@@ -419,6 +437,10 @@ fn add_channel_to_config(
                     .db_path
                     .clone()
                     .unwrap_or_else(|| "~/.clawhive/data/whatsapp.db".to_string()),
+                dm_policy: "allowlist".to_string(),
+                allow_from: cfg.allow_from.clone().unwrap_or_default(),
+                group_policy: "disabled".to_string(),
+                group_allow_from: Vec::new(),
             };
             match main_cfg.channels.whatsapp.as_mut() {
                 Some(wa) => {
@@ -880,5 +902,31 @@ mod tests {
         .expect("write agent yaml");
 
         validate_generated_config(temp.path()).expect("generated config should be valid");
+    }
+
+    #[test]
+    fn add_whatsapp_channel_persists_allow_from_numbers() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::write(
+            temp.path().join("config/main.yaml"),
+            generate_main_yaml("clawhive", None, None),
+        )
+        .unwrap();
+
+        add_channel_to_config(
+            temp.path(),
+            "whatsapp",
+            &ChannelConfig {
+                connector_id: "wa-main".into(),
+                allow_from: Some(vec!["+6590898431".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(temp.path().join("config/main.yaml")).unwrap();
+        assert!(content.contains("wa-main"));
+        assert!(content.contains("+6590898431"));
     }
 }

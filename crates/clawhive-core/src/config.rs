@@ -167,11 +167,27 @@ fn default_whatsapp_db_path() -> String {
     "~/.clawhive/data/whatsapp.db".to_string()
 }
 
+fn default_dm_policy() -> String {
+    "allowlist".to_string()
+}
+
+fn default_group_policy() -> String {
+    "disabled".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhatsAppConnectorConfig {
     pub connector_id: String,
     #[serde(default = "default_whatsapp_db_path")]
     pub db_path: String,
+    #[serde(default = "default_dm_policy")]
+    pub dm_policy: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_group_policy")]
+    pub group_policy: String,
+    #[serde(default)]
+    pub group_allow_from: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -824,6 +840,14 @@ fn resolve_main_env(main: &mut MainConfig) {
         for connector in &mut whatsapp.connectors {
             connector.connector_id = resolve_env_var(&connector.connector_id);
             connector.db_path = resolve_env_var(&connector.db_path);
+            connector.dm_policy = resolve_env_var(&connector.dm_policy);
+            for allow_from in &mut connector.allow_from {
+                *allow_from = resolve_env_var(allow_from);
+            }
+            connector.group_policy = resolve_env_var(&connector.group_policy);
+            for group_allow_from in &mut connector.group_allow_from {
+                *group_allow_from = resolve_env_var(group_allow_from);
+            }
         }
     }
 
@@ -1268,5 +1292,49 @@ auth:
     #[test]
     fn security_mode_default_is_standard() {
         assert_eq!(SecurityMode::default(), SecurityMode::Standard);
+    }
+
+    #[test]
+    fn resolve_main_env_resolves_whatsapp_access_policy_fields() {
+        let original_allow = std::env::var("CLAWHIVE_TEST_ALLOW_FROM").ok();
+        let original_group = std::env::var("CLAWHIVE_TEST_GROUP_ALLOW_FROM").ok();
+
+        unsafe {
+            std::env::set_var("CLAWHIVE_TEST_ALLOW_FROM", "+6590898431");
+            std::env::set_var("CLAWHIVE_TEST_GROUP_ALLOW_FROM", "+1234567890");
+        }
+
+        let mut main = MainConfig::default();
+        main.channels.whatsapp = Some(WhatsAppChannelConfig {
+            enabled: true,
+            connectors: vec![WhatsAppConnectorConfig {
+                connector_id: "${CLAWHIVE_TEST_ALLOW_FROM}".to_string(),
+                db_path: "~/.clawhive/data/whatsapp.db".to_string(),
+                dm_policy: "${CLAWHIVE_TEST_ALLOW_FROM}".to_string(),
+                allow_from: vec!["${CLAWHIVE_TEST_ALLOW_FROM}".to_string()],
+                group_policy: "${CLAWHIVE_TEST_GROUP_ALLOW_FROM}".to_string(),
+                group_allow_from: vec!["${CLAWHIVE_TEST_GROUP_ALLOW_FROM}".to_string()],
+            }],
+        });
+
+        resolve_main_env(&mut main);
+
+        let connector = &main.channels.whatsapp.as_ref().unwrap().connectors[0];
+        assert_eq!(connector.connector_id, "+6590898431");
+        assert_eq!(connector.dm_policy, "+6590898431");
+        assert_eq!(connector.allow_from, vec!["+6590898431"]);
+        assert_eq!(connector.group_policy, "+1234567890");
+        assert_eq!(connector.group_allow_from, vec!["+1234567890"]);
+
+        unsafe {
+            match original_allow {
+                Some(value) => std::env::set_var("CLAWHIVE_TEST_ALLOW_FROM", value),
+                None => std::env::remove_var("CLAWHIVE_TEST_ALLOW_FROM"),
+            }
+            match original_group {
+                Some(value) => std::env::set_var("CLAWHIVE_TEST_GROUP_ALLOW_FROM", value),
+                None => std::env::remove_var("CLAWHIVE_TEST_GROUP_ALLOW_FROM"),
+            }
+        }
     }
 }

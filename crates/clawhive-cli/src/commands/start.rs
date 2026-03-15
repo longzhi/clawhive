@@ -298,9 +298,47 @@ fn build_bot_factory() -> BotFactory {
             if let Some(parent) = db_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
+            let dm_policy = config["dm_policy"]
+                .as_str()
+                .unwrap_or("allowlist")
+                .to_string();
+            let allow_from = config["allow_from"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            let group_policy = config["group_policy"]
+                .as_str()
+                .unwrap_or("disabled")
+                .to_string();
+            let group_allow_from = config["group_allow_from"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            let access_policy = clawhive_channels::whatsapp::AccessPolicy::from_config(
+                &dm_policy,
+                &allow_from,
+                &group_policy,
+                &group_allow_from,
+            );
             Ok(Box::pin(async move {
-                clawhive_channels::whatsapp::start_whatsapp(connector_id, db_path, gateway, bus)
-                    .await
+                clawhive_channels::whatsapp::start_whatsapp(
+                    connector_id,
+                    db_path,
+                    access_policy,
+                    gateway,
+                    bus,
+                )
+                .await
             })
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>,

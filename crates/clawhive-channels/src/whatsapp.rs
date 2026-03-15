@@ -64,6 +64,65 @@ pub enum PairStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct AccessPolicy {
+    pub dm_policy: String,
+    pub allow_from: Vec<String>,
+    pub group_policy: String,
+    pub group_allow_from: Vec<String>,
+}
+
+impl AccessPolicy {
+    pub fn from_config(
+        dm_policy: &str,
+        allow_from: &[String],
+        group_policy: &str,
+        group_allow_from: &[String],
+    ) -> Self {
+        Self {
+            dm_policy: dm_policy.to_string(),
+            allow_from: allow_from
+                .iter()
+                .map(|phone| normalize_phone(phone))
+                .collect(),
+            group_policy: group_policy.to_string(),
+            group_allow_from: group_allow_from
+                .iter()
+                .map(|phone| normalize_phone(phone))
+                .collect(),
+        }
+    }
+
+    fn is_allowed_dm(&self, sender_jid: &str) -> bool {
+        match self.dm_policy.as_str() {
+            "open" => true,
+            "disabled" => false,
+            _ => {
+                let sender_number = extract_number_from_jid(sender_jid);
+                self.allow_from
+                    .iter()
+                    .any(|number| number == &sender_number)
+            }
+        }
+    }
+
+    fn is_allowed_group(&self, sender_jid: &str) -> bool {
+        match self.group_policy.as_str() {
+            "open" => true,
+            "disabled" => false,
+            _ => {
+                let sender_number = extract_number_from_jid(sender_jid);
+                let allowlist = if self.group_allow_from.is_empty() {
+                    &self.allow_from
+                } else {
+                    &self.group_allow_from
+                };
+                allowlist.iter().any(|number| number == &sender_number)
+            }
+        }
+    }
+}
+
 pub async fn run_pairing(
     db_path: PathBuf,
     tx: tokio::sync::mpsc::Sender<PairStatus>,
@@ -108,6 +167,7 @@ pub async fn run_pairing(
 pub async fn start_whatsapp(
     connector_id: String,
     db_path: PathBuf,
+    access_policy: AccessPolicy,
     gateway: Arc<Gateway>,
     bus: Arc<EventBus>,
 ) -> anyhow::Result<()> {
@@ -118,6 +178,7 @@ pub async fn start_whatsapp(
 
     let gateway_for_bot = gateway.clone();
     let adapter_for_bot = adapter.clone();
+    let policy_for_bot = access_policy.clone();
 
     let mut bot = Bot::builder()
         .with_backend(backend)
@@ -127,6 +188,7 @@ pub async fn start_whatsapp(
         .on_event(move |event, client| {
             let gateway = gateway_for_bot.clone();
             let adapter = adapter_for_bot.clone();
+            let policy = policy_for_bot.clone();
 
             async move {
                 match event {
@@ -137,32 +199,68 @@ pub async fn start_whatsapp(
                         tracing::info!("WhatsApp pairing successful!");
                     }
                     Event::Message(msg, info) => {
-                        let text = extract_message_text(&msg);
-                        if text.is_empty() {
+                        let chat_jid = info.source.chat.to_string();
+                        let sender_jid = info.source.sender.to_string();
+                        let is_group = chat_jid.ends_with("@g.us");
+                        let allowed = if is_group {
+                            policy.is_allowed_group(&sender_jid)
+                        } else {
+                            policy.is_allowed_dm(&sender_jid)
+                        };
+
+                        if !allowed {
+                            tracing::info!(
+                                sender = %sender_jid,
+                                chat = %chat_jid,
+                                is_group,
+                                "WhatsApp message blocked by access policy"
+                            );
                             return;
                         }
 
-                        let chat_jid = info.source.chat.to_string();
-                        let sender_jid = info.source.sender.to_string();
+                        let text = extract_message_text(&msg);
+                        if text.is_empty() {
+                            tracing::debug!(
+                                sender = %sender_jid,
+                                chat = %chat_jid,
+                                is_group,
+                                "WhatsApp message ignored because it has no extractable text"
+                            );
+                            return;
+                        }
+
+                        tracing::info!(
+                            sender = %sender_jid,
+                            chat = %chat_jid,
+                            is_group,
+                            text_len = text.len(),
+                            "WhatsApp message received"
+                        );
+
                         let msg_id = Some(info.id.clone());
 
                         let inbound = adapter.to_inbound(&chat_jid, &sender_jid, &text, msg_id);
 
                         tracing::debug!(
-                            "WhatsApp message from {} in {}: {}",
-                            sender_jid,
-                            chat_jid,
-                            text
+                            sender = %sender_jid,
+                            chat = %chat_jid,
+                            text = %text,
+                            "Forwarding WhatsApp message to gateway"
                         );
 
                         match gateway.handle_inbound(inbound).await {
                             Ok(outbound) => {
                                 tracing::debug!(
-                                    "WhatsApp reply: {}",
-                                    adapter.render_outbound(&outbound)
+                                    reply = %adapter.render_outbound(&outbound),
+                                    "WhatsApp gateway produced outbound reply"
                                 );
 
                                 if outbound.text.trim().is_empty() {
+                                    tracing::debug!(
+                                        sender = %sender_jid,
+                                        chat = %chat_jid,
+                                        "WhatsApp outbound reply was empty"
+                                    );
                                     return;
                                 }
 
@@ -174,6 +272,12 @@ pub async fn start_whatsapp(
                                     client.send_message(info.source.chat.clone(), reply).await
                                 {
                                     tracing::error!("Failed to send WhatsApp reply: {e}");
+                                } else {
+                                    tracing::info!(
+                                        sender = %sender_jid,
+                                        chat = %chat_jid,
+                                        "WhatsApp reply sent"
+                                    );
                                 }
                             }
                             Err(err) => {
@@ -222,7 +326,36 @@ fn extract_message_text(msg: &wa::Message) -> String {
             return text.to_string();
         }
     }
+    if let Some(ref image) = msg.image_message {
+        if let Some(ref caption) = image.caption {
+            return caption.to_string();
+        }
+    }
+    if let Some(ref video) = msg.video_message {
+        if let Some(ref caption) = video.caption {
+            return caption.to_string();
+        }
+    }
+    if let Some(ref document) = msg.document_message {
+        if let Some(ref caption) = document.caption {
+            return caption.to_string();
+        }
+    }
     String::new()
+}
+
+fn normalize_phone(phone: &str) -> String {
+    phone.trim_start_matches('+').to_string()
+}
+
+fn extract_number_from_jid(jid: &str) -> String {
+    jid.split('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn parse_chat_jid(conversation_scope: &str) -> Option<&str> {
@@ -334,6 +467,7 @@ async fn spawn_delivery_listener(bus: Arc<EventBus>, connector_id: String, clien
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waproto::whatsapp::message::{DocumentMessage, ImageMessage, VideoMessage};
 
     #[test]
     fn adapter_to_inbound_sets_fields() {
@@ -370,5 +504,54 @@ mod tests {
             Some("123@s.whatsapp.net")
         );
         assert_eq!(parse_chat_jid("invalid"), None);
+    }
+
+    #[test]
+    fn extract_message_text_prefers_supported_caption_fields() {
+        let image = wa::Message {
+            image_message: Some(Box::new(ImageMessage {
+                caption: Some("image caption".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(extract_message_text(&image), "image caption");
+
+        let video = wa::Message {
+            video_message: Some(Box::new(VideoMessage {
+                caption: Some("video caption".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(extract_message_text(&video), "video caption");
+
+        let document = wa::Message {
+            document_message: Some(Box::new(DocumentMessage {
+                caption: Some("doc caption".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(extract_message_text(&document), "doc caption");
+    }
+
+    #[test]
+    fn access_policy_normalizes_allowlist_and_matches_sender_jid() {
+        let policy =
+            AccessPolicy::from_config("allowlist", &["+6590898431".to_string()], "disabled", &[]);
+
+        assert!(policy.is_allowed_dm("6590898431@s.whatsapp.net"));
+        assert!(policy.is_allowed_dm("6590898431:0@s.whatsapp.net"));
+        assert!(!policy.is_allowed_dm("1234567890@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn access_policy_group_allowlist_falls_back_to_dm_allowlist() {
+        let policy =
+            AccessPolicy::from_config("allowlist", &["+6590898431".to_string()], "allowlist", &[]);
+
+        assert!(policy.is_allowed_group("6590898431@s.whatsapp.net"));
+        assert!(!policy.is_allowed_group("1234567890@s.whatsapp.net"));
     }
 }
