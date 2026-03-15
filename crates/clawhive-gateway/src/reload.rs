@@ -121,6 +121,16 @@ impl ReloadCoordinator {
 
         let channel_results = self.reconcile_channels(&diff).await;
 
+        tracing::info!(
+            generation,
+            agents_added = diff.agents_added.len(),
+            agents_removed = diff.agents_removed.len(),
+            agents_changed = diff.agents_changed.len(),
+            routing_changed = diff.routing_changed,
+            providers_changed = diff.providers_changed,
+            "config reloaded"
+        );
+
         Ok(ReloadOutcome {
             generation,
             config_view_applied: true,

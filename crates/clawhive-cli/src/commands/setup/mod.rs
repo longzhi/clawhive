@@ -93,7 +93,7 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
                 term.write_line(&format!(
                     "  {} Run {} to apply changes.",
                     ARROW,
-                    style("clawhive restart").cyan().bold()
+                    style("clawhive reload").cyan().bold()
                 ))?;
                 break;
             }

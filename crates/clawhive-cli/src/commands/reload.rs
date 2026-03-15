@@ -39,7 +39,36 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
 
     match status {
         reqwest::StatusCode::OK => {
-            if body.trim().is_empty() {
+            if let Ok(outcome) = serde_json::from_str::<serde_json::Value>(&body) {
+                let gen = outcome["generation"].as_u64().unwrap_or(0);
+                let applied = outcome["config_view_applied"].as_bool().unwrap_or(false);
+                if applied {
+                    println!("Config reloaded (generation {gen}).");
+                } else {
+                    println!("No changes detected (generation {gen}).");
+                }
+                if let Some(warnings) = outcome["warnings"].as_array() {
+                    for w in warnings {
+                        if let Some(s) = w.as_str() {
+                            println!("  warning: {s}");
+                        }
+                    }
+                }
+                if let Some(results) = outcome["channel_results"].as_array() {
+                    for r in results {
+                        if let Some(id) = r["Started"]["connector_id"].as_str() {
+                            println!("  started: {id}");
+                        } else if let Some(id) = r["Stopped"]["connector_id"].as_str() {
+                            println!("  stopped: {id}");
+                        } else if let Some(id) = r["Restarted"]["connector_id"].as_str() {
+                            println!("  restarted: {id}");
+                        } else if let Some(id) = r["Failed"]["connector_id"].as_str() {
+                            let err = r["Failed"]["error"].as_str().unwrap_or("unknown");
+                            println!("  failed: {id} ({err})");
+                        }
+                    }
+                }
+            } else if body.trim().is_empty() {
                 println!("Config reloaded.");
             } else {
                 println!("{body}");
