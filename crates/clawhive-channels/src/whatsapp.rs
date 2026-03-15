@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::prelude::*;
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
-use clawhive_schema::{ActionKind, BusMessage, InboundMessage, OutboundMessage};
+use clawhive_schema::{
+    ActionKind, Attachment, AttachmentKind, BusMessage, InboundMessage, OutboundMessage,
+};
 use uuid::Uuid;
 use wacore::types::events::Event;
 use waproto::whatsapp as wa;
@@ -244,13 +247,14 @@ pub async fn start_whatsapp(
                             }
                         }
 
+                        let has_image = effective_msg.image_message.is_some();
                         let text = extract_message_text(effective_msg);
-                        if text.is_empty() {
+                        if text.is_empty() && !has_image {
                             tracing::debug!(
                                 sender = %sender_jid,
                                 chat = %chat_jid,
                                 is_group,
-                                "WhatsApp message ignored because it has no extractable text"
+                                "WhatsApp message ignored: no text and no image"
                             );
                             return;
                         }
@@ -265,7 +269,29 @@ pub async fn start_whatsapp(
 
                         let msg_id = Some(info.id.clone());
 
-                        let inbound = adapter.to_inbound(&chat_jid, &sender_jid, &text, msg_id);
+                        let mut inbound = adapter.to_inbound(&chat_jid, &sender_jid, &text, msg_id);
+
+                        if let Some(ref image) = effective_msg.image_message {
+                            match client.download(image.as_ref()).await {
+                                Ok(data) => {
+                                    let base64_data = BASE64_STANDARD.encode(&data);
+                                    let mime = image
+                                        .mimetype
+                                        .clone()
+                                        .unwrap_or_else(|| "image/jpeg".to_string());
+                                    inbound.attachments.push(Attachment {
+                                        kind: AttachmentKind::Image,
+                                        url: base64_data,
+                                        mime_type: Some(mime),
+                                        file_name: None,
+                                        size: image.file_length,
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to download WhatsApp image: {e}");
+                                }
+                            }
+                        }
 
                         let _ = client.chatstate().send_composing(&info.source.chat).await;
 
