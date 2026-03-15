@@ -104,12 +104,6 @@ impl ReloadCoordinator {
         let current_gen = self.generation.load(Ordering::SeqCst);
 
         if diff.is_empty() {
-            tracing::debug!(
-                generation = current_gen,
-                old_agents = old_cfg.agents.len(),
-                new_agents = new_cfg.agents.len(),
-                "reload: no config diff detected"
-            );
             return Ok(ReloadOutcome::no_changes(current_gen));
         }
 
@@ -123,11 +117,16 @@ impl ReloadCoordinator {
 
         let new_view = self.build_config_view(&new_cfg, generation).await?;
 
+        if !diff.agents_added.is_empty() {
+            self.orchestrator
+                .ensure_workspaces_for(&new_cfg, &diff.agents_added);
+        }
+
         self.orchestrator.apply_config_view(new_view);
-        self.current_config.store(Arc::new(new_cfg));
+        self.current_config.store(Arc::new(new_cfg.clone()));
         *self.loaded_hashes.write().unwrap() = disk_file_hashes(&self.root.join("config"));
 
-        let channel_results = self.reconcile_channels(&diff).await;
+        let channel_results = self.reconcile_channels(&new_cfg).await;
 
         tracing::info!(
             generation,
@@ -194,10 +193,110 @@ impl ReloadCoordinator {
         .await)
     }
 
-    async fn reconcile_channels(&self, _diff: &ConfigDiff) -> Vec<ChannelChangeResult> {
-        let _supervisor = self.supervisor.lock().await;
-        Vec::new()
+    async fn reconcile_channels(&self, new_cfg: &ClawhiveConfig) -> Vec<ChannelChangeResult> {
+        let mut sup = self.supervisor.lock().await;
+        let running = sup.running_connectors();
+        let desired = extract_connectors(new_cfg);
+
+        let mut results = Vec::new();
+
+        for (id, (channel_type, config)) in &desired {
+            if !running.contains_key(id.as_str()) {
+                match sup.start(id.clone(), channel_type, config.clone()) {
+                    Ok(()) => results.push(ChannelChangeResult::Started {
+                        connector_id: id.clone(),
+                    }),
+                    Err(e) => results.push(ChannelChangeResult::Failed {
+                        connector_id: id.clone(),
+                        error: e.to_string(),
+                    }),
+                }
+            }
+        }
+
+        let to_stop: Vec<String> = running
+            .keys()
+            .filter(|id| !desired.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        for id in to_stop {
+            sup.stop(&id).await;
+            results.push(ChannelChangeResult::Stopped { connector_id: id });
+        }
+
+        for (id, (channel_type, config)) in &desired {
+            if let Some(&old_hash) = running.get(id.as_str()) {
+                let new_hash = crate::supervisor::config_hash_value(config);
+                if old_hash != new_hash {
+                    match sup.restart(id.clone(), channel_type, config.clone()).await {
+                        Ok(()) => results.push(ChannelChangeResult::Restarted {
+                            connector_id: id.clone(),
+                        }),
+                        Err(e) => results.push(ChannelChangeResult::Failed {
+                            connector_id: id.clone(),
+                            error: e.to_string(),
+                        }),
+                    }
+                }
+            }
+        }
+
+        results
     }
+}
+
+fn extract_connectors(
+    config: &ClawhiveConfig,
+) -> std::collections::HashMap<String, (String, serde_json::Value)> {
+    let mut map = std::collections::HashMap::new();
+    let channels = &config.main.channels;
+
+    if let Some(tg) = &channels.telegram {
+        if tg.enabled {
+            for c in &tg.connectors {
+                if let Ok(v) = serde_json::to_value(c) {
+                    map.insert(c.connector_id.clone(), ("telegram".into(), v));
+                }
+            }
+        }
+    }
+    if let Some(dc) = &channels.discord {
+        if dc.enabled {
+            for c in &dc.connectors {
+                if let Ok(v) = serde_json::to_value(c) {
+                    map.insert(c.connector_id.clone(), ("discord".into(), v));
+                }
+            }
+        }
+    }
+    if let Some(fs) = &channels.feishu {
+        if fs.enabled {
+            for c in &fs.connectors {
+                if let Ok(v) = serde_json::to_value(c) {
+                    map.insert(c.connector_id.clone(), ("feishu".into(), v));
+                }
+            }
+        }
+    }
+    if let Some(dt) = &channels.dingtalk {
+        if dt.enabled {
+            for c in &dt.connectors {
+                if let Ok(v) = serde_json::to_value(c) {
+                    map.insert(c.connector_id.clone(), ("dingtalk".into(), v));
+                }
+            }
+        }
+    }
+    if let Some(wc) = &channels.wecom {
+        if wc.enabled {
+            for c in &wc.connectors {
+                if let Ok(v) = serde_json::to_value(c) {
+                    map.insert(c.connector_id.clone(), ("wecom".into(), v));
+                }
+            }
+        }
+    }
+    map
 }
 
 fn disk_file_hashes(config_dir: &Path) -> std::collections::HashMap<String, u64> {

@@ -216,6 +216,10 @@ impl ChannelSupervisor {
     }
 }
 
+pub fn config_hash_value(config: &Value) -> u64 {
+    config_hash(config)
+}
+
 fn config_hash(config: &Value) -> u64 {
     use std::hash::{Hash, Hasher};
 

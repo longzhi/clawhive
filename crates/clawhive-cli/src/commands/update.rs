@@ -156,6 +156,7 @@ async fn download_and_replace(release: &ReleaseInfo) -> Result<()> {
 }
 
 pub async fn handle_update(
+    root: &std::path::Path,
     check_only: bool,
     channel_override: Option<String>,
     target_version: Option<String>,
@@ -190,10 +191,8 @@ pub async fn handle_update(
             }
         }
         download_and_replace(&release).await?;
-        println!(
-            "Updated successfully: {current} → {}\nRestart clawhive for the new version to take effect.",
-            release.version
-        );
+        println!("Updated successfully: {current} → {}", release.version);
+        restart_if_running(root).await?;
         return Ok(());
     }
 
@@ -226,10 +225,24 @@ pub async fn handle_update(
     }
 
     download_and_replace(latest).await?;
-    println!(
-        "Updated successfully: {current} → {}\nRestart clawhive for the new version to take effect.",
-        latest.version
-    );
+    println!("Updated successfully: {current} → {}", latest.version);
+    restart_if_running(root).await?;
+    Ok(())
+}
+
+async fn restart_if_running(root: &std::path::Path) -> Result<()> {
+    use crate::runtime::pid::{is_process_running, read_pid_file, read_port_file};
+
+    let pid = read_pid_file(root)?;
+    let running = pid.is_some_and(is_process_running);
+    if !running {
+        return Ok(());
+    }
+
+    println!("Restarting daemon...");
+    let port = read_port_file(root)?.unwrap_or(8848);
+    let security_override = None;
+    crate::commands::start::run_restart(root, port, security_override).await?;
     Ok(())
 }
 

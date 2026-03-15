@@ -51,12 +51,12 @@ pub struct Orchestrator {
     hook_registry: super::hooks::HookRegistry,
     skill_registry: ArcSwap<SkillRegistry>,
     skills_root: std::path::PathBuf,
-    #[allow(dead_code)]
     memory: Arc<MemoryStore>,
     bus: BusPublisher,
     approval_registry: Option<Arc<ApprovalRegistry>>,
     runtime: Arc<dyn TaskExecutor>,
     workspaces: AgentWorkspaceManager,
+    workspace_root: std::path::PathBuf,
     skill_install_state: Arc<SkillInstallState>,
     language_prefs: LanguagePrefs,
 }
@@ -261,6 +261,7 @@ impl Orchestrator {
             approval_registry,
             runtime,
             workspaces,
+            workspace_root,
             skill_install_state: Arc::new(SkillInstallState::new(900)),
             language_prefs: LanguagePrefs::new(),
         }
@@ -747,9 +748,40 @@ impl Orchestrator {
         self.workspaces.search_index(agent_id)
     }
 
-    /// Ensure workspace directories exist for all agents
     pub async fn ensure_workspaces(&self) -> Result<()> {
         self.workspaces.ensure_all().await
+    }
+
+    pub fn ensure_workspaces_for(
+        &self,
+        config: &crate::config::ClawhiveConfig,
+        agent_ids: &[String],
+    ) {
+        let current = self.workspaces.load_full();
+        let mut new_map: HashMap<String, Arc<AgentWorkspaceState>> = (*current).clone();
+        for agent_id in agent_ids {
+            if new_map.contains_key(agent_id) {
+                continue;
+            }
+            let agent_cfg = config.agents.iter().find(|a| &a.agent_id == agent_id);
+            let ws = Workspace::resolve(
+                &self.workspace_root,
+                agent_id,
+                agent_cfg.and_then(|a| a.workspace.as_deref()),
+            );
+            let ws_root = ws.root().to_path_buf();
+            let gate = Arc::new(AccessGate::new(ws_root.clone(), ws.access_policy_path()));
+            let state = AgentWorkspaceState {
+                workspace: ws,
+                file_store: MemoryFileStore::new(&ws_root),
+                session_writer: SessionWriter::new(&ws_root),
+                session_reader: SessionReader::new(&ws_root),
+                search_index: SearchIndex::new(self.memory.db()),
+                access_gate: gate,
+            };
+            new_map.insert(agent_id.clone(), Arc::new(state));
+        }
+        self.workspaces.swap_workspaces(new_map);
     }
 
     /// Get a reference to the hook registry for registering hooks.

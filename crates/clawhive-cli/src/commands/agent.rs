@@ -5,6 +5,17 @@ use clap::Subcommand;
 use clawhive_core::load_config;
 
 use crate::runtime::bootstrap::toggle_agent;
+use crate::runtime::pid::{is_process_running, read_pid_file};
+
+fn print_reload_hint(root: &Path) {
+    let running = read_pid_file(root)
+        .ok()
+        .flatten()
+        .is_some_and(is_process_running);
+    if running {
+        println!("Run `clawhive reload` to apply changes to the running service.");
+    }
+}
 
 #[derive(Subcommand)]
 pub(crate) enum AgentCommands {
@@ -83,11 +94,13 @@ pub(crate) fn run(cmd: AgentCommands, root: &Path) -> Result<()> {
             let config_dir = root.join("config/agents.d");
             toggle_agent(&config_dir, &agent_id, true)?;
             println!("Agent '{agent_id}' enabled.");
+            print_reload_hint(root);
         }
         AgentCommands::Disable { agent_id } => {
             let config_dir = root.join("config/agents.d");
             toggle_agent(&config_dir, &agent_id, false)?;
             println!("Agent '{agent_id}' disabled.");
+            print_reload_hint(root);
         }
     }
     Ok(())

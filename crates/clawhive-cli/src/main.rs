@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
             version,
             yes,
         } => {
-            commands::update::handle_update(check, channel, version, yes).await?;
+            commands::update::handle_update(&cli.config_root, check, channel, version, yes).await?;
         }
         Commands::Logs { lines } => {
             commands::logs::run(&cli.config_root, lines)?;

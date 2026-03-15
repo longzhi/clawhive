@@ -65,6 +65,10 @@ impl AgentWorkspaceManager {
         self.get(agent_id).access_gate.clone()
     }
 
+    pub fn load_full(&self) -> Arc<HashMap<String, Arc<AgentWorkspaceState>>> {
+        self.workspaces.load_full()
+    }
+
     pub fn swap_workspaces(&self, new_map: HashMap<String, Arc<AgentWorkspaceState>>) {
         self.workspaces.store(Arc::new(new_map));
     }
