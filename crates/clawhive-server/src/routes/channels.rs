@@ -194,8 +194,15 @@ async fn get_channels_status(
                         && !bot_id.starts_with("${")
                         && !secret.starts_with("${")
                 }
+                "whatsapp" | "imessage" => true,
+                "slack" => {
+                    let bot_token = connector_map
+                        .get(serde_yaml::Value::String("bot_token".to_string()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap_or_default();
+                    !bot_token.is_empty() && !bot_token.starts_with("${")
+                }
                 _ => {
-                    // Token-based channels: telegram, discord, slack, whatsapp, imessage
                     let token = connector_map
                         .get(serde_yaml::Value::String("token".to_string()))
                         .and_then(serde_yaml::Value::as_str)
