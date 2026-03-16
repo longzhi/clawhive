@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::search_index::SearchIndex;
@@ -116,6 +116,26 @@ impl HippocampusConsolidator {
             .await?;
 
         let updated_memory = strip_markdown_fence(&response.text);
+        if let Err(error) = validate_consolidation_output(&updated_memory, &current_memory) {
+            tracing::warn!(error = %error, "Skipping consolidation write due to invalid LLM output");
+            return Ok(ConsolidationReport {
+                daily_files_read: recent_daily.len(),
+                memory_updated: false,
+                reindexed: false,
+                summary: "Consolidation skipped because LLM output failed validation.".to_string(),
+            });
+        }
+
+        if updated_memory.trim() == "[KEEP]" {
+            tracing::info!("Consolidation returned [KEEP]; leaving MEMORY.md unchanged");
+            return Ok(ConsolidationReport {
+                daily_files_read: recent_daily.len(),
+                memory_updated: false,
+                reindexed: false,
+                summary: "Consolidation returned [KEEP]; MEMORY.md unchanged.".to_string(),
+            });
+        }
+
         self.file_store.write_long_term(&updated_memory).await?;
 
         let reindexed = if let (Some(index), Some(provider), Some(fs)) = (
@@ -162,6 +182,39 @@ fn strip_markdown_fence(text: &str) -> String {
         .unwrap_or(without_prefix)
         .trim_end()
         .to_string()
+}
+
+fn validate_consolidation_output(output: &str, existing: &str) -> Result<()> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("consolidation output is empty"));
+    }
+
+    if trimmed == "[KEEP]" {
+        return Ok(());
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    for refusal in [
+        "i cannot",
+        "i can't",
+        "i'm unable",
+        "i apologize",
+        "i'm sorry",
+    ] {
+        if lowered.starts_with(refusal) {
+            return Err(anyhow!("consolidation output looks like a refusal"));
+        }
+    }
+
+    let existing_len = existing.trim().len();
+    if existing_len > 0 && trimmed.len() * 2 < existing_len {
+        return Err(anyhow!(
+            "consolidation output shrank too much compared with existing memory"
+        ));
+    }
+
+    Ok(())
 }
 
 pub struct ConsolidationScheduler {
@@ -219,7 +272,10 @@ mod tests {
     use clawhive_provider::{ProviderRegistry, StubProvider};
     use tempfile::TempDir;
 
-    use super::{ConsolidationReport, ConsolidationScheduler, HippocampusConsolidator};
+    use super::{
+        validate_consolidation_output, ConsolidationReport, ConsolidationScheduler,
+        HippocampusConsolidator,
+    };
     use crate::router::LlmRouter;
 
     fn build_router() -> Arc<LlmRouter> {
@@ -251,6 +307,51 @@ mod tests {
         assert!(!report.memory_updated);
         assert!(!report.reindexed);
         assert_eq!(report.summary, "none");
+    }
+
+    #[test]
+    fn validate_rejects_empty_output() {
+        let result = validate_consolidation_output("   \n\t", "# Existing\n\nUseful memory.");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_refusal() {
+        let result = validate_consolidation_output(
+            "I cannot help with that request.",
+            "# Existing\n\nUseful memory.",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_drastic_shrink() {
+        let existing =
+            "# Existing\n\nThis memory has enough content to be considered a healthy baseline.";
+        let result = validate_consolidation_output("Too short", existing);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_accepts_keep() {
+        let result = validate_consolidation_output("[KEEP]", "# Existing\n\nUseful memory.");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_normal_output() {
+        let existing =
+            "# Existing\n\nThis memory has enough content to be considered a healthy baseline.";
+        let output = "# Updated\n\nThis memory keeps the prior knowledge and adds a little more stable detail for future use.";
+        let result = validate_consolidation_output(output, existing);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_when_existing_is_empty() {
+        let output = "# First Memory\n\nThis is the first consolidation output and it should be accepted even if there is no prior memory content.";
+        let result = validate_consolidation_output(output, "");
+        assert!(result.is_ok());
     }
 
     #[test]
