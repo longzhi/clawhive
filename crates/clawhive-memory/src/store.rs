@@ -103,6 +103,10 @@ impl MemoryStore {
         Arc::clone(&self.db)
     }
 
+    #[deprecated(
+        since = "0.1.0-alpha",
+        note = "Will be replaced by Facts auxiliary layer. See memory-system-revised-plan."
+    )]
     pub async fn insert_episode(&self, episode: Episode) -> Result<()> {
         let db = Arc::clone(&self.db);
         task::spawn_blocking(move || {
@@ -196,6 +200,10 @@ impl MemoryStore {
         .await?
     }
 
+    #[deprecated(
+        since = "0.1.0-alpha",
+        note = "Will be replaced by Facts auxiliary layer. See memory-system-revised-plan."
+    )]
     pub async fn upsert_concept(&self, concept: Concept) -> Result<()> {
         let db = Arc::clone(&self.db);
         task::spawn_blocking(move || {
@@ -309,6 +317,10 @@ impl MemoryStore {
         .await?
     }
 
+    #[deprecated(
+        since = "0.1.0-alpha",
+        note = "Will be replaced by Facts auxiliary layer. See memory-system-revised-plan."
+    )]
     pub async fn insert_link(&self, link: Link) -> Result<()> {
         let db = Arc::clone(&self.db);
         task::spawn_blocking(move || {
@@ -695,6 +707,7 @@ fn row_to_concept(row: &Row<'_>) -> rusqlite::Result<Concept> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests still exercise deprecated Episode/Concept/Link writes until the layer is removed.
 mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
