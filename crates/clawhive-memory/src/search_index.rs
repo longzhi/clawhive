@@ -406,14 +406,51 @@ impl SearchIndex {
         let sessions = reader.list_sessions().await?;
         let mut total = 0;
 
-        for session_id in sessions {
-            match self.index_session(&session_id, reader, provider).await {
+        for session_id in &sessions {
+            match self.index_session(session_id, reader, provider).await {
                 Ok(count) => total += count,
                 Err(error) => {
                     tracing::warn!(session_id = %session_id, %error, "failed to index session");
                 }
             }
         }
+
+        // Remove stale session entries that no longer have backing JSONL files.
+        // This handles /new (reset) and manual session deletions.
+        let active_paths: std::collections::HashSet<String> =
+            sessions.iter().map(|id| format!("sessions/{id}")).collect();
+
+        let db = Arc::clone(&self.db);
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+
+            let mut stmt =
+                conn.prepare("SELECT path FROM files WHERE source = 'session'")?;
+            let indexed_paths: Vec<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for path in indexed_paths {
+                if !active_paths.contains(&path) {
+                    tracing::info!(path = %path, "removing stale session index");
+                    let tx = conn.unchecked_transaction()?;
+                    tx.execute("DELETE FROM chunks_fts WHERE path = ?1", params![&path])?;
+                    tx.execute(
+                        "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE path = ?1)",
+                        params![&path],
+                    )?;
+                    tx.execute("DELETE FROM chunks WHERE path = ?1", params![&path])?;
+                    tx.execute("DELETE FROM files WHERE path = ?1", params![&path])?;
+                    tx.commit()?;
+                }
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
 
         Ok(total)
     }
@@ -1496,6 +1533,54 @@ mod tests {
             |r| r.get(0),
         )?;
         assert_eq!(indexed_paths, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_sessions_removes_stale_entries() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer.append_message("s1", "user", "alpha").await?;
+        writer.start_session("s2", "main").await?;
+        writer.append_message("s2", "user", "beta").await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db));
+        let provider = StubEmbeddingProvider::new(8);
+
+        index.index_sessions(&reader, &provider).await?;
+        {
+            let conn = db.lock().expect("lock");
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(DISTINCT path) FROM chunks WHERE source = 'session'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 2);
+        }
+
+        let s2_path = dir.path().join("sessions").join("s2.jsonl");
+        std::fs::remove_file(&s2_path).expect("remove s2 file");
+
+        index.index_sessions(&reader, &provider).await?;
+        {
+            let conn = db.lock().expect("lock");
+            let remaining: i64 = conn.query_row(
+                "SELECT COUNT(DISTINCT path) FROM chunks WHERE source = 'session'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(remaining, 1);
+
+            let stale_files: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'sessions/s2'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(stale_files, 0);
+        }
         Ok(())
     }
 

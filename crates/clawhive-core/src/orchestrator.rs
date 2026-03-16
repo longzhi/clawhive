@@ -2170,7 +2170,15 @@ impl Orchestrator {
 
         match results {
             Ok(results) if !results.is_empty() => Ok(clamp_to_budget(&results, budget)),
-            _ => self.file_store_for(agent_id).build_memory_context().await,
+            _ => {
+                let fallback = self.file_store_for(agent_id).build_memory_context().await?;
+                if fallback.len() > budget {
+                    let truncated: String = fallback.chars().take(budget).collect();
+                    Ok(format!("{truncated}\n...[truncated]"))
+                } else {
+                    Ok(fallback)
+                }
+            }
         }
     }
 }
