@@ -632,6 +632,8 @@ impl Default for SandboxPolicyConfig {
 pub struct MemoryPolicyConfig {
     pub mode: String,
     pub write_scope: String,
+    #[serde(default)]
+    pub limit_history_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

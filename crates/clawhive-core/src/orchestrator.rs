@@ -1014,9 +1014,10 @@ impl Orchestrator {
         };
 
         let workspace = self.workspace_state_for(agent_id);
+        let history_limit = history_message_limit(agent);
         let history_messages = match workspace
             .session_reader
-            .load_recent_messages(&session_key.0, 10)
+            .load_recent_messages(&session_key.0, history_limit)
             .await
         {
             Ok(msgs) => msgs,
@@ -1299,9 +1300,10 @@ impl Orchestrator {
         };
 
         let workspace = self.workspace_state_for(agent_id);
+        let history_limit = history_message_limit(agent);
         let history_messages = match workspace
             .session_reader
-            .load_recent_messages(&session_key.0, 10)
+            .load_recent_messages(&session_key.0, history_limit)
             .await
         {
             Ok(msgs) => msgs,
@@ -2095,9 +2097,10 @@ impl Orchestrator {
         agent: &FullAgentConfig,
     ) {
         let workspace = self.workspace_state_for(agent_id);
+        let history_limit = history_message_limit(agent).max(20);
         let messages = match workspace
             .session_reader
-            .load_recent_messages(&session_key.0, 20)
+            .load_recent_messages(&session_key.0, history_limit)
             .await
         {
             Ok(msgs) if !msgs.is_empty() => msgs,
@@ -2429,6 +2432,15 @@ fn is_slow_latency_ms(duration_ms: u64, threshold_ms: u64) -> bool {
     duration_ms >= threshold_ms
 }
 
+fn history_message_limit(agent: &FullAgentConfig) -> usize {
+    agent
+        .memory_policy
+        .as_ref()
+        .and_then(|policy| policy.limit_history_turns)
+        .map(|turns| (turns as usize) * 2)
+        .unwrap_or(10)
+}
+
 fn is_explicit_web_search_request(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -2632,6 +2644,30 @@ mod tests {
     use clawhive_memory::SessionMessage;
     use serde_json::json;
 
+    fn agent_with_memory_policy(
+        memory_policy: Option<crate::config::MemoryPolicyConfig>,
+    ) -> FullAgentConfig {
+        FullAgentConfig {
+            agent_id: "test-agent".to_string(),
+            enabled: true,
+            security: SecurityMode::default(),
+            workspace: None,
+            identity: None,
+            model_policy: crate::ModelPolicy {
+                primary: "openai/gpt-4.1".to_string(),
+                fallbacks: vec![],
+                thinking_level: None,
+                context_window: None,
+            },
+            tool_policy: None,
+            memory_policy,
+            sub_agent: None,
+            heartbeat: None,
+            exec_security: None,
+            sandbox: None,
+        }
+    }
+
     fn assistant_with_tool_use(id: &str) -> LlmMessage {
         LlmMessage {
             role: "assistant".to_string(),
@@ -2766,6 +2802,24 @@ Body"#,
         let perms = merged.expect("compute_merged_permissions returns Some when skills have perms");
         assert!(perms.network.allow.contains(&"api.a.com:443".to_string()));
         assert!(perms.network.allow.contains(&"api.b.com:443".to_string()));
+    }
+
+    #[test]
+    fn history_message_limit_defaults_to_10() {
+        let agent = agent_with_memory_policy(None);
+
+        assert_eq!(history_message_limit(&agent), 10);
+    }
+
+    #[test]
+    fn history_message_limit_converts_turns() {
+        let agent = agent_with_memory_policy(Some(crate::config::MemoryPolicyConfig {
+            mode: "session".to_string(),
+            write_scope: "session".to_string(),
+            limit_history_turns: Some(7),
+        }));
+
+        assert_eq!(history_message_limit(&agent), 14);
     }
 
     #[test]
