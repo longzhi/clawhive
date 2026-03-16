@@ -544,7 +544,7 @@ impl<P: EmbeddingProvider + 'static> EmbeddingProvider for CachedEmbeddingProvid
             });
         }
 
-        let provider = "openai"; // TODO: make this configurable
+        let provider = self.provider_key.as_str();
         let model = self.inner.model_id();
         let dims = self.inner.dimensions();
 

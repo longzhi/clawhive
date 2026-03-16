@@ -495,49 +495,54 @@ impl SearchIndex {
             }
         } // end if use_vectors
 
-        let db = Arc::clone(&self.db);
-        let query_owned = query.to_owned();
-        let mut bm25_candidates = match task::spawn_blocking(move || {
-            let conn = db
-                .lock()
-                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT id, path, source, start_line, end_line, text, bm25(chunks_fts) AS rank
-                FROM chunks_fts
-                WHERE chunks_fts MATCH ?1
-                ORDER BY rank
-                LIMIT ?2
-                "#,
-            )?;
-            let rows = stmt.query_map(params![query_owned, candidate_limit as i64], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, f64>(6)?,
-                ))
-            })?;
+        let safe_fts_query = build_safe_fts_query(query);
+        let mut bm25_candidates = if safe_fts_query.is_empty() {
+            Vec::new()
+        } else {
+            let db = Arc::clone(&self.db);
+            match task::spawn_blocking(move || {
+                let conn = db
+                    .lock()
+                    .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT id, path, source, start_line, end_line, text, bm25(chunks_fts) AS rank
+                    FROM chunks_fts
+                    WHERE chunks_fts MATCH ?1
+                    ORDER BY rank
+                    LIMIT ?2
+                    "#,
+                )?;
+                let rows =
+                    stmt.query_map(params![safe_fts_query, candidate_limit as i64], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, i64>(4)?,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, f64>(6)?,
+                        ))
+                    })?;
 
-            let mut out = Vec::new();
-            for row in rows {
-                let (chunk_id, path, source, start_line, end_line, text, rank) = row?;
-                let bm25_score = 1.0_f64 / (1.0_f64 + (-rank).max(0.0_f64));
-                out.push((
-                    chunk_id, path, source, start_line, end_line, text, bm25_score,
-                ));
-            }
-            Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
-        })
-        .await?
-        {
-            Ok(candidates) => candidates,
-            Err(e) => {
-                tracing::debug!("BM25 search failed (falling back to vector-only): {e}");
-                Vec::new()
+                let mut out = Vec::new();
+                for row in rows {
+                    let (chunk_id, path, source, start_line, end_line, text, rank) = row?;
+                    let bm25_score = 1.0_f64 / (1.0_f64 + (-rank).max(0.0_f64));
+                    out.push((
+                        chunk_id, path, source, start_line, end_line, text, bm25_score,
+                    ));
+                }
+                Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
+            })
+            .await?
+            {
+                Ok(candidates) => candidates,
+                Err(e) => {
+                    tracing::debug!("BM25 search failed (falling back to vector-only): {e}");
+                    Vec::new()
+                }
             }
         };
 
@@ -657,6 +662,25 @@ fn extract_date_from_path(path: &str) -> Option<chrono::NaiveDate> {
         .trim_end_matches(".md");
 
     chrono::NaiveDate::parse_from_str(re_pattern, "%Y-%m-%d").ok()
+}
+
+fn build_safe_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter_map(|raw_token| {
+            let token = raw_token.trim_matches('"').replace(['"', '*', '^'], "");
+
+            if token.is_empty() {
+                return None;
+            }
+
+            match token.to_ascii_uppercase().as_str() {
+                "AND" | "OR" | "NOT" | "NEAR" => None,
+                _ => Some(format!("\"{token}\"")),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Jaccard similarity between two texts (tokenized by whitespace)
@@ -1121,6 +1145,45 @@ mod tests {
 
         let results = index.search("anything", &provider, 6, 0.0).await?;
         assert!(results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_safe_fts_query_strips_operators() {
+        assert_eq!(
+            build_safe_fts_query("hello OR world AND NOT bad"),
+            r#""hello" "world" "bad""#
+        );
+    }
+
+    #[test]
+    fn test_build_safe_fts_query_escapes_quotes() {
+        assert_eq!(build_safe_fts_query(r#""test*""#), r#""test""#);
+    }
+
+    #[test]
+    fn test_build_safe_fts_query_empty_input() {
+        assert_eq!(build_safe_fts_query(""), "");
+        assert_eq!(build_safe_fts_query("OR AND NOT"), "");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_fts_special_chars() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db);
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Title\n\nhello world",
+                "long_term",
+                &provider,
+            )
+            .await?;
+
+        let results = index.search("hello OR world*", &provider, 6, 0.0).await?;
+        assert!(!results.is_empty());
         Ok(())
     }
 
