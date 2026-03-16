@@ -3,6 +3,7 @@ use crate::models::{Concept, ConceptStatus, ConceptType, Episode, Link, LinkRela
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -634,11 +635,29 @@ fn parse_uuid_sql(raw: &str) -> rusqlite::Result<Uuid> {
     })
 }
 
+fn parse_json_field_or_default<T>(field_name: &str, record_id: &str, raw: &str) -> T
+where
+    T: DeserializeOwned + Default,
+{
+    match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                field = field_name,
+                record_id,
+                error = %error,
+                "failed to parse memory JSON field"
+            );
+            T::default()
+        }
+    }
+}
+
 fn row_to_episode(row: &Row<'_>) -> rusqlite::Result<Episode> {
     let id_raw: String = row.get(0)?;
     let ts_raw: String = row.get(1)?;
     let tags_raw: String = row.get(5)?;
-    let tags: Vec<String> = serde_json::from_str(&tags_raw).unwrap_or_default();
+    let tags: Vec<String> = parse_json_field_or_default("tags", &id_raw, &tags_raw);
 
     Ok(Episode {
         id: parse_uuid_sql(&id_raw)?,
@@ -660,7 +679,7 @@ fn row_to_concept(row: &Row<'_>) -> rusqlite::Result<Concept> {
     let first_seen_raw: String = row.get(6)?;
     let last_verified_raw: String = row.get(7)?;
     let status_raw: String = row.get(8)?;
-    let evidence: Vec<String> = serde_json::from_str(&evidence_raw).unwrap_or_default();
+    let evidence: Vec<String> = parse_json_field_or_default("evidence", &id_raw, &evidence_raw);
 
     Ok(Concept {
         id: parse_uuid_sql(&id_raw)?,
@@ -677,7 +696,67 @@ fn row_to_concept(row: &Row<'_>) -> rusqlite::Result<Concept> {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedLogBuffer {
+        fn as_string(&self) -> String {
+            String::from_utf8(self.inner.lock().expect("log buffer lock").clone())
+                .expect("utf8 log buffer")
+        }
+    }
+
+    struct SharedLogWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("log writer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    fn capture_logs<F>(f: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        buffer.as_string()
+    }
 
     fn make_episode(session_id: &str, text: &str, offset_seconds: i64) -> Episode {
         Episode {
@@ -712,6 +791,18 @@ mod tests {
     async fn open_in_memory_succeeds() {
         let store = MemoryStore::open_in_memory();
         assert!(store.is_ok());
+    }
+
+    #[test]
+    fn parse_json_field_logs_warning_and_falls_back_to_default() {
+        let logs = capture_logs(|| {
+            let parsed: Vec<String> = parse_json_field_or_default("tags", "episode-1", "not json");
+            assert!(parsed.is_empty());
+        });
+
+        assert!(logs.contains("failed to parse memory JSON field"));
+        assert!(logs.contains("tags"));
+        assert!(logs.contains("episode-1"));
     }
 
     #[tokio::test]

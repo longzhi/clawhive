@@ -21,3 +21,4 @@ fs2 = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true
+tracing-subscriber.workspace = true
