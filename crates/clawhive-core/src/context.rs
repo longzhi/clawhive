@@ -294,11 +294,16 @@ pub async fn compact_messages(
 pub struct ContextManager {
     config: ContextConfig,
     router: Arc<LlmRouter>,
+    compaction_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl ContextManager {
     pub fn new(router: Arc<LlmRouter>, config: ContextConfig) -> Self {
-        Self { config, router }
+        Self {
+            config,
+            router,
+            compaction_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
     }
 
     /// Return a new ContextManager with config adjusted for the given context window.
@@ -307,6 +312,7 @@ impl ContextManager {
         Self {
             config: ContextConfig::for_model(context_window),
             router: self.router.clone(),
+            compaction_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -343,6 +349,20 @@ impl ContextManager {
         if !should_compact(&messages, &self.config) {
             return Ok((messages, None));
         }
+
+        let _permit = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.compaction_semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err(anyhow::anyhow!("compaction semaphore closed")),
+            Err(_) => {
+                tracing::warn!("compaction semaphore timeout after 30s, skipping compaction");
+                return Ok((messages, None));
+            }
+        };
 
         // Need to compact
         let (compacted, result) =
@@ -403,6 +423,10 @@ impl ContextManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use clawhive_provider::ProviderRegistry;
+
     use super::*;
 
     #[test]
@@ -483,5 +507,27 @@ mod tests {
     fn test_context_config_includes_memory_flush() {
         let config = ContextConfig::default();
         assert!(config.memory_flush.enabled);
+    }
+
+    #[test]
+    fn test_context_manager_initializes_independent_compaction_semaphores() {
+        let router = Arc::new(LlmRouter::new(
+            ProviderRegistry::new(),
+            HashMap::new(),
+            vec![],
+        ));
+        let manager = ContextManager::new(router, ContextConfig::default());
+        let adjusted = manager.for_context_window(32_000);
+
+        assert_eq!(manager.compaction_semaphore.available_permits(), 1);
+        assert_eq!(adjusted.compaction_semaphore.available_permits(), 1);
+
+        let _permit = manager
+            .compaction_semaphore
+            .try_acquire()
+            .expect("manager semaphore should have one permit");
+
+        assert_eq!(manager.compaction_semaphore.available_permits(), 0);
+        assert_eq!(adjusted.compaction_semaphore.available_permits(), 1);
     }
 }

@@ -5,6 +5,67 @@ use tokio::fs;
 
 use crate::safe_io;
 
+fn smart_truncate(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+
+    let mut sections = Vec::new();
+    let mut current = String::new();
+
+    for line in content.split_inclusive('\n') {
+        let is_heading = line.starts_with("# ") || line.starts_with("## ");
+        if is_heading && !current.is_empty() {
+            sections.push(current);
+            current = String::new();
+        }
+        current.push_str(line);
+    }
+
+    if !current.is_empty() {
+        sections.push(current);
+    }
+
+    let mut kept = String::new();
+    for section in &sections {
+        if kept.chars().count() + section.chars().count() > max_chars {
+            if kept.is_empty() {
+                return truncate_at_last_newline(content, max_chars);
+            }
+
+            return append_truncation_marker(&kept);
+        }
+
+        kept.push_str(section);
+    }
+
+    append_truncation_marker(&kept)
+}
+
+fn truncate_at_last_newline(content: &str, max_chars: usize) -> String {
+    let cutoff = byte_index_at_char_limit(content, max_chars);
+    let truncated = content[..cutoff]
+        .rfind('\n')
+        .map(|idx| &content[..idx])
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or(&content[..cutoff]);
+
+    append_truncation_marker(truncated)
+}
+
+fn byte_index_at_char_limit(content: &str, max_chars: usize) -> usize {
+    content
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(content.len())
+}
+
+fn append_truncation_marker(content: &str) -> String {
+    let trimmed = content.trim_end_matches('\n');
+    format!("{trimmed}\n...[truncated]")
+}
+
 /// Manages MEMORY.md and memory/YYYY-MM-DD.md files
 #[derive(Clone)]
 pub struct MemoryFileStore {
@@ -119,7 +180,7 @@ impl MemoryFileStore {
 
     pub async fn build_memory_context(&self) -> Result<String> {
         let long_term = self.read_long_term().await?;
-        let long_term_truncated: String = long_term.chars().take(2000).collect();
+        let long_term_truncated = smart_truncate(&long_term, 4000);
 
         let mut sections = vec![
             "[Memory Context]".to_string(),
@@ -158,7 +219,7 @@ impl MemoryFileStore {
 
 #[cfg(test)]
 mod tests {
-    use super::MemoryFileStore;
+    use super::{smart_truncate, MemoryFileStore};
     use anyhow::Result;
     use chrono::NaiveDate;
     use tempfile::TempDir;
@@ -321,7 +382,14 @@ mod tests {
         let dir = TempDir::new()?;
         let store = MemoryFileStore::new(dir.path());
 
-        let long_term = "A".repeat(2500);
+        let long_term = [
+            "# Profile\nAlpha\n",
+            "## Goals\n",
+            &"A".repeat(3970),
+            "\n",
+            "## Later\nBeta\n",
+        ]
+        .concat();
         store.write_long_term(&long_term).await?;
         store.write_daily(date(2026, 2, 11), "daily-1").await?;
         store.write_daily(date(2026, 2, 12), "daily-2").await?;
@@ -330,12 +398,48 @@ mod tests {
 
         let ctx = store.build_memory_context().await?;
         assert!(ctx.starts_with("[Memory Context]\n\nFrom MEMORY.md:\n"));
-        assert!(ctx.contains(&"A".repeat(2000)));
-        assert!(!ctx.contains(&"A".repeat(2001)));
+        assert!(ctx.contains("# Profile\nAlpha\n"));
+        assert!(ctx.contains("## Goals\n"));
+        assert!(ctx.contains("...[truncated]"));
+        assert!(!ctx.contains("## Later\nBeta\n"));
         assert!(ctx.contains("From memory/2026-02-14.md:\n"));
         assert!(ctx.contains("From memory/2026-02-13.md:\n"));
         assert!(ctx.contains("From memory/2026-02-12.md:\n"));
         assert!(!ctx.contains("From memory/2026-02-11.md:\n"));
         Ok(())
+    }
+
+    #[test]
+    fn test_smart_truncate_short_content() {
+        let content = "# Title\nshort\n";
+
+        assert_eq!(smart_truncate(content, 4000), content);
+    }
+
+    #[test]
+    fn test_smart_truncate_splits_at_headings() {
+        let content = "# First\nKeep\n\n## Second\nAlso keep\n\n## Third\nDrop\n";
+
+        assert_eq!(
+            smart_truncate(content, 35),
+            "# First\nKeep\n\n## Second\nAlso keep\n...[truncated]"
+        );
+    }
+
+    #[test]
+    fn test_smart_truncate_single_large_section() {
+        let content = ["# Large\n", &"A".repeat(5000), "\nnext line\n"].concat();
+        let truncated = smart_truncate(&content, 4000);
+
+        assert!(truncated.ends_with("\n...[truncated]"));
+        assert!(truncated.len() <= 4000 + "\n...[truncated]".len());
+        assert!(!truncated.contains("next line"));
+    }
+
+    #[test]
+    fn test_smart_truncate_adds_marker() {
+        let content = "# One\nAlpha\n\n## Two\nBeta\n";
+
+        assert!(smart_truncate(content, 12).ends_with("\n...[truncated]"));
     }
 }
