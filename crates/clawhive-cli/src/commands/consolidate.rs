@@ -27,7 +27,8 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
         .with_file_store_for_reindex(file_store),
     );
 
-    let scheduler = ConsolidationScheduler::new(consolidator, 24);
+    let scheduler =
+        ConsolidationScheduler::new(consolidator, config.main.consolidation_interval_hours);
     println!("Running hippocampus consolidation...");
     let report = scheduler.run_once().await?;
     println!("Consolidation complete:");

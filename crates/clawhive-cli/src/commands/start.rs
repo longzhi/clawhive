@@ -545,9 +545,13 @@ async fn start_bot(
         .with_embedding_provider(consolidation_embedding_provider)
         .with_file_store_for_reindex(file_store_for_consolidation),
     );
-    let scheduler = ConsolidationScheduler::new(consolidator, 24);
+    let consolidation_interval_hours = config.main.consolidation_interval_hours;
+    let scheduler = ConsolidationScheduler::new(consolidator, consolidation_interval_hours);
     let _consolidation_handle = scheduler.start();
-    tracing::info!("Hippocampus consolidation scheduler started (every 24h)");
+    tracing::info!(
+        interval_hours = consolidation_interval_hours,
+        "Hippocampus consolidation scheduler started"
+    );
 
     let schedule_manager_for_loop = Arc::clone(&schedule_manager);
     let _schedule_handle = tokio::spawn(async move {
