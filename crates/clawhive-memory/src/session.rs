@@ -79,7 +79,7 @@ impl SessionWriter {
             agent_id: agent_id.to_owned(),
         };
         let line = serde_json::to_string(&entry)?;
-        tokio::fs::write(&path, format!("{line}\n")).await?;
+        safe_io::atomic_write(&path, format!("{line}\n").as_bytes()).await?;
         Ok(path)
     }
 
@@ -169,7 +169,7 @@ impl SessionReader {
     /// Load ALL entries from a session file
     pub async fn load_all_entries(&self, session_id: &str) -> Result<Vec<SessionEntry>> {
         let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
-        let content = tokio::fs::read_to_string(path).await?;
+        let content = safe_io::locked_read_string(&path).await?;
         let mut entries = Vec::new();
 
         for (index, line) in content.lines().enumerate() {

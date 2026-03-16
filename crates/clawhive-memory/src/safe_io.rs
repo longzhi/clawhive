@@ -1,7 +1,7 @@
 use anyhow::Result;
 use fs2::FileExt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 pub async fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
@@ -47,6 +47,64 @@ pub async fn locked_append(path: &Path, content: &[u8]) -> Result<()> {
     .await??;
 
     Ok(())
+}
+
+pub async fn locked_append_with_header(path: &Path, header: &[u8], content: &[u8]) -> Result<()> {
+    let path = path.to_path_buf();
+    let header = header.to_vec();
+    let content = content.to_vec();
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+
+        file.lock_exclusive()?;
+
+        let write_result = (|| -> Result<()> {
+            if file.metadata()?.len() == 0 {
+                file.write_all(&header)?;
+            }
+            file.write_all(&content)?;
+            file.flush()?;
+            Ok(())
+        })();
+
+        let unlock_result = file.unlock();
+        write_result?;
+        unlock_result?;
+
+        Ok(())
+    })
+    .await??;
+
+    Ok(())
+}
+
+pub async fn locked_read(path: &Path) -> Result<Vec<u8>> {
+    let path = path.to_path_buf();
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let mut file = fs::File::open(&path)?;
+        file.lock_shared()?;
+
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)?;
+
+        file.unlock()?;
+        Ok(content)
+    })
+    .await?
+}
+
+pub async fn locked_read_string(path: &Path) -> Result<String> {
+    let bytes = locked_read(path).await?;
+    Ok(String::from_utf8(bytes)?)
 }
 
 pub async fn safe_overwrite(path: &Path, content: &[u8]) -> Result<()> {

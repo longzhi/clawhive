@@ -110,26 +110,17 @@ impl MemoryFileStore {
         self.ensure_daily_dir().await?;
         let path = self.daily_path(date);
 
-        let needs_header = match fs::metadata(&path).await {
-            Ok(metadata) => metadata.len() == 0,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-            Err(err) => return Err(err.into()),
-        };
+        let header = format!("# {}\n\n", date.format("%Y-%m-%d"));
+        let body = format!("\n{content}\n");
 
-        let mut append_content = String::new();
-        if needs_header {
-            append_content.push_str(&format!("# {}\n\n", date.format("%Y-%m-%d")));
-        }
-        append_content.push_str(&format!("\n{content}\n"));
-
-        safe_io::locked_append(&path, append_content.as_bytes()).await?;
+        safe_io::locked_append_with_header(&path, header.as_bytes(), body.as_bytes()).await?;
         Ok(())
     }
 
     /// Overwrite a daily file (used by hippocampus)
     pub async fn write_daily(&self, date: NaiveDate, content: &str) -> Result<()> {
         self.ensure_daily_dir().await?;
-        fs::write(self.daily_path(date), content).await?;
+        safe_io::atomic_write(&self.daily_path(date), content.as_bytes()).await?;
         Ok(())
     }
 
