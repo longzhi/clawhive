@@ -33,6 +33,7 @@ impl DiscordAdapter {
         channel_id: u64,
         user_id: u64,
         text: &str,
+        message_id: Option<u64>,
     ) -> InboundMessage {
         let conversation_scope = match guild_id {
             Some(gid) => format!("guild:{gid}:channel:{channel_id}"),
@@ -49,7 +50,7 @@ impl DiscordAdapter {
             thread_id: None,
             is_mention: false,
             mention_target: None,
-            message_id: None,
+            message_id: message_id.map(|id| id.to_string()),
             attachments: vec![],
             message_source: None,
         }
@@ -295,7 +296,21 @@ impl EventHandler for DiscordHandler {
             return;
         }
 
-        let mut inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, text);
+        // Capture quoted message text from Discord reply
+        let quoted_text = msg
+            .referenced_message
+            .as_ref()
+            .map(|quoted| quoted.content.clone());
+
+        let composed_text = compose_inbound_text(text, quoted_text.as_deref());
+
+        let mut inbound = adapter.to_inbound(
+            guild_id,
+            channel_id.get(),
+            user_id,
+            &composed_text,
+            Some(msg.id.get()),
+        );
         inbound.is_mention = is_mention;
         inbound.mention_target = if is_mention {
             Some(format!("<@{}>", current_user_id.get()))
@@ -337,6 +352,7 @@ impl EventHandler for DiscordHandler {
         let gateway = self.gateway.clone();
         let http = ctx.http.clone();
         let http_typing = ctx.http.clone();
+        let user_msg_id = msg.id.get().to_string();
         tokio::spawn(async move {
             // Spawn a task to keep typing indicator alive
             let typing_handle = tokio::spawn({
@@ -363,7 +379,8 @@ impl EventHandler for DiscordHandler {
                     } else {
                         outbound.text.as_str()
                     };
-                    if let Err(err) = send_chunked(channel_id, &http, reply).await {
+                    let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
+                    if let Err(err) = send_chunked(channel_id, &http, reply, Some(reply_to)).await {
                         tracing::error!("failed to send discord reply: {err}");
                     }
                 }
@@ -448,7 +465,7 @@ impl DiscordHandler {
         let guild_id = component.guild_id.map(|id| id.get());
         let channel_id = component.channel_id;
         let user_id = component.user.id.get();
-        let inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, text);
+        let inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, text, None);
 
         let reply_text = match self.gateway.handle_inbound(inbound).await {
             Ok(outbound) => outbound.text,
@@ -510,7 +527,7 @@ impl DiscordHandler {
         let guild_id = cmd.guild_id.map(|id| id.get());
         let channel_id = cmd.channel_id;
         let user_id = cmd.user.id.get();
-        let inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, &text);
+        let inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, &text, None);
 
         match self.gateway.handle_inbound(inbound).await {
             Ok(outbound) => {
@@ -571,12 +588,29 @@ fn split_message(text: &str) -> Vec<&str> {
 }
 
 /// Send a potentially long message as multiple chunks.
+/// If `reply_to` is provided, the first chunk is sent as a reply to that message.
 async fn send_chunked(
     channel_id: ChannelId,
     http: &Http,
     text: &str,
+    reply_to: Option<&str>,
 ) -> Result<(), serenity::Error> {
-    for chunk in split_message(text) {
+    let chunks = split_message(text);
+    let mut first = true;
+    for chunk in chunks {
+        if first {
+            first = false;
+            if let Some(msg_id_str) = reply_to {
+                if let Ok(msg_id) = msg_id_str.parse::<u64>() {
+                    let msg_id = serenity::model::id::MessageId::new(msg_id);
+                    let message = CreateMessage::new()
+                        .content(chunk)
+                        .reference_message((channel_id, msg_id));
+                    channel_id.send_message(http, message).await?;
+                    continue;
+                }
+            }
+        }
         channel_id.say(http, chunk).await?;
     }
     Ok(())
@@ -691,7 +725,7 @@ async fn spawn_delivery_listener(
         };
 
         let channel = ChannelId::new(channel_id);
-        if let Err(e) = send_chunked(channel, &http, &text).await {
+        if let Err(e) = send_chunked(channel, &http, &text, None).await {
             tracing::error!("Failed to deliver announce message: {e}");
         } else {
             tracing::info!("Delivered scheduled task result to channel {}", channel_id);
@@ -845,6 +879,25 @@ async fn spawn_skill_confirm_listener(
     }
 }
 
+/// Compose inbound text with optional quoted message context.
+/// Commands (starting with `/`) are passed through without quoting.
+fn compose_inbound_text(user_text: &str, quoted_text: Option<&str>) -> String {
+    let trimmed_user = user_text.trim();
+    if trimmed_user.starts_with('/') {
+        return user_text.to_string();
+    }
+
+    let quoted = quoted_text.unwrap_or("").trim();
+    if quoted.is_empty() {
+        return user_text.to_string();
+    }
+
+    format!(
+        "[Quoted Message]\n{}\n\n[Current Message]\n{}",
+        quoted, user_text
+    )
+}
+
 /// Download a Discord attachment and return its content as a base64-encoded string.
 async fn download_attachment(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
     use base64::Engine;
@@ -861,7 +914,7 @@ mod tests {
     #[test]
     fn adapter_to_inbound_dm_sets_fields() {
         let adapter = DiscordAdapter::new("dc_main");
-        let msg = adapter.to_inbound(None, 123, 456, "hello");
+        let msg = adapter.to_inbound(None, 123, 456, "hello", None);
         assert_eq!(msg.channel_type, "discord");
         assert_eq!(msg.connector_id, "dc_main");
         assert_eq!(msg.conversation_scope, "dm:123");
@@ -872,14 +925,14 @@ mod tests {
     #[test]
     fn adapter_to_inbound_guild_sets_fields() {
         let adapter = DiscordAdapter::new("dc_main");
-        let msg = adapter.to_inbound(Some(999), 123, 456, "hello");
+        let msg = adapter.to_inbound(Some(999), 123, 456, "hello", None);
         assert_eq!(msg.conversation_scope, "guild:999:channel:123");
     }
 
     #[test]
     fn adapter_to_inbound_defaults() {
         let adapter = DiscordAdapter::new("dc_main");
-        let msg = adapter.to_inbound(None, 123, 456, "hello");
+        let msg = adapter.to_inbound(None, 123, 456, "hello", None);
         assert!(!msg.is_mention);
         assert_eq!(msg.thread_id, None);
         assert_eq!(msg.mention_target, None);
@@ -906,15 +959,15 @@ mod tests {
     fn adapter_to_inbound_text_preservation() {
         let adapter = DiscordAdapter::new("dc_main");
         let text = "  hello 世界 🦀  ";
-        let msg = adapter.to_inbound(None, 123, 456, text);
+        let msg = adapter.to_inbound(None, 123, 456, text, None);
         assert_eq!(msg.text, text);
     }
 
     #[test]
     fn adapter_to_inbound_trace_id_unique() {
         let adapter = DiscordAdapter::new("dc_main");
-        let msg1 = adapter.to_inbound(None, 123, 456, "hello");
-        let msg2 = adapter.to_inbound(None, 123, 456, "hello");
+        let msg1 = adapter.to_inbound(None, 123, 456, "hello", None);
+        let msg2 = adapter.to_inbound(None, 123, 456, "hello", None);
         assert_ne!(msg1.trace_id, msg2.trace_id);
     }
 
@@ -938,7 +991,7 @@ mod tests {
     #[test]
     fn adapter_connector_id_preserved() {
         let adapter = DiscordAdapter::new("dc-prod-1");
-        let msg = adapter.to_inbound(None, 123, 456, "test");
+        let msg = adapter.to_inbound(None, 123, 456, "test", None);
         assert_eq!(msg.connector_id, "dc-prod-1");
     }
 
@@ -998,6 +1051,41 @@ mod tests {
             // Every chunk must be valid UTF-8 (no split mid-char)
             assert!(chunk.is_ascii() || chunk.chars().count() > 0);
         }
+    }
+
+    #[test]
+    fn compose_inbound_text_includes_quoted_context() {
+        let text = compose_inbound_text("这是什么意思？", Some("之前的消息内容"));
+        assert!(text.contains("[Quoted Message]"));
+        assert!(text.contains("之前的消息内容"));
+        assert!(text.contains("[Current Message]"));
+        assert!(text.contains("这是什么意思？"));
+    }
+
+    #[test]
+    fn compose_inbound_text_keeps_command_plain() {
+        let text = compose_inbound_text("/status", Some("之前那条消息"));
+        assert_eq!(text, "/status");
+    }
+
+    #[test]
+    fn compose_inbound_text_without_quote_keeps_original() {
+        let text = compose_inbound_text("你好", None);
+        assert_eq!(text, "你好");
+    }
+
+    #[test]
+    fn to_inbound_with_message_id() {
+        let adapter = DiscordAdapter::new("dc_main");
+        let msg = adapter.to_inbound(None, 123, 456, "hello", Some(789));
+        assert_eq!(msg.message_id, Some("789".to_string()));
+    }
+
+    #[test]
+    fn to_inbound_without_message_id() {
+        let adapter = DiscordAdapter::new("dc_main");
+        let msg = adapter.to_inbound(None, 123, 456, "hello", None);
+        assert_eq!(msg.message_id, None);
     }
 
     #[test]
