@@ -2080,9 +2080,6 @@ impl Orchestrator {
         };
 
         let today = chrono::Utc::now().date_naive();
-        if let Ok(Some(_)) = self.file_store_for(agent_id).read_daily(today).await {
-            return;
-        }
 
         let conversation = messages
             .iter()

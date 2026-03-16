@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -22,6 +23,9 @@ struct FailProvider;
 struct EchoProvider;
 struct ThinkingEchoProvider;
 struct TranscriptProvider;
+struct MultiSessionSummaryProvider {
+    summary_calls: AtomicUsize,
+}
 
 #[async_trait]
 impl LlmProvider for FailProvider {
@@ -78,6 +82,34 @@ impl LlmProvider for TranscriptProvider {
             .collect::<Vec<_>>()
             .join("\n\n");
         let text = format!("{system_part}{messages_part}");
+        Ok(LlmResponse {
+            text: text.clone(),
+            content: vec![ContentBlock::Text { text }],
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: Some("end_turn".into()),
+        })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MultiSessionSummaryProvider {
+    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let text = if request
+            .system
+            .as_deref()
+            .is_some_and(|system| system.starts_with("Summarize this conversation"))
+        {
+            let call = self.summary_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            format!("- fallback summary {call}")
+        } else {
+            request
+                .messages
+                .last()
+                .map(|message| format!("reply: {}", message.text()))
+                .unwrap_or_else(|| "reply: <empty>".to_string())
+        };
+
         Ok(LlmResponse {
             text: text.clone(),
             content: vec![ContentBlock::Text { text }],
@@ -307,6 +339,86 @@ async fn orchestrator_uses_search_index_for_memory_context() {
         .unwrap();
     assert!(out.text.contains("## Relevant Memory"));
     assert!(out.text.contains("MEMORY.md (score:"));
+}
+
+#[tokio::test]
+async fn fallback_summary_appends_for_multiple_expired_sessions_on_same_day() {
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        "summary",
+        Arc::new(MultiSessionSummaryProvider {
+            summary_calls: AtomicUsize::new(0),
+        }),
+    );
+    let aliases = HashMap::from([("summary".to_string(), "summary/model".to_string())]);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let bus = EventBus::new(16);
+    let router = LlmRouter::new(registry, aliases, vec![]);
+    let mut agent = test_full_agent("clawhive-main", "summary", vec![]);
+    agent.workspace = Some(".".to_string());
+    let agents = vec![agent];
+    let file_store = MemoryFileStore::new(tmp.path());
+    let session_writer = SessionWriter::new(tmp.path());
+    let session_reader = SessionReader::new(tmp.path());
+    let search_index = SearchIndex::new(memory.db());
+    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
+    let schedule_manager = Arc::new(
+        ScheduleManager::new(
+            SqliteStore::open(&tmp.path().join("data/scheduler.db")).unwrap(),
+            Arc::new(EventBus::new(16)),
+        )
+        .await
+        .unwrap(),
+    );
+
+    let config_view = build_test_config_view(
+        agents,
+        router,
+        TestToolDeps {
+            publisher: &bus.publisher(),
+            workspace_root: tmp.path(),
+            schedule_manager: Arc::clone(&schedule_manager),
+            file_store: &file_store,
+            search_index: &search_index,
+            embedding_provider: Arc::clone(&embedding_provider),
+        },
+    );
+
+    let orch = OrchestratorBuilder::new(
+        config_view,
+        bus.publisher(),
+        memory.clone(),
+        Arc::new(NativeExecutor),
+        tmp.path().to_path_buf(),
+        schedule_manager,
+    )
+    .session_mgr(SessionManager::new(memory, 0))
+    .file_store(file_store.clone())
+    .session_writer(session_writer)
+    .session_reader(session_reader)
+    .search_index(search_index)
+    .build();
+
+    orch.handle_inbound(test_inbound("first turn"), "clawhive-main")
+        .await
+        .unwrap();
+    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
+        .await
+        .unwrap();
+    orch.handle_inbound(test_inbound("third turn"), "clawhive-main")
+        .await
+        .unwrap();
+
+    let daily = file_store
+        .read_daily(chrono::Utc::now().date_naive())
+        .await
+        .unwrap()
+        .expect("daily file should exist");
+
+    assert!(daily.contains("- fallback summary 1"));
+    assert!(daily.contains("- fallback summary 2"));
 }
 
 #[tokio::test]
