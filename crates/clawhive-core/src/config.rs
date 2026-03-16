@@ -634,6 +634,12 @@ pub struct MemoryPolicyConfig {
     pub write_scope: String,
     #[serde(default)]
     pub limit_history_turns: Option<u32>,
+    #[serde(default = "default_max_injected_chars")]
+    pub max_injected_chars: usize,
+}
+
+fn default_max_injected_chars() -> usize {
+    6000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1033,6 +1039,17 @@ channels: {}
         let config: MainConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.consolidation_interval_hours, 24);
         assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn memory_policy_config_defaults_max_injected_chars() {
+        let yaml = r#"
+mode: session
+write_scope: session
+"#;
+        let config: MemoryPolicyConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.max_injected_chars, 6000);
     }
 
     #[test]

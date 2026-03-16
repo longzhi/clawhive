@@ -2157,22 +2157,19 @@ impl Orchestrator {
         _session_key: &SessionKey,
         query: &str,
     ) -> Result<String> {
+        let budget = view
+            .agent(agent_id)
+            .and_then(|agent| agent.memory_policy.as_ref())
+            .map(|policy| policy.max_injected_chars)
+            .unwrap_or(6000);
+
         let results = self
             .search_index_for(agent_id)
             .search(query, view.embedding_provider.as_ref(), 6, 0.25)
             .await;
 
         match results {
-            Ok(results) if !results.is_empty() => {
-                let mut context = String::from("## Relevant Memory\n\n");
-                for result in &results {
-                    context.push_str(&format!(
-                        "### {} (score: {:.2})\n{}\n\n",
-                        result.path, result.score, result.text
-                    ));
-                }
-                Ok(context)
-            }
+            Ok(results) if !results.is_empty() => Ok(clamp_to_budget(&results, budget)),
             _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
@@ -2637,10 +2634,57 @@ fn repair_tool_pairing(messages: &mut Vec<LlmMessage>) {
     }
 }
 
+fn clamp_to_budget(
+    results: &[clawhive_memory::search_index::SearchResult],
+    budget: usize,
+) -> String {
+    const HEADER: &str = "## Relevant Memory\n\n";
+    const TRUNCATED: &str = "\n...[truncated]";
+
+    if results.is_empty() || budget == 0 {
+        return String::new();
+    }
+
+    let header_chars = HEADER.chars().count();
+    if budget <= header_chars {
+        return HEADER.chars().take(budget).collect();
+    }
+
+    let mut context = String::from(HEADER);
+    let mut used_chars = header_chars;
+
+    for result in results {
+        let entry = format!(
+            "### {} (score: {:.2})\n{}\n\n",
+            result.path, result.score, result.text
+        );
+        let entry_chars = entry.chars().count();
+
+        if used_chars + entry_chars > budget {
+            if used_chars == header_chars {
+                let truncated_chars = TRUNCATED.chars().count();
+                let available_chars = budget.saturating_sub(used_chars + truncated_chars);
+                let truncated: String = entry.chars().take(available_chars).collect();
+                context.push_str(&truncated);
+                if used_chars + truncated.chars().count() + truncated_chars <= budget {
+                    context.push_str(TRUNCATED);
+                }
+            }
+            break;
+        }
+
+        context.push_str(&entry);
+        used_chars += entry_chars;
+    }
+
+    context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
+    use clawhive_memory::search_index::SearchResult;
     use clawhive_memory::SessionMessage;
     use serde_json::json;
 
@@ -2695,6 +2739,60 @@ mod tests {
             .iter()
             .map(|message| message.role.as_str())
             .collect()
+    }
+
+    fn make_result(path: &str, text: &str, score: f64) -> SearchResult {
+        SearchResult {
+            chunk_id: format!("{}:0-1:abc", path),
+            path: path.to_string(),
+            source: "test".to_string(),
+            start_line: 0,
+            end_line: 1,
+            text: text.to_string(),
+            score,
+        }
+    }
+
+    #[test]
+    fn test_clamp_to_budget_empty_results() {
+        assert_eq!(clamp_to_budget(&[], 100), "");
+    }
+
+    #[test]
+    fn test_clamp_to_budget_within_limit() {
+        let results = vec![
+            make_result("memory/a.md", "first chunk", 0.91),
+            make_result("memory/b.md", "second chunk", 0.83),
+        ];
+
+        let context = clamp_to_budget(&results, 1_000);
+
+        assert!(context.starts_with("## Relevant Memory\n\n"));
+        assert!(context.contains("### memory/a.md (score: 0.91)\nfirst chunk\n\n"));
+        assert!(context.contains("### memory/b.md (score: 0.83)\nsecond chunk\n\n"));
+    }
+
+    #[test]
+    fn test_clamp_to_budget_exceeds_limit() {
+        let results = vec![make_result(
+            "memory/a.md",
+            "abcdefghijklmnopqrstuvwxyz",
+            0.91,
+        )];
+
+        let context = clamp_to_budget(&results, 40);
+
+        assert!(context.starts_with("## Relevant Memory\n\n"));
+        assert!(context.contains("...[truncated]"));
+        assert!(!context.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!context.is_empty());
+    }
+
+    #[test]
+    fn test_clamp_to_budget_zero_budget() {
+        let results = vec![make_result("memory/a.md", "first chunk", 0.91)];
+
+        assert_eq!(clamp_to_budget(&results, 0), "");
     }
 
     #[test]
@@ -2817,6 +2915,7 @@ Body"#,
             mode: "session".to_string(),
             write_scope: "session".to_string(),
             limit_history_turns: Some(7),
+            max_injected_chars: 6000,
         }));
 
         assert_eq!(history_message_limit(&agent), 14);
