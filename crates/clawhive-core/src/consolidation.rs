@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::session::SessionReader;
 use clawhive_provider::LlmMessage;
 
 use super::router::LlmRouter;
@@ -68,6 +69,7 @@ pub struct HippocampusConsolidator {
     search_index: Option<SearchIndex>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     reindex_file_store: Option<MemoryFileStore>,
+    reindex_session_reader: Option<SessionReader>,
 }
 
 #[derive(Debug)]
@@ -94,6 +96,7 @@ impl HippocampusConsolidator {
             search_index: None,
             embedding_provider: None,
             reindex_file_store: None,
+            reindex_session_reader: None,
         }
     }
 
@@ -114,6 +117,11 @@ impl HippocampusConsolidator {
 
     pub fn with_file_store_for_reindex(mut self, file_store: MemoryFileStore) -> Self {
         self.reindex_file_store = Some(file_store);
+        self
+    }
+
+    pub fn with_session_reader_for_reindex(mut self, reader: SessionReader) -> Self {
+        self.reindex_session_reader = Some(reader);
         self
     }
 
@@ -235,12 +243,13 @@ impl HippocampusConsolidator {
 
         self.file_store.write_long_term(&updated_memory).await?;
 
-        let reindexed = if let (Some(index), Some(provider), Some(fs)) = (
+        let reindexed = if let (Some(index), Some(provider), Some(fs), Some(reader)) = (
             &self.search_index,
             &self.embedding_provider,
             &self.reindex_file_store,
+            &self.reindex_session_reader,
         ) {
-            match index.index_all(fs, provider.as_ref()).await {
+            match index.index_all(fs, reader, provider.as_ref()).await {
                 Ok(count) => {
                     tracing::info!("Post-consolidation reindex: {count} chunks indexed");
                     true
@@ -602,6 +611,7 @@ mod tests {
     use async_trait::async_trait;
     use clawhive_memory::embedding::EmbeddingProvider;
     use clawhive_memory::file_store::MemoryFileStore;
+    use clawhive_memory::session::SessionReader;
     use clawhive_provider::{ProviderRegistry, StubProvider};
     use tempfile::TempDir;
 
@@ -916,7 +926,8 @@ Working on Clawhive memory safety.
         use clawhive_memory::store::MemoryStore;
 
         // Create temp dir and file store
-        let (_dir, file_store) = build_file_store()?;
+        let (dir, file_store) = build_file_store()?;
+        let session_reader = SessionReader::new(dir.path());
 
         // Write MEMORY.md
         file_store
@@ -945,7 +956,8 @@ Working on Clawhive memory safety.
         )
         .with_search_index(search_index.clone())
         .with_embedding_provider(embedding_provider)
-        .with_file_store_for_reindex(file_store);
+        .with_file_store_for_reindex(file_store)
+        .with_session_reader_for_reindex(session_reader);
 
         // Run consolidation
         let report = consolidator.consolidate().await?;

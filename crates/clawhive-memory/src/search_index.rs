@@ -7,6 +7,7 @@ use tokio::task;
 
 use crate::chunker::{chunk_markdown, ChunkerConfig};
 use crate::embedding::EmbeddingProvider;
+use crate::session::{SessionEntry, SessionReader};
 
 #[derive(Clone)]
 pub struct SearchIndex {
@@ -70,17 +71,29 @@ impl SearchIndex {
         source: &str,
         provider: &dyn EmbeddingProvider,
     ) -> Result<usize> {
-        self.ensure_vec_table(provider.dimensions())?;
-
         let file_hash = {
             let mut hasher = Sha256::new();
             hasher.update(content.as_bytes());
             format!("{:x}", hasher.finalize())
         };
 
+        self.index_content(path, content, source, &file_hash, provider)
+            .await
+    }
+
+    async fn index_content(
+        &self,
+        path: &str,
+        content: &str,
+        source: &str,
+        change_hash: &str,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<usize> {
+        self.ensure_vec_table(provider.dimensions())?;
+
         let db = Arc::clone(&self.db);
         let path_owned = path.to_owned();
-        let file_hash_for_check = file_hash.clone();
+        let file_hash_for_check = change_hash.to_owned();
         let unchanged = task::spawn_blocking(move || {
             let conn = db
                 .lock()
@@ -105,7 +118,7 @@ impl SearchIndex {
             let db = Arc::clone(&self.db);
             let path_owned = path.to_owned();
             let source_owned = source.to_owned();
-            let file_hash_for_write = file_hash.clone();
+            let file_hash_for_write = change_hash.to_owned();
             let now_ts = chrono::Utc::now().timestamp();
             let size = content.len() as i64;
             let model_id = provider.model_id().to_owned();
@@ -244,7 +257,7 @@ impl SearchIndex {
         let db = Arc::clone(&self.db);
         let path_owned = path.to_owned();
         let source_owned = source.to_owned();
-        let file_hash_for_write = file_hash.clone();
+        let file_hash_for_write = change_hash.to_owned();
         let model_id = provider.model_id().to_owned();
         task::spawn_blocking(move || {
             let conn = db
@@ -335,9 +348,80 @@ impl SearchIndex {
         Ok(text_chunks.len())
     }
 
+    pub async fn index_session(
+        &self,
+        session_id: &str,
+        reader: &SessionReader,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<usize> {
+        let entries = reader.load_all_entries(session_id).await?;
+        let mut last_timestamp = None;
+        let mut messages = Vec::new();
+
+        for entry in entries {
+            match entry {
+                SessionEntry::Session { timestamp, .. } => {
+                    last_timestamp = Some(timestamp);
+                }
+                SessionEntry::Message {
+                    timestamp, message, ..
+                } => {
+                    last_timestamp = Some(timestamp);
+                    if matches!(message.role.as_str(), "user" | "assistant") {
+                        messages.push(format!("{}: {}", message.role, message.content));
+                    }
+                }
+                SessionEntry::ToolCall { timestamp, .. }
+                | SessionEntry::ToolResult { timestamp, .. }
+                | SessionEntry::Compaction { timestamp, .. }
+                | SessionEntry::ModelChange { timestamp, .. } => {
+                    last_timestamp = Some(timestamp);
+                }
+            }
+        }
+
+        if messages.is_empty() {
+            return Ok(0);
+        }
+
+        let content = messages.join("\n");
+        let content_len = content.len();
+        let change_hash = format!(
+            "session:{}:{}:{}",
+            messages.len(),
+            content_len,
+            last_timestamp.map_or(0, |timestamp| timestamp.timestamp_millis())
+        );
+        let path = format!("sessions/{session_id}");
+
+        self.index_content(&path, &content, "session", &change_hash, provider)
+            .await
+    }
+
+    pub async fn index_sessions(
+        &self,
+        reader: &SessionReader,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<usize> {
+        let sessions = reader.list_sessions().await?;
+        let mut total = 0;
+
+        for session_id in sessions {
+            match self.index_session(&session_id, reader, provider).await {
+                Ok(count) => total += count,
+                Err(error) => {
+                    tracing::warn!(session_id = %session_id, %error, "failed to index session");
+                }
+            }
+        }
+
+        Ok(total)
+    }
+
     pub async fn index_all(
         &self,
         file_store: &crate::file_store::MemoryFileStore,
+        reader: &SessionReader,
         provider: &dyn EmbeddingProvider,
     ) -> Result<usize> {
         let mut total = 0;
@@ -354,6 +438,8 @@ impl SearchIndex {
                 total += self.index_file(&path, &content, "daily", provider).await?;
             }
         }
+
+        total += self.index_sessions(reader, provider).await?;
 
         Ok(total)
     }
@@ -787,6 +873,7 @@ mod tests {
     use crate::embedding::{EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider};
     use crate::file_store::MemoryFileStore;
     use crate::migrations::run_migrations;
+    use crate::session::{SessionEntry, SessionReader, SessionWriter};
 
     #[derive(Clone)]
     struct NamedStubEmbeddingProvider {
@@ -1236,6 +1323,8 @@ mod tests {
     async fn index_all_indexes_files() -> Result<()> {
         let dir = TempDir::new()?;
         let file_store = MemoryFileStore::new(dir.path());
+        let session_writer = SessionWriter::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
         file_store
             .write_long_term("# Long\n\nlong term facts")
             .await?;
@@ -1245,17 +1334,168 @@ mod tests {
                 "# Daily\n\ndaily notes",
             )
             .await?;
+        session_writer.start_session("s1", "main").await?;
+        session_writer
+            .append_message("s1", "user", "session note")
+            .await?;
 
         let db = test_db()?;
         let index = SearchIndex::new(Arc::clone(&db));
         let provider = StubEmbeddingProvider::new(8);
 
-        let total = index.index_all(&file_store, &provider).await?;
+        let total = index
+            .index_all(&file_store, &session_reader, &provider)
+            .await?;
         assert!(total > 0);
 
         let conn = db.lock().expect("lock");
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         assert!(count > 0);
+        let session_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE source = 'session' AND path = 'sessions/s1'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(session_count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_session_creates_chunks() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer.append_message("s1", "user", "hello").await?;
+        writer.append_message("s1", "assistant", "hi").await?;
+        writer
+            .append(
+                "s1",
+                SessionEntry::ToolCall {
+                    id: "tool-1".to_owned(),
+                    timestamp: chrono::Utc::now(),
+                    tool: "bash".to_owned(),
+                    input: serde_json::json!({"command": "pwd"}),
+                },
+            )
+            .await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db));
+        let provider = StubEmbeddingProvider::new(8);
+
+        let count = index.index_session("s1", &reader, &provider).await?;
+
+        assert!(count > 0);
+        let conn = db.lock().expect("lock");
+        let row: (String, String, String) = conn.query_row(
+            "SELECT path, source, text FROM chunks WHERE path = 'sessions/s1' LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(row.0, "sessions/s1");
+        assert_eq!(row.1, "session");
+        assert!(row.2.contains("user: hello"));
+        assert!(row.2.contains("assistant: hi"));
+        assert!(!row.2.contains("pwd"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_session_skips_tool_entries() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer
+            .append(
+                "s1",
+                SessionEntry::ToolCall {
+                    id: "tool-call".to_owned(),
+                    timestamp: chrono::Utc::now(),
+                    tool: "read".to_owned(),
+                    input: serde_json::json!({"file": "/tmp/secret.txt"}),
+                },
+            )
+            .await?;
+        writer
+            .append(
+                "s1",
+                SessionEntry::ToolResult {
+                    id: "tool-result".to_owned(),
+                    timestamp: chrono::Utc::now(),
+                    tool: "read".to_owned(),
+                    output: serde_json::json!({"content": "secret"}),
+                },
+            )
+            .await?;
+        writer
+            .append(
+                "s1",
+                SessionEntry::Compaction {
+                    id: "compact-1".to_owned(),
+                    timestamp: chrono::Utc::now(),
+                    summary: "summary".to_owned(),
+                    dropped_before: "m1".to_owned(),
+                },
+            )
+            .await?;
+        writer
+            .append(
+                "s1",
+                SessionEntry::ModelChange {
+                    id: "model-1".to_owned(),
+                    timestamp: chrono::Utc::now(),
+                    model: "gpt-5".to_owned(),
+                },
+            )
+            .await?;
+        writer.append_message("s1", "user", "keep this").await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db));
+        let provider = StubEmbeddingProvider::new(8);
+
+        index.index_session("s1", &reader, &provider).await?;
+
+        let conn = db.lock().expect("lock");
+        let text: String = conn.query_row(
+            "SELECT GROUP_CONCAT(text, ' ') FROM chunks WHERE path = 'sessions/s1'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(text.contains("user: keep this"));
+        assert!(!text.contains("/tmp/secret.txt"));
+        assert!(!text.contains("secret"));
+        assert!(!text.contains("summary"));
+        assert!(!text.contains("gpt-5"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_sessions_multiple() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer.append_message("s1", "user", "alpha").await?;
+        writer.start_session("s2", "main").await?;
+        writer.append_message("s2", "assistant", "beta").await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db));
+        let provider = StubEmbeddingProvider::new(8);
+
+        let total = index.index_sessions(&reader, &provider).await?;
+
+        assert!(total > 0);
+        let conn = db.lock().expect("lock");
+        let indexed_paths: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT path) FROM chunks WHERE source = 'session'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(indexed_paths, 2);
         Ok(())
     }
 

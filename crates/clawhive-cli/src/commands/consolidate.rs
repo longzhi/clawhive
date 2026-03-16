@@ -13,6 +13,7 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
 
     let workspace_dir = root.to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
     let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
     let consolidator = Arc::new(
@@ -24,7 +25,8 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
         )
         .with_search_index(consolidation_search_index)
         .with_embedding_provider(consolidation_embedding_provider)
-        .with_file_store_for_reindex(file_store),
+        .with_file_store_for_reindex(file_store)
+        .with_session_reader_for_reindex(session_reader),
     );
 
     let scheduler =

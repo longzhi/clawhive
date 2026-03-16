@@ -508,12 +508,15 @@ async fn start_bot(
     let workspace_dir = root.to_path_buf();
     let file_store_for_consolidation =
         clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
+    let session_reader_for_consolidation =
+        clawhive_memory::session::SessionReader::new(&workspace_dir);
     let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
 
     {
         let startup_index = consolidation_search_index.clone();
         let startup_fs = file_store_for_consolidation.clone();
+        let startup_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
         let startup_ep = consolidation_embedding_provider.clone();
         tokio::task::spawn(async move {
             if let Err(e) = startup_index.ensure_vec_table(startup_ep.dimensions()) {
@@ -521,7 +524,7 @@ async fn start_bot(
                 return;
             }
             match startup_index
-                .index_all(&startup_fs, startup_ep.as_ref())
+                .index_all(&startup_fs, &startup_reader, startup_ep.as_ref())
                 .await
             {
                 Ok(count) => {
@@ -543,7 +546,8 @@ async fn start_bot(
         )
         .with_search_index(consolidation_search_index)
         .with_embedding_provider(consolidation_embedding_provider)
-        .with_file_store_for_reindex(file_store_for_consolidation),
+        .with_file_store_for_reindex(file_store_for_consolidation)
+        .with_session_reader_for_reindex(session_reader_for_consolidation),
     );
     let consolidation_interval_hours = config.main.consolidation_interval_hours;
     let scheduler = ConsolidationScheduler::new(consolidator, consolidation_interval_hours);
