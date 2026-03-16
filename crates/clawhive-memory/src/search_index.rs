@@ -161,12 +161,13 @@ impl SearchIndex {
             .map(|chunk| chunk.hash.clone())
             .collect::<Vec<String>>();
         let db = Arc::clone(&self.db);
+        let model_id_for_reuse = provider.model_id().to_owned();
         let reused = task::spawn_blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let mut stmt = conn.prepare(
-                "SELECT embedding, model FROM chunks WHERE hash = ?1 AND embedding <> '' LIMIT 1",
+                "SELECT embedding, model FROM chunks WHERE hash = ?1 AND model = ?2 AND embedding <> '' LIMIT 1",
             )?;
             let mut map = std::collections::HashMap::new();
             for hash in hash_list {
@@ -174,7 +175,7 @@ impl SearchIndex {
                     continue;
                 }
                 let row = stmt
-                    .query_row(params![hash.clone()], |r| {
+                    .query_row(params![hash.clone(), model_id_for_reuse.as_str()], |r| {
                         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                     })
                     .optional()?;
@@ -755,12 +756,53 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use anyhow::Result;
+    use async_trait::async_trait;
     use rusqlite::Connection;
     use tempfile::TempDir;
 
-    use crate::embedding::StubEmbeddingProvider;
+    use crate::embedding::{EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider};
     use crate::file_store::MemoryFileStore;
     use crate::migrations::run_migrations;
+
+    #[derive(Clone)]
+    struct NamedStubEmbeddingProvider {
+        dims: usize,
+        model: String,
+        value: f32,
+    }
+
+    impl NamedStubEmbeddingProvider {
+        fn new(dims: usize, model: &str, value: f32) -> Self {
+            Self {
+                dims,
+                model: model.to_string(),
+                value,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for NamedStubEmbeddingProvider {
+        async fn embed(&self, texts: &[String]) -> Result<EmbeddingResult> {
+            Ok(EmbeddingResult {
+                embeddings: texts.iter().map(|_| vec![self.value; self.dims]).collect(),
+                model: self.model.clone(),
+                dimensions: self.dims,
+            })
+        }
+
+        fn model_id(&self) -> &str {
+            &self.model
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dims
+        }
+
+        fn is_semantic(&self) -> bool {
+            false
+        }
+    }
 
     fn init_sqlite_vec() {
         use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
@@ -901,6 +943,59 @@ mod tests {
         )?;
         assert!(!embedding.is_empty());
         assert!(embedding.starts_with('['));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reuse_ignores_different_model_embeddings() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db));
+        let first_provider = NamedStubEmbeddingProvider::new(8, "stub-a", 1.0);
+        let second_provider = NamedStubEmbeddingProvider::new(8, "stub-b", 2.0);
+        let content = "# Shared\n\nchunk text reused across models";
+
+        index
+            .index_file("MEMORY.md", content, "long_term", &first_provider)
+            .await?;
+
+        {
+            let conn = db.lock().expect("lock");
+            let original_models: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM chunks WHERE path = 'MEMORY.md' AND model = 'stub-a'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(original_models > 0);
+            conn.execute(
+                "UPDATE files SET hash = 'force-reindex' WHERE path = 'MEMORY.md'",
+                [],
+            )?;
+        }
+
+        index
+            .index_file("MEMORY.md", content, "long_term", &second_provider)
+            .await?;
+
+        let conn = db.lock().expect("lock");
+        let reused_old_model: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = 'MEMORY.md' AND model = 'stub-a'",
+            [],
+            |r| r.get(0),
+        )?;
+        let new_model_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = 'MEMORY.md' AND model = 'stub-b'",
+            [],
+            |r| r.get(0),
+        )?;
+        let embedding: String = conn.query_row(
+            "SELECT embedding FROM chunks WHERE path = 'MEMORY.md' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )?;
+
+        assert_eq!(reused_old_model, 0);
+        assert!(new_model_count > 0);
+        assert_eq!(embedding, embedding_to_json(&[2.0; 8]));
         Ok(())
     }
 
