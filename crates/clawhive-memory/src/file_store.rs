@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+
+use crate::safe_io;
 
 /// Manages MEMORY.md and memory/YYYY-MM-DD.md files
 #[derive(Clone)]
@@ -29,7 +30,7 @@ impl MemoryFileStore {
 
     /// Overwrite MEMORY.md with new content (used by hippocampus consolidation)
     pub async fn write_long_term(&self, content: &str) -> Result<()> {
-        fs::write(self.long_term_path(), content).await?;
+        safe_io::safe_overwrite(&self.long_term_path(), content.as_bytes()).await?;
         Ok(())
     }
 
@@ -48,21 +49,19 @@ impl MemoryFileStore {
         self.ensure_daily_dir().await?;
         let path = self.daily_path(date);
 
-        let is_new = fs::metadata(&path).await.is_err();
+        let needs_header = match fs::metadata(&path).await {
+            Ok(metadata) => metadata.len() == 0,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+            Err(err) => return Err(err.into()),
+        };
 
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
-
-        if is_new {
-            file.write_all(format!("# {}\n\n", date.format("%Y-%m-%d")).as_bytes())
-                .await?;
+        let mut append_content = String::new();
+        if needs_header {
+            append_content.push_str(&format!("# {}\n\n", date.format("%Y-%m-%d")));
         }
+        append_content.push_str(&format!("\n{content}\n"));
 
-        file.write_all(format!("\n{content}\n").as_bytes()).await?;
-        file.flush().await?;
+        safe_io::locked_append(&path, append_content.as_bytes()).await?;
         Ok(())
     }
 
@@ -191,6 +190,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_write_long_term_creates_backup() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+
+        store.write_long_term("old memory").await?;
+        store.write_long_term("new memory").await?;
+
+        let backup = fs::read_to_string(dir.path().join("MEMORY.md.bak")).await?;
+        assert_eq!(backup, "old memory");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_read_daily_none() -> Result<()> {
         let dir = TempDir::new()?;
         let store = MemoryFileStore::new(dir.path());
@@ -230,6 +242,24 @@ mod tests {
             .expect("daily file should exist after append");
         assert!(content.contains("entry one"));
         assert!(content.contains("entry two"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_append_daily_prepends_header_for_empty_existing_file() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+        let d = date(2026, 2, 13);
+        let file = dir.path().join("memory").join("2026-02-13.md");
+
+        fs::create_dir_all(file.parent().expect("daily file parent")).await?;
+        fs::write(&file, "").await?;
+
+        store.append_daily(d, "first entry").await?;
+
+        let content = fs::read_to_string(file).await?;
+        assert!(content.starts_with("# 2026-02-13\n\n"));
+        assert!(content.contains("\nfirst entry\n"));
         Ok(())
     }
 

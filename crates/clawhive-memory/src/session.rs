@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tracing::warn;
 use uuid::Uuid;
+
+use crate::safe_io;
 
 /// JSONL line types for session recording
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,14 +87,8 @@ impl SessionWriter {
     pub async fn append(&self, session_id: &str, entry: SessionEntry) -> Result<()> {
         tokio::fs::create_dir_all(&self.sessions_dir).await?;
         let path = self.session_path(session_id);
-        let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)
-            .await?;
-        let line = serde_json::to_string(&entry)?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        let line = format!("{}\n", serde_json::to_string(&entry)?);
+        safe_io::locked_append(&path, line.as_bytes()).await?;
         Ok(())
     }
 
