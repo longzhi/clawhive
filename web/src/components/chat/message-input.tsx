@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect, type DragEvent, type ClipboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, Square, Loader2, ImagePlus, X, FileText, File as FileIcon } from "lucide-react";
+import { Send, Square, Loader2, ImagePlus, Paperclip, X, FileText, File as FileIcon } from "lucide-react";
 import { useChatStore } from "@/stores/chat";
 import { uploadAttachment } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -35,6 +35,7 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCountRef = useRef(0);
   const { isProcessing, isConnected, pendingAttachments, activeConversationId, addPendingAttachment, removePendingAttachment } = useChatStore();
@@ -260,6 +261,14 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
 
       <div className="flex gap-2 items-center">
         <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={handleFileSelect}
+        />
+        <input
           ref={fileInputRef}
           type="file"
           multiple
@@ -267,23 +276,35 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
           onChange={handleFileSelect}
         />
 
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-9 w-9 shrink-0"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!isConnected || pendingAttachments.length >= MAX_ATTACHMENTS}
-          title="Attach files"
-        >
-          <div className="relative">
-            <ImagePlus className="h-4 w-4" />
-            {pendingAttachments.length > 0 && (
-              <span className="absolute -right-2 -top-2 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[9px] font-bold text-primary-foreground">
-                {pendingAttachments.length}
-              </span>
-            )}
-          </div>
-        </Button>
+        <div className="flex shrink-0">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9"
+            onClick={() => imageInputRef.current?.click()}
+            disabled={!isConnected || pendingAttachments.length >= MAX_ATTACHMENTS}
+            title="Attach images"
+          >
+            <div className="relative">
+              <ImagePlus className="h-4 w-4" />
+              {pendingAttachments.length > 0 && (
+                <span className="absolute -right-2 -top-2 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[9px] font-bold text-primary-foreground">
+                  {pendingAttachments.length}
+                </span>
+              )}
+            </div>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!isConnected || pendingAttachments.length >= MAX_ATTACHMENTS}
+            title="Attach files"
+          >
+            <Paperclip className="h-4 w-4" />
+          </Button>
+        </div>
 
         {showCommands && (
           <div className="absolute bottom-full left-0 right-0 z-30 mb-1 max-h-64 overflow-y-auto rounded-lg border bg-popover p-1 shadow-lg">
