@@ -258,7 +258,7 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
         </div>
       )}
 
-      <div className="flex gap-2 items-end">
+      <div className="flex gap-2 items-center">
         <input
           ref={fileInputRef}
           type="file"
@@ -330,8 +330,8 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
             onPaste={handlePaste}
             placeholder={isConnected ? "Type a message... (Shift+Enter for new line)" : "Disconnected..."}
             disabled={!isConnected}
-            className="min-h-[44px] max-h-[200px] resize-none pr-16"
-            rows={1}
+            className="min-h-[56px] max-h-[200px] resize-none pr-16"
+            rows={2}
           />
           {text.length > MAX_LENGTH * 0.9 && (
             <span className="absolute bottom-2 right-2 text-xs text-muted-foreground">
