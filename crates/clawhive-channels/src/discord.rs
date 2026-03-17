@@ -318,16 +318,19 @@ impl EventHandler for DiscordHandler {
             None
         };
 
-        // Extract attachments — download images and encode as base64
+        // Extract attachments — download images and text files, encode as base64
         for att in &msg.attachments {
-            let kind = match att.content_type.as_deref() {
+            let content_type = att.content_type.as_deref();
+            let is_text = content_type.is_some_and(is_text_content_type);
+            let kind = match content_type {
                 Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
                 Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
                 Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
+                _ if is_text => AttachmentKind::Document,
                 _ => AttachmentKind::Other,
             };
-            // For images, download and base64-encode (LLM providers require base64)
-            let url_or_data = if kind == AttachmentKind::Image {
+            // Download images (LLM vision) and text files (LLM context) as base64
+            let url_or_data = if kind == AttachmentKind::Image || is_text {
                 match download_attachment(&self.http_client, &att.url).await {
                     Ok(base64_data) => base64_data,
                     Err(e) => {
@@ -913,6 +916,18 @@ fn compose_inbound_text(user_text: &str, quoted_text: Option<&str>) -> String {
         "[Quoted Message]\n{}\n\n[Current Message]\n{}",
         quoted, user_text
     )
+}
+
+/// Keep in sync with `is_text_mime` in `clawhive-core/src/orchestrator.rs`.
+fn is_text_content_type(ct: &str) -> bool {
+    ct.starts_with("text/")
+        || ct == "application/json"
+        || ct == "application/xml"
+        || ct == "application/javascript"
+        || ct == "application/x-yaml"
+        || ct == "application/yaml"
+        || ct == "application/toml"
+        || ct == "application/x-sh"
 }
 
 /// Download a Discord attachment and return its content as a base64-encoded string.
