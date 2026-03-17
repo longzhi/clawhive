@@ -636,10 +636,16 @@ pub struct MemoryPolicyConfig {
     pub limit_history_turns: Option<u32>,
     #[serde(default = "default_max_injected_chars")]
     pub max_injected_chars: usize,
+    #[serde(default = "default_daily_summary_interval")]
+    pub daily_summary_interval: u64,
 }
 
 fn default_max_injected_chars() -> usize {
     6000
+}
+
+fn default_daily_summary_interval() -> u64 {
+    10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1050,6 +1056,7 @@ write_scope: session
         let config: MemoryPolicyConfig = serde_yaml::from_str(yaml).unwrap();
 
         assert_eq!(config.max_injected_chars, 6000);
+        assert_eq!(config.daily_summary_interval, 10);
     }
 
     #[test]

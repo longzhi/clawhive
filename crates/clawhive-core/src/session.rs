@@ -12,6 +12,7 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
     pub ttl_seconds: i64,
+    pub interaction_count: u64,
 }
 
 impl Session {
@@ -22,6 +23,10 @@ impl Session {
 
     pub fn touch(&mut self) {
         self.last_active = Utc::now();
+    }
+
+    pub fn increment_interaction(&mut self) {
+        self.interaction_count += 1;
     }
 }
 
@@ -52,6 +57,7 @@ impl SessionManager {
                 created_at: record.created_at,
                 last_active: record.last_active,
                 ttl_seconds: record.ttl_seconds,
+                interaction_count: record.interaction_count,
             };
 
             if session.is_expired() {
@@ -91,6 +97,7 @@ impl SessionManager {
             created_at: now,
             last_active: now,
             ttl_seconds: self.default_ttl,
+            interaction_count: 0,
         }
     }
 
@@ -101,6 +108,7 @@ impl SessionManager {
             created_at: session.created_at,
             last_active: session.last_active,
             ttl_seconds: session.ttl_seconds,
+            interaction_count: session.interaction_count,
         };
         self.store.upsert_session(record).await
     }
@@ -124,6 +132,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.session.agent_id, "clawhive-main");
         assert_eq!(result.session.ttl_seconds, 1800);
+        assert_eq!(result.session.interaction_count, 0);
         assert!(!result.expired_previous);
     }
 
@@ -189,9 +198,26 @@ mod tests {
             created_at: Utc::now(),
             last_active: Utc::now() - chrono::TimeDelta::try_seconds(100).unwrap(),
             ttl_seconds: 50,
+            interaction_count: 0,
         };
         assert!(session.is_expired());
         session.touch();
         assert!(!session.is_expired());
+    }
+
+    #[test]
+    fn increment_interaction_increases_count() {
+        let mut session = Session {
+            session_key: test_key(),
+            agent_id: "test".to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 50,
+            interaction_count: 0,
+        };
+
+        session.increment_interaction();
+
+        assert_eq!(session.interaction_count, 1);
     }
 }

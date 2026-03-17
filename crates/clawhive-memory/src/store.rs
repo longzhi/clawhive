@@ -17,6 +17,7 @@ pub struct SessionRecord {
     pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
     pub ttl_seconds: i64,
+    pub interaction_count: u64,
 }
 
 #[deprecated(
@@ -396,7 +397,7 @@ impl MemoryStore {
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let mut stmt = conn.prepare(
                 r#"
-                SELECT session_key, agent_id, created_at, last_active, ttl_seconds
+                SELECT session_key, agent_id, created_at, last_active, ttl_seconds, interaction_count
                 FROM sessions
                 WHERE session_key = ?1
                 LIMIT 1
@@ -412,6 +413,7 @@ impl MemoryStore {
                     created_at: parse_datetime_sql(&created_at_raw)?,
                     last_active: parse_datetime_sql(&last_active_raw)?,
                     ttl_seconds: row.get(4)?,
+                    interaction_count: row.get(5)?,
                 };
                 return Ok::<Option<SessionRecord>, anyhow::Error>(Some(session));
             }
@@ -428,13 +430,21 @@ impl MemoryStore {
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             conn.execute(
                 r#"
-                INSERT INTO sessions (session_key, agent_id, created_at, last_active, ttl_seconds)
-                VALUES (?1, ?2, ?3, ?4, ?5)
+                INSERT INTO sessions (
+                    session_key,
+                    agent_id,
+                    created_at,
+                    last_active,
+                    ttl_seconds,
+                    interaction_count
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 ON CONFLICT(session_key) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     created_at = excluded.created_at,
                     last_active = excluded.last_active,
-                    ttl_seconds = excluded.ttl_seconds
+                    ttl_seconds = excluded.ttl_seconds,
+                    interaction_count = excluded.interaction_count
                 "#,
                 params![
                     session.session_key,
@@ -442,6 +452,7 @@ impl MemoryStore {
                     session.created_at.to_rfc3339(),
                     session.last_active.to_rfc3339(),
                     session.ttl_seconds,
+                    session.interaction_count,
                 ],
             )?;
             Ok::<(), anyhow::Error>(())
@@ -1077,6 +1088,7 @@ mod tests {
             created_at: now,
             last_active: now,
             ttl_seconds: 3600,
+            interaction_count: 3,
         };
 
         store.upsert_session(rec).await.expect("upsert session");
@@ -1089,6 +1101,7 @@ mod tests {
         assert_eq!(loaded.session_key, "abc");
         assert_eq!(loaded.agent_id, "agent-1");
         assert_eq!(loaded.ttl_seconds, 3600);
+        assert_eq!(loaded.interaction_count, 3);
     }
 
     #[tokio::test]
@@ -1101,6 +1114,7 @@ mod tests {
             created_at: now,
             last_active: now,
             ttl_seconds: 3600,
+            interaction_count: 1,
         };
 
         store.upsert_session(rec).await.expect("upsert session");

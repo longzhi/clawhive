@@ -184,6 +184,12 @@ fn migrations() -> Vec<Migration> {
             CREATE INDEX IF NOT EXISTS idx_fact_history_fact ON fact_history(fact_id);
             "#,
         ),
+        (
+            8,
+            r#"
+            ALTER TABLE sessions ADD COLUMN interaction_count INTEGER NOT NULL DEFAULT 0;
+            "#,
+        ),
     ]
 }
 
