@@ -16,10 +16,9 @@ use chrono::Utc;
 use clawhive_bus::Topic;
 use clawhive_channels::web_console::{
     conversation_id_from_session_key, find_conversation_session_file, is_web_console_user_session,
-    map_attachment, parse_conversation_messages, session_key_from_path, summarize_session_content,
-    token_prefix, validate_attachments, workspace_sessions_dirs, ClientMessage,
-    ConversationMessage, ConversationSummary, CreateConversationRequest,
-    CreateConversationResponse, ServerMessage,
+    parse_conversation_messages, session_key_from_path, summarize_session_content, token_prefix,
+    validate_attachment_refs, workspace_sessions_dirs, ClientMessage, ConversationMessage,
+    ConversationSummary, CreateConversationRequest, CreateConversationResponse, ServerMessage,
 };
 use clawhive_schema::{BusMessage, InboundMessage};
 use serde::Serialize;
@@ -150,7 +149,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     continue;
                                 }
 
-                                if let Err(error) = validate_attachments(&attachments) {
+                                if let Err(error) = validate_attachment_refs(&attachments) {
                                     tracing::warn!(
                                         attachment_count = attachments.len(),
                                         error = %error,
@@ -159,6 +158,24 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     let _ = out_tx.send(ServerMessage::Error {
                                         trace_id: None,
                                         message: error,
+                                    });
+                                    continue;
+                                }
+
+                                let resolved: Vec<_> = attachments
+                                    .iter()
+                                    .filter_map(|r| {
+                                        crate::routes::attachments::resolve_to_attachment(
+                                            &state.root,
+                                            &r.id,
+                                        )
+                                    })
+                                    .collect();
+                                if resolved.len() != attachments.len() {
+                                    let _ = out_tx.send(ServerMessage::Error {
+                                        trace_id: None,
+                                        message: "One or more attachments could not be found"
+                                            .to_string(),
                                     });
                                     continue;
                                 }
@@ -178,8 +195,8 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     is_mention: false,
                                     mention_target: None,
                                     message_id: None,
-                                    attachments: attachments.iter().map(map_attachment).collect(),
-                                                            message_source: None,
+                                    attachments: resolved,
+                                    message_source: None,
                                 };
 
                                 {
@@ -510,6 +527,7 @@ async fn delete_conversation(
     };
 
     std::fs::remove_file(path).map_err(|_| StatusCode::NOT_FOUND)?;
+    crate::routes::attachments::delete_conversation_attachments(&state.root, &id);
     Ok(StatusCode::NO_CONTENT)
 }
 
