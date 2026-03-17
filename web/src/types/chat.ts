@@ -1,16 +1,26 @@
 // WebSocket message types for chat feature
 
-// Attachment payload for file uploads
-export interface AttachmentPayload {
-  kind: string;       // "image", "document", etc.
-  data: string;       // base64-encoded file data
-  mime_type?: string;  // e.g., "image/png"
-  file_name?: string;  // original filename
+// Response from POST /api/chat/attachments
+export interface UploadedAttachment {
+  id: string;
+  conversation_id?: string;
+  kind: string;       // "image" | "document" | "video" | "audio"
+  mime_type: string;
+  file_name: string;
+  size: number;
+}
+
+// Reference sent in WebSocket message
+export interface AttachmentRef {
+  id: string;
+  kind?: string;
+  mime_type?: string;
+  file_name?: string;
 }
 
 // Client → Server messages
 export type ClientMessage =
-  | { type: "send_message"; text: string; agent_id: string; conversation_id?: string; attachments?: AttachmentPayload[] }
+  | { type: "send_message"; text: string; agent_id: string; conversation_id?: string; attachments?: AttachmentRef[] }
   | { type: "cancel" }
   | { type: "ping" };
 
@@ -44,7 +54,7 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   tool_calls?: ToolCallInfo[];
-  attachments?: AttachmentPayload[];
+  attachments?: UploadedAttachment[];
 }
 
 export interface ToolCallInfo {

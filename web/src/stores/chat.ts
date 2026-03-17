@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { AttachmentPayload } from "@/types/chat";
+import type { UploadedAttachment } from "@/types/chat";
 
 export interface ToolCallInfo {
   tool_name: string;
@@ -17,7 +17,7 @@ export interface ChatMessageItem {
   timestamp: string;
   tool_calls: ToolCallInfo[];
   is_streaming: boolean;
-  attachments?: AttachmentPayload[];
+  attachments?: UploadedAttachment[];
 }
 
 export interface ConversationItem {
@@ -34,7 +34,7 @@ interface ChatState {
   isConnected: boolean;
   isProcessing: boolean;
   selectedAgentId: string | null;
-  pendingAttachments: AttachmentPayload[];
+  pendingAttachments: UploadedAttachment[];
 
   // Actions
   setConversations: (conversations: ConversationItem[]) => void;
@@ -52,7 +52,7 @@ interface ChatState {
   addError: (conversationId: string, traceId: string | null, message: string) => void;
 
   // Attachment actions
-  addPendingAttachment: (attachment: AttachmentPayload) => void;
+  addPendingAttachment: (attachment: UploadedAttachment) => void;
   removePendingAttachment: (index: number) => void;
   clearPendingAttachments: () => void;
   hydrateMessages: (conversationId: string, messages: ChatMessageItem[]) => void;

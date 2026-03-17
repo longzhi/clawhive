@@ -1,3 +1,21 @@
+import type { UploadedAttachment } from "@/types/chat";
+
+export async function uploadAttachment(file: File, conversationId?: string): Promise<UploadedAttachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (conversationId) formData.append("conversation_id", conversationId);
+
+  const res = await fetch("/api/chat/attachments", {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...options,
