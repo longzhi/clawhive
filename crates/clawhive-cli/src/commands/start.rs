@@ -505,65 +505,71 @@ async fn start_bot(
     let (bus, memory, gateway, config, schedule_manager, wait_task_manager, approval_registry) =
         bootstrap(root, security_override).await?;
 
-    let consolidation_agent_id = config.routing.default_agent_id.clone();
-    let consolidation_workspace = config
-        .agents
-        .iter()
-        .find(|agent| agent.agent_id == consolidation_agent_id)
-        .map(|agent| Workspace::resolve(root, &agent.agent_id, agent.workspace.as_deref()))
-        .unwrap_or_else(|| Workspace::resolve(root, &consolidation_agent_id, None));
-    let workspace_dir = consolidation_workspace.root().to_path_buf();
-    let file_store_for_consolidation =
-        clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
-    let session_reader_for_consolidation =
-        clawhive_memory::session::SessionReader::new(&workspace_dir);
-    let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
+    let router_for_consolidation = Arc::new(build_router_from_config(&config).await);
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
+    let consolidation_interval_hours = config.main.consolidation_interval_hours;
+    let archive_retention_days = config.main.archive_retention_days;
 
-    {
-        let startup_index = consolidation_search_index.clone();
-        let startup_fs = file_store_for_consolidation.clone();
-        let startup_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
-        let startup_ep = consolidation_embedding_provider.clone();
-        tokio::task::spawn(async move {
-            if let Err(e) = startup_index.ensure_vec_table(startup_ep.dimensions()) {
-                tracing::warn!("Failed to ensure vec table at startup: {e}");
-                return;
-            }
-            match startup_index
-                .index_all(&startup_fs, &startup_reader, startup_ep.as_ref())
-                .await
-            {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!("Startup indexing: {count} chunks indexed");
-                    }
+    let mut consolidators: Vec<Arc<HippocampusConsolidator>> = Vec::new();
+    for agent_config in config.agents.iter().filter(|a| a.enabled) {
+        let workspace = Workspace::resolve(
+            root,
+            &agent_config.agent_id,
+            agent_config.workspace.as_deref(),
+        );
+        let workspace_dir = workspace.root().to_path_buf();
+        let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
+        let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
+        let search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
+
+        {
+            let idx = search_index.clone();
+            let fs = file_store.clone();
+            let sr = clawhive_memory::session::SessionReader::new(&workspace_dir);
+            let ep = consolidation_embedding_provider.clone();
+            let aid = agent_config.agent_id.clone();
+            tokio::task::spawn(async move {
+                if let Err(e) = idx.ensure_vec_table(ep.dimensions()) {
+                    tracing::warn!(agent_id = %aid, "Failed to ensure vec table: {e}");
+                    return;
                 }
-                Err(e) => tracing::warn!("Startup indexing failed: {e}"),
-            }
-        });
+                match idx.index_all(&fs, &sr, ep.as_ref()).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!(agent_id = %aid, count, "Startup indexing complete");
+                    }
+                    Err(e) => tracing::warn!(agent_id = %aid, "Startup indexing failed: {e}"),
+                    _ => {}
+                }
+            });
+        }
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                agent_config.agent_id.clone(),
+                file_store.clone(),
+                Arc::clone(&router_for_consolidation),
+                "sonnet".to_string(),
+                vec!["haiku".to_string()],
+            )
+            .with_search_index(search_index)
+            .with_embedding_provider(consolidation_embedding_provider.clone())
+            .with_file_store_for_reindex(file_store)
+            .with_session_reader_for_reindex(session_reader)
+            .with_memory_store(Arc::clone(&memory)),
+        );
+        consolidators.push(consolidator);
     }
 
-    let consolidator = Arc::new(
-        HippocampusConsolidator::new(
-            consolidation_agent_id,
-            file_store_for_consolidation.clone(),
-            Arc::new(build_router_from_config(&config).await),
-            "sonnet".to_string(),
-            vec!["haiku".to_string()],
-        )
-        .with_search_index(consolidation_search_index)
-        .with_embedding_provider(consolidation_embedding_provider)
-        .with_file_store_for_reindex(file_store_for_consolidation)
-        .with_session_reader_for_reindex(session_reader_for_consolidation)
-        .with_memory_store(Arc::clone(&memory)),
+    let scheduler = ConsolidationScheduler::new(
+        consolidators,
+        consolidation_interval_hours,
+        archive_retention_days,
     );
-    let consolidation_interval_hours = config.main.consolidation_interval_hours;
-    let scheduler = ConsolidationScheduler::new(consolidator, consolidation_interval_hours);
     let _consolidation_handle = scheduler.start();
     tracing::info!(
         interval_hours = consolidation_interval_hours,
-        "Hippocampus consolidation scheduler started"
+        agent_count = config.agents.iter().filter(|a| a.enabled).count(),
+        "Hippocampus consolidation scheduler started for all agents"
     );
 
     let schedule_manager_for_loop = Arc::clone(&schedule_manager);

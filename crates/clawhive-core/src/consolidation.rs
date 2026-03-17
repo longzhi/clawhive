@@ -100,7 +100,7 @@ pub struct MemoryPatch {
 
 pub struct HippocampusConsolidator {
     agent_id: String,
-    file_store: MemoryFileStore,
+    pub(crate) file_store: MemoryFileStore,
     router: Arc<LlmRouter>,
     model_primary: String,
     model_fallbacks: Vec<String>,
@@ -172,6 +172,10 @@ impl HippocampusConsolidator {
     pub fn with_session_reader_for_reindex(mut self, reader: SessionReader) -> Self {
         self.reindex_session_reader = Some(reader);
         self
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 
     pub async fn consolidate(&self) -> Result<ConsolidationReport> {
@@ -800,15 +804,21 @@ fn validate_consolidation_output(output: &str, existing: &str) -> Result<()> {
 }
 
 pub struct ConsolidationScheduler {
-    consolidator: Arc<HippocampusConsolidator>,
+    consolidators: Vec<Arc<HippocampusConsolidator>>,
     interval_hours: u64,
+    archive_retention_days: u64,
 }
 
 impl ConsolidationScheduler {
-    pub fn new(consolidator: Arc<HippocampusConsolidator>, interval_hours: u64) -> Self {
+    pub fn new(
+        consolidators: Vec<Arc<HippocampusConsolidator>>,
+        interval_hours: u64,
+        archive_retention_days: u64,
+    ) -> Self {
         Self {
-            consolidator,
+            consolidators,
             interval_hours,
+            archive_retention_days,
         }
     }
 
@@ -819,26 +829,48 @@ impl ConsolidationScheduler {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                tracing::info!("Running scheduled hippocampus consolidation...");
-                match self.consolidator.consolidate().await {
-                    Ok(report) => {
-                        tracing::info!(
-                            "Consolidation complete: daily_files_read={}, memory_updated={}, summary={}",
-                            report.daily_files_read,
-                            report.memory_updated,
-                            report.summary
-                        );
+                tracing::info!(
+                    agent_count = self.consolidators.len(),
+                    "Running scheduled hippocampus consolidation for all agents..."
+                );
+                for consolidator in &self.consolidators {
+                    let agent_id = consolidator.agent_id();
+                    match consolidator.consolidate().await {
+                        Ok(report) => {
+                            tracing::info!(
+                                agent_id = %agent_id,
+                                daily_files_read = report.daily_files_read,
+                                memory_updated = report.memory_updated,
+                                "Consolidation complete for agent"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!(agent_id = %agent_id, "Consolidation failed: {err}");
+                        }
                     }
-                    Err(err) => {
-                        tracing::error!("Consolidation failed: {err}");
+                }
+                for consolidator in &self.consolidators {
+                    let ws = consolidator.file_store.workspace_dir();
+                    let writer = clawhive_memory::session::SessionWriter::new(ws);
+                    if let Err(e) = writer.cleanup_archived(self.archive_retention_days).await {
+                        tracing::warn!(
+                            agent_id = %consolidator.agent_id(),
+                            "Archived session cleanup failed: {e}"
+                        );
                     }
                 }
             }
         })
     }
 
-    pub async fn run_once(&self) -> Result<ConsolidationReport> {
-        self.consolidator.consolidate().await
+    pub async fn run_once(&self) -> Vec<(String, Result<ConsolidationReport>)> {
+        let mut results = Vec::new();
+        for consolidator in &self.consolidators {
+            let agent_id = consolidator.agent_id().to_string();
+            let result = consolidator.consolidate().await;
+            results.push((agent_id, result));
+        }
+        results
     }
 }
 
@@ -1312,7 +1344,7 @@ Working on Clawhive memory safety.
             vec![],
         ));
 
-        let scheduler = ConsolidationScheduler::new(Arc::clone(&consolidator), 24);
+        let scheduler = ConsolidationScheduler::new(vec![Arc::clone(&consolidator)], 24, 30);
         assert_eq!(scheduler.interval_hours, 24);
         Ok(())
     }

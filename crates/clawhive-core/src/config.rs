@@ -316,6 +316,10 @@ fn default_consolidation_interval_hours() -> u64 {
     24
 }
 
+fn default_archive_retention_days() -> u64 {
+    30
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MainConfig {
     pub app: AppConfig,
@@ -328,6 +332,8 @@ pub struct MainConfig {
     pub tools: ToolsConfig,
     #[serde(default = "default_consolidation_interval_hours")]
     pub consolidation_interval_hours: u64,
+    #[serde(default = "default_archive_retention_days")]
+    pub archive_retention_days: u64,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +367,7 @@ impl Default for MainConfig {
             embedding: EmbeddingConfig::default(),
             tools: ToolsConfig::default(),
             consolidation_interval_hours: default_consolidation_interval_hours(),
+            archive_retention_days: default_archive_retention_days(),
             log_level: default_log_level(),
             web_password_hash: None,
         }
@@ -1231,6 +1238,7 @@ auth:
                 embedding: EmbeddingConfig::default(),
                 tools: ToolsConfig::default(),
                 consolidation_interval_hours: 24,
+                archive_retention_days: 30,
                 log_level: default_log_level(),
                 web_password_hash: None,
             },

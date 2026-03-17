@@ -38,15 +38,27 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
         .with_memory_store(Arc::clone(&memory)),
     );
 
-    let scheduler =
-        ConsolidationScheduler::new(consolidator, config.main.consolidation_interval_hours);
+    let scheduler = ConsolidationScheduler::new(
+        vec![consolidator],
+        config.main.consolidation_interval_hours,
+        config.main.archive_retention_days,
+    );
     println!("Running hippocampus consolidation...");
-    let report = scheduler.run_once().await?;
-    println!("Consolidation complete:");
-    println!("  Daily files read: {}", report.daily_files_read);
-    println!("  Memory updated: {}", report.memory_updated);
-    println!("  Reindexed: {}", report.reindexed);
-    println!("  Facts extracted: {}", report.facts_extracted);
-    println!("  Summary: {}", report.summary);
+    let results = scheduler.run_once().await;
+    for (agent_id, result) in results {
+        match result {
+            Ok(report) => {
+                println!("Consolidation complete for {agent_id}:");
+                println!("  Daily files read: {}", report.daily_files_read);
+                println!("  Memory updated: {}", report.memory_updated);
+                println!("  Reindexed: {}", report.reindexed);
+                println!("  Facts extracted: {}", report.facts_extracted);
+                println!("  Summary: {}", report.summary);
+            }
+            Err(e) => {
+                eprintln!("Consolidation failed for {agent_id}: {e}");
+            }
+        }
+    }
     Ok(())
 }
