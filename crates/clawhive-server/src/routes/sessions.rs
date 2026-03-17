@@ -173,6 +173,18 @@ async fn reset_session(
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let path = find_session_file(&state.root, &key).ok_or(axum::http::StatusCode::NOT_FOUND)?;
-    std::fs::remove_file(&path).map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
-    Ok(Json(serde_json::json!({ "status": "reset", "key": key })))
+    let sessions_dir = path
+        .parent()
+        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let archived_dir = sessions_dir.join("archived");
+    std::fs::create_dir_all(&archived_dir)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let file_name = path
+        .file_name()
+        .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let dest = archived_dir.join(file_name);
+    std::fs::rename(&path, &dest).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::json!({ "status": "reset", "key": key, "archived": true }),
+    ))
 }
