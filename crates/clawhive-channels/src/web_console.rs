@@ -6,16 +6,15 @@
 
 use std::path::{Path, PathBuf};
 
-use clawhive_schema::{Attachment, AttachmentKind};
 use serde::{Deserialize, Serialize};
 
 // ── Protocol types ──────────────────────────────────────────────────────────
 
-/// Attachment payload sent by the client (browser) via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttachmentPayload {
-    pub kind: String,
-    pub data: String,
+pub struct AttachmentRef {
+    pub id: String,
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub mime_type: Option<String>,
     #[serde(default)]
@@ -31,7 +30,7 @@ pub enum ClientMessage {
         agent_id: String,
         conversation_id: Option<String>,
         #[serde(default)]
-        attachments: Vec<AttachmentPayload>,
+        attachments: Vec<AttachmentRef>,
     },
     Cancel,
     Ping,
@@ -113,45 +112,21 @@ pub struct ConversationMessage {
 // ── Constants ───────────────────────────────────────────────────────────────
 
 pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 5;
-pub const MAX_ATTACHMENT_DATA_BYTES: usize = 10 * 1024 * 1024;
 
-// ── Message mapping ─────────────────────────────────────────────────────────
+// ── Validation ──────────────────────────────────────────────────────────────
 
-pub fn map_attachment(payload: &AttachmentPayload) -> Attachment {
-    let kind = match payload.kind.as_str() {
-        "image" => AttachmentKind::Image,
-        "video" => AttachmentKind::Video,
-        "audio" => AttachmentKind::Audio,
-        "document" => AttachmentKind::Document,
-        _ => AttachmentKind::Other,
-    };
-    Attachment {
-        kind,
-        url: payload.data.clone(),
-        mime_type: payload.mime_type.clone(),
-        file_name: payload.file_name.clone(),
-        size: None,
-    }
-}
-
-pub fn validate_attachments(attachments: &[AttachmentPayload]) -> Result<(), String> {
-    if attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+pub fn validate_attachment_refs(refs: &[AttachmentRef]) -> Result<(), String> {
+    if refs.len() > MAX_ATTACHMENTS_PER_MESSAGE {
         return Err(format!(
             "Too many attachments: max {} per message",
             MAX_ATTACHMENTS_PER_MESSAGE
         ));
     }
-
-    for (idx, attachment) in attachments.iter().enumerate() {
-        if attachment.data.len() > MAX_ATTACHMENT_DATA_BYTES {
-            return Err(format!(
-                "Attachment {} exceeds {} bytes",
-                idx + 1,
-                MAX_ATTACHMENT_DATA_BYTES
-            ));
+    for r in refs {
+        if r.id.is_empty() {
+            return Err("Attachment id must not be empty".to_string());
         }
     }
-
     Ok(())
 }
 
@@ -419,35 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn map_attachment_maps_image_kind() {
-        let payload = AttachmentPayload {
-            kind: "image".to_string(),
-            data: "base64-image".to_string(),
-            mime_type: Some("image/png".to_string()),
-            file_name: Some("pic.png".to_string()),
-        };
-
-        let attachment = map_attachment(&payload);
-        assert!(matches!(attachment.kind, AttachmentKind::Image));
-        assert_eq!(attachment.url, "base64-image");
-        assert_eq!(attachment.mime_type.as_deref(), Some("image/png"));
-        assert_eq!(attachment.file_name.as_deref(), Some("pic.png"));
-    }
-
-    #[test]
-    fn map_attachment_unknown_kind_falls_back_to_other() {
-        let payload = AttachmentPayload {
-            kind: "unknown".to_string(),
-            data: "base64-data".to_string(),
-            mime_type: None,
-            file_name: None,
-        };
-
-        let attachment = map_attachment(&payload);
-        assert!(matches!(attachment.kind, AttachmentKind::Other));
-    }
-
-    #[test]
     fn send_message_serde_without_attachments_defaults_to_empty() {
         let msg = serde_json::from_str::<ClientMessage>(
             r#"{"type":"send_message","text":"hi","agent_id":"agent-1","conversation_id":null}"#,
@@ -463,17 +409,17 @@ mod tests {
     }
 
     #[test]
-    fn send_message_serde_with_single_attachment() {
+    fn send_message_serde_with_attachment_ref() {
         let msg = serde_json::from_str::<ClientMessage>(
-            r#"{"type":"send_message","text":"hi","agent_id":"agent-1","conversation_id":"conv-1","attachments":[{"kind":"image","data":"base64-image","mime_type":"image/png","file_name":"pic.png"}]}"#,
+            r#"{"type":"send_message","text":"hi","agent_id":"agent-1","conversation_id":"conv-1","attachments":[{"id":"att-uuid-1","kind":"image","mime_type":"image/png","file_name":"pic.png"}]}"#,
         )
         .unwrap();
 
         match msg {
             ClientMessage::SendMessage { attachments, .. } => {
                 assert_eq!(attachments.len(), 1);
-                assert_eq!(attachments[0].kind, "image");
-                assert_eq!(attachments[0].data, "base64-image");
+                assert_eq!(attachments[0].id, "att-uuid-1");
+                assert_eq!(attachments[0].kind.as_deref(), Some("image"));
                 assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
                 assert_eq!(attachments[0].file_name.as_deref(), Some("pic.png"));
             }
@@ -482,31 +428,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_attachments_rejects_too_many_or_too_large() {
-        let too_many = vec![
-            AttachmentPayload {
-                kind: "image".to_string(),
-                data: "x".to_string(),
+    fn validate_attachment_refs_rejects_too_many() {
+        let too_many: Vec<AttachmentRef> = (0..6)
+            .map(|i| AttachmentRef {
+                id: format!("att-{i}"),
+                kind: None,
                 mime_type: None,
                 file_name: None,
-            };
-            6
-        ];
-        let too_large = vec![AttachmentPayload {
-            kind: "image".to_string(),
-            data: "x".repeat(10 * 1024 * 1024 + 1),
+            })
+            .collect();
+        let empty_id = vec![AttachmentRef {
+            id: String::new(),
+            kind: None,
             mime_type: None,
             file_name: None,
         }];
-        let valid = vec![AttachmentPayload {
-            kind: "image".to_string(),
-            data: "x".repeat(10 * 1024 * 1024),
+        let valid = vec![AttachmentRef {
+            id: "att-1".to_string(),
+            kind: Some("image".to_string()),
             mime_type: None,
             file_name: None,
         }];
 
-        assert!(validate_attachments(&too_many).is_err());
-        assert!(validate_attachments(&too_large).is_err());
-        assert!(validate_attachments(&valid).is_ok());
+        assert!(validate_attachment_refs(&too_many).is_err());
+        assert!(validate_attachment_refs(&empty_id).is_err());
+        assert!(validate_attachment_refs(&valid).is_ok());
     }
 }
