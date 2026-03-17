@@ -69,12 +69,11 @@ export default function Chat() {
       attachments: pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
     });
 
-    sendMessage(
-      text,
-      selectedAgentId,
-      activeConversationId,
-      pendingAttachments.length > 0 ? pendingAttachments : undefined,
-    );
+    const refs = pendingAttachments.length > 0
+      ? pendingAttachments.map((a) => ({ id: a.id, kind: a.kind, mime_type: a.mime_type, file_name: a.file_name }))
+      : undefined;
+
+    sendMessage(text, selectedAgentId, activeConversationId, refs);
     clearPendingAttachments();
   };
 

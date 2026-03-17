@@ -1,15 +1,14 @@
 import { useState, useRef, useCallback, useMemo, useEffect, type DragEvent, type ClipboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, Square, Loader2, ImagePlus, X } from "lucide-react";
+import { Send, Square, Loader2, Paperclip, X, FileText, File as FileIcon } from "lucide-react";
 import { useChatStore } from "@/stores/chat";
-import type { AttachmentPayload } from "@/types/chat";
+import { uploadAttachment } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const MAX_LENGTH = 10000;
 const MAX_ATTACHMENTS = 5;
-const MAX_FILE_SIZE = 7.5 * 1024 * 1024; // ~7.5MB raw → ~10MB base64
-const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
 const SLASH_COMMANDS = [
   { command: "/new", args: "[model]", description: "Start a fresh session" },
@@ -20,17 +19,10 @@ const SLASH_COMMANDS = [
   { command: "/skill confirm", args: "<token>", description: "Confirm pending skill install" },
 ] as const;
 
-function fileToBase64(file: File): Promise<{ data: string; mime_type: string }> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      const base64 = result.split(",")[1]; // strip data:...;base64, prefix
-      resolve({ data: base64, mime_type: file.type });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 interface MessageInputProps {
@@ -45,7 +37,7 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCountRef = useRef(0);
-  const { isProcessing, isConnected, pendingAttachments, addPendingAttachment, removePendingAttachment } = useChatStore();
+  const { isProcessing, isConnected, pendingAttachments, activeConversationId, addPendingAttachment, removePendingAttachment } = useChatStore();
   const [selectedCommandIdx, setSelectedCommandIdx] = useState(0);
 
   const filteredCommands = useMemo(() => {
@@ -72,37 +64,26 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
 
   const processFiles = useCallback(
     async (files: FileList | File[]) => {
-      const current = pendingAttachments.length;
       const fileArray = Array.from(files);
 
       for (const file of fileArray) {
-        if (current + pendingAttachments.length >= MAX_ATTACHMENTS) {
-          showError(`Max ${MAX_ATTACHMENTS} images per message`);
+        if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+          showError(`Max ${MAX_ATTACHMENTS} files per message`);
           break;
         }
-        if (!ACCEPTED_TYPES.includes(file.type)) {
-          showError(`Unsupported type: ${file.type}. Use JPEG, PNG, GIF, or WebP.`);
-          continue;
-        }
         if (file.size > MAX_FILE_SIZE) {
-          showError(`File too large: ${file.name} (max ~7.5MB)`);
+          showError(`File too large: ${file.name} (max 20MB)`);
           continue;
         }
         try {
-          const { data, mime_type } = await fileToBase64(file);
-          const attachment: AttachmentPayload = {
-            kind: "image",
-            data,
-            mime_type,
-            file_name: file.name,
-          };
-          addPendingAttachment(attachment);
+          const uploaded = await uploadAttachment(file, activeConversationId ?? undefined);
+          addPendingAttachment(uploaded);
         } catch {
-          showError(`Failed to read: ${file.name}`);
+          showError(`Failed to upload: ${file.name}`);
         }
       }
     },
-    [pendingAttachments.length, addPendingAttachment, showError],
+    [pendingAttachments.length, activeConversationId, addPendingAttachment, showError],
   );
 
   const handleSend = useCallback(() => {
@@ -146,28 +127,26 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
     }
   };
 
-  // --- Paste handler ---
   const handlePaste = useCallback(
     (e: ClipboardEvent<HTMLTextAreaElement>) => {
       const items = e.clipboardData?.items;
       if (!items) return;
 
-      const imageFiles: File[] = [];
+      const pastedFiles: File[] = [];
       for (const item of items) {
-        if (item.type.startsWith("image/")) {
+        if (item.kind === "file") {
           const file = item.getAsFile();
-          if (file) imageFiles.push(file);
+          if (file) pastedFiles.push(file);
         }
       }
-      if (imageFiles.length > 0) {
+      if (pastedFiles.length > 0) {
         e.preventDefault();
-        processFiles(imageFiles);
+        processFiles(pastedFiles);
       }
     },
     [processFiles],
   );
 
-  // --- Drag and drop ---
   const handleDragEnter = useCallback((e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -205,14 +184,12 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
     [processFiles],
   );
 
-  // --- File picker ---
   const handleFileSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
       if (files && files.length > 0) {
         processFiles(files);
       }
-      // Reset so same file can be re-selected
       e.target.value = "";
     },
     [processFiles],
@@ -227,36 +204,47 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      {/* Drag overlay */}
       {isDragging && (
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-xl border-2 border-dashed border-primary/50 bg-primary/5 backdrop-blur-[2px]">
           <div className="flex flex-col items-center gap-2 text-primary">
-            <ImagePlus className="h-8 w-8" />
-            <span className="text-sm font-medium">Drop images here</span>
+            <Paperclip className="h-8 w-8" />
+            <span className="text-sm font-medium">Drop files here</span>
           </div>
         </div>
       )}
 
-      {/* Error toast */}
       {error && (
         <div className="absolute -top-10 left-4 right-4 z-20 rounded-md bg-destructive/90 px-3 py-1.5 text-xs text-destructive-foreground shadow-md">
           {error}
         </div>
       )}
 
-      {/* Pending attachment previews */}
       {pendingAttachments.length > 0 && (
         <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
           {pendingAttachments.map((att, idx) => (
             <div
-              key={`${att.file_name ?? "img"}-${idx}`}
+              key={`${att.file_name}-${idx}`}
               className="group relative shrink-0"
             >
-              <img
-                src={`data:${att.mime_type};base64,${att.data}`}
-                alt={att.file_name ?? "attachment"}
-                className="h-16 w-16 rounded-md border object-cover shadow-sm"
-              />
+              {att.kind === "image" ? (
+                <img
+                  src={`/api/chat/attachments/${att.id}`}
+                  alt={att.file_name}
+                  className="h-16 w-16 rounded-md border object-cover shadow-sm"
+                />
+              ) : (
+                <div className="flex h-16 w-40 items-center gap-2 rounded-md border bg-muted/50 px-2 shadow-sm">
+                  {att.mime_type.includes("pdf") || att.mime_type.includes("text") || att.mime_type.includes("document") ? (
+                    <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <FileIcon className="h-5 w-5 shrink-0 text-muted-foreground" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium">{att.file_name}</p>
+                    <p className="text-[10px] text-muted-foreground">{formatFileSize(att.size)}</p>
+                  </div>
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => removePendingAttachment(idx)}
@@ -271,27 +259,24 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
       )}
 
       <div className="flex gap-2 items-end">
-        {/* Hidden file input */}
         <input
           ref={fileInputRef}
           type="file"
-          accept={ACCEPTED_TYPES.join(",")}
           multiple
           className="hidden"
           onChange={handleFileSelect}
         />
 
-        {/* Attach button */}
         <Button
           variant="ghost"
           size="icon"
           className="h-9 w-9 shrink-0"
           onClick={() => fileInputRef.current?.click()}
           disabled={!isConnected || pendingAttachments.length >= MAX_ATTACHMENTS}
-          title="Attach images"
+          title="Attach files"
         >
           <div className="relative">
-            <ImagePlus className="h-4 w-4" />
+            <Paperclip className="h-4 w-4" />
             {pendingAttachments.length > 0 && (
               <span className="absolute -right-2 -top-2 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[9px] font-bold text-primary-foreground">
                 {pendingAttachments.length}

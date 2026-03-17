@@ -3,7 +3,7 @@ import Markdown from "react-markdown";
 
 import { useChatStore, type ChatMessageItem } from "@/stores/chat";
 import { cn } from "@/lib/utils";
-import { Bot, User, Loader2 } from "lucide-react";
+import { Bot, User, Loader2, FileText, File as FileIcon } from "lucide-react";
 import { ToolCallPanel } from "./tool-call-panel";
 
 export function MessageStream() {
@@ -67,6 +67,56 @@ export function MessageStream() {
   );
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function AttachmentDisplay({ att, i, isUser }: { att: NonNullable<ChatMessageItem["attachments"]>[number]; i: number; isUser: boolean }) {
+  if (att.kind === "image") {
+    return (
+      <a
+        key={`${att.file_name}-${i}`}
+        href={`/api/chat/attachments/${att.id}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block"
+      >
+        <img
+          src={`/api/chat/attachments/${att.id}`}
+          alt={att.file_name}
+          className={cn(
+            "max-h-48 max-w-[240px] rounded border object-cover transition-opacity hover:opacity-80",
+            isUser ? "border-primary-foreground/20" : "border-border"
+          )}
+        />
+      </a>
+    );
+  }
+
+  const IconComponent = att.mime_type.includes("pdf") || att.mime_type.includes("text") || att.mime_type.includes("document")
+    ? FileText
+    : FileIcon;
+
+  return (
+    <a
+      key={`${att.file_name}-${i}`}
+      href={`/api/chat/attachments/${att.id}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        "flex items-center gap-2 rounded-md border px-3 py-2 text-xs transition-opacity hover:opacity-80",
+        isUser ? "border-primary-foreground/20 text-primary-foreground" : "border-border"
+      )}
+    >
+      <IconComponent className="h-4 w-4 shrink-0" />
+      <span className="truncate max-w-[160px]">{att.file_name}</span>
+      <span className="shrink-0 text-[10px] opacity-70">{formatFileSize(att.size)}</span>
+    </a>
+  );
+}
+
 function MessageBubble({ message }: { message: ChatMessageItem }) {
   const isUser = message.role === "user";
 
@@ -89,19 +139,7 @@ function MessageBubble({ message }: { message: ChatMessageItem }) {
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {message.attachments.map((att, i) => (
-                  <a
-                    key={`${att.file_name ?? "img"}-${i}`}
-                    href={`data:${att.mime_type};base64,${att.data}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block"
-                  >
-                    <img
-                      src={`data:${att.mime_type};base64,${att.data}`}
-                      alt={att.file_name ?? "attachment"}
-                      className="max-h-48 max-w-[240px] rounded border border-primary-foreground/20 object-cover transition-opacity hover:opacity-80"
-                    />
-                  </a>
+                  <AttachmentDisplay key={`${att.file_name}-${i}`} att={att} i={i} isUser />
                 ))}
               </div>
             )}
@@ -112,19 +150,7 @@ function MessageBubble({ message }: { message: ChatMessageItem }) {
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {message.attachments.map((att, i) => (
-                  <a
-                    key={`${att.file_name ?? "img"}-${i}`}
-                    href={`data:${att.mime_type};base64,${att.data}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block"
-                  >
-                    <img
-                      src={`data:${att.mime_type};base64,${att.data}`}
-                      alt={att.file_name ?? "attachment"}
-                      className="max-h-48 max-w-[240px] rounded border border-border object-cover transition-opacity hover:opacity-80"
-                    />
-                  </a>
+                  <AttachmentDisplay key={`${att.file_name}-${i}`} att={att} i={i} isUser={false} />
                 ))}
               </div>
             )}
