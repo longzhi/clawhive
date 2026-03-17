@@ -19,6 +19,7 @@ pub mod policy;
 pub mod router;
 pub mod runtime_config;
 pub mod schedule_tool;
+pub mod send_file_tool;
 pub mod session;
 pub mod session_lock;
 pub mod shell_tool;

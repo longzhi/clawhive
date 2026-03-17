@@ -12,6 +12,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use clawhive_provider::ToolDef;
+use clawhive_schema::Attachment;
+use tokio::sync::Mutex;
 
 use super::config::SecurityMode;
 use super::policy::{PolicyContext, ToolOrigin};
@@ -53,6 +55,7 @@ pub struct ToolContext {
     /// Session key for the current conversation
     session_key: String,
     skill_registry: Option<Arc<SkillRegistry>>,
+    attachment_collector: Option<Arc<Mutex<Vec<Attachment>>>>,
 }
 
 impl ToolContext {
@@ -74,6 +77,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -88,6 +92,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -104,6 +109,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -121,6 +127,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -138,6 +145,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -159,6 +167,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -177,6 +186,7 @@ impl ToolContext {
             source_user_scope: None,
             session_key: String::new(),
             skill_registry: None,
+            attachment_collector: None,
         }
     }
 
@@ -234,6 +244,11 @@ impl ToolContext {
         self
     }
 
+    pub fn with_attachment_collector(mut self, collector: Arc<Mutex<Vec<Attachment>>>) -> Self {
+        self.attachment_collector = Some(collector);
+        self
+    }
+
     // ============================================================
     // Accessors
     // ============================================================
@@ -270,6 +285,10 @@ impl ToolContext {
 
     pub fn skill_registry(&self) -> Option<&Arc<SkillRegistry>> {
         self.skill_registry.as_ref()
+    }
+
+    pub fn attachment_collector(&self) -> Option<&Arc<Mutex<Vec<Attachment>>>> {
+        self.attachment_collector.as_ref()
     }
 
     /// Get recent messages up to a limit.

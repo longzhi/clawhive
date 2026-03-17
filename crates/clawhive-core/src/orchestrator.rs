@@ -1092,7 +1092,7 @@ impl Orchestrator {
             .map(|s| s.dangerous_allow_private.clone())
             .unwrap_or_default();
         let max_response_tokens = if is_scheduled_task { 8192 } else { 2048 };
-        let (resp, _messages) = self
+        let (resp, _messages, tool_attachments) = self
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
@@ -1128,6 +1128,31 @@ impl Orchestrator {
 
         log_language_guard(agent_id, &inbound, &reply_text, target_language, false);
 
+        let mut outbound_attachments: Vec<Attachment> = resp
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { data, media_type } => Some(Attachment {
+                    kind: AttachmentKind::Image,
+                    url: data.clone(),
+                    mime_type: Some(media_type.clone()),
+                    file_name: None,
+                    size: None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        outbound_attachments.extend(tool_attachments);
+
+        if !outbound_attachments.is_empty() {
+            tracing::info!(
+                agent_id = %agent_id,
+                attachment_count = outbound_attachments.len(),
+                "outbound attachments collected"
+            );
+        }
+
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
             channel_type: inbound.channel_type.clone(),
@@ -1136,7 +1161,7 @@ impl Orchestrator {
             text: reply_text,
             at: chrono::Utc::now(),
             reply_to: None,
-            attachments: vec![],
+            attachments: outbound_attachments,
         };
 
         if !outbound.text.is_empty() {
@@ -1393,7 +1418,7 @@ impl Orchestrator {
             .as_ref()
             .map(|s| s.dangerous_allow_private.clone())
             .unwrap_or_default();
-        let (_resp, final_messages) = self
+        let (_resp, final_messages, _tool_attachments) = self
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
@@ -1552,7 +1577,11 @@ impl Orchestrator {
         must_use_web_search: bool,
         is_scheduled_task: bool,
         thinking_level: Option<clawhive_provider::ThinkingLevel>,
-    ) -> Result<(clawhive_provider::LlmResponse, Vec<LlmMessage>)> {
+    ) -> Result<(
+        clawhive_provider::LlmResponse,
+        Vec<LlmMessage>,
+        Vec<Attachment>,
+    )> {
         let mut messages = initial_messages;
         let tool_defs: Vec<_> = match allowed_tools {
             Some(allow_list) => view
@@ -1570,6 +1599,8 @@ impl Orchestrator {
         let loop_started = std::time::Instant::now();
         let mut scheduled_task_retries: u32 = 0;
         let mut total_tool_calls: usize = 0;
+        let attachment_collector: Arc<tokio::sync::Mutex<Vec<Attachment>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         for iteration in 0..max_iterations {
             let iteration_no = iteration + 1;
@@ -1897,7 +1928,8 @@ impl Orchestrator {
                     stop_reason = ?resp.stop_reason,
                     "tool_use_loop: returning final response"
                 );
-                return Ok((resp, messages));
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                return Ok((resp, messages, tool_attachments));
             }
 
             total_tool_calls += tool_uses.len();
@@ -1935,7 +1967,8 @@ impl Orchestrator {
                     private_network_overrides.clone(),
                 ),
             }
-            .with_recent_messages(recent_messages);
+            .with_recent_messages(recent_messages)
+            .with_attachment_collector(attachment_collector.clone());
             let ctx = ctx.with_skill_registry(self.active_skill_registry());
             let ctx = if let Some((ref ch, ref co, ref cv, ref us)) = source_info {
                 ctx.with_source(ch.clone(), co.clone(), cv.clone())
@@ -2097,7 +2130,8 @@ impl Orchestrator {
             }
         }
 
-        Ok((resp, messages))
+        let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+        Ok((resp, messages, tool_attachments))
     }
 
     /// Handle the flow after a /reset or /new command.
@@ -2142,8 +2176,7 @@ impl Orchestrator {
             inbound.user_scope.clone(),
         ));
 
-        // Run the tool-use loop
-        let (resp, _messages) = self
+        let (resp, _messages, _tool_attachments) = self
             .tool_use_loop(
                 view,
                 agent_id,
@@ -2483,6 +2516,7 @@ pub fn build_tool_registry(
     registry.register(Box::new(RevokeAccessTool::new(default_access_gate.clone())));
     registry.register(Box::new(WebFetchTool::new()));
     registry.register(Box::new(ImageTool::new()));
+    registry.register(Box::new(crate::send_file_tool::SendFileTool::new()));
     registry.register(Box::new(ScheduleTool::new(schedule_manager)));
     registry.register(Box::new(crate::skill_tool::SkillTool::new()));
     registry.register(Box::new(crate::message_tool::MessageTool::new(bus.clone())));
@@ -2769,15 +2803,18 @@ fn should_retry_fabricated_scheduled_response(
     current_tool_calls: usize,
     response_text: &str,
 ) -> bool {
+    // Conversations have a human in the loop who can see fabricated responses
+    // and re-prompt. Keyword matching is too coarse for conversation context
+    // (e.g. "已创建" appears naturally when discussing plans).
+    if !is_scheduled_task {
+        return false;
+    }
+
     // Only retry when the agent has made ZERO tool calls across the entire
     // session. If tools were already called in prior iterations (e.g. the agent
     // ran a pipeline and is now composing a text summary), the current zero-tool
     // iteration is legitimate — not hallucination.
-    //
-    // Scheduled tasks: up to 2 retries (no user in loop).
-    // Conversations: up to 1 retry (user can re-prompt).
-    let max_retries: u32 = if is_scheduled_task { 2 } else { 1 };
-    if retry_count >= max_retries || total_tool_calls > 0 || current_tool_calls > 0 {
+    if retry_count >= 2 || total_tool_calls > 0 || current_tool_calls > 0 {
         return false;
     }
 
@@ -3488,28 +3525,18 @@ Body"#,
     }
 
     #[test]
-    fn fabricated_response_detected_in_conversation() {
-        assert!(should_retry_fabricated_scheduled_response(
+    fn fabricated_response_skipped_in_conversation() {
+        // Conversations have a human in the loop — never retry for fabrication
+        assert!(!should_retry_fabricated_scheduled_response(
             false,
             0,
             0,
             0,
             "I created the file and saved it.",
         ));
-    }
-
-    #[test]
-    fn fabricated_response_conversation_max_one_retry() {
-        assert!(should_retry_fabricated_scheduled_response(
-            false,
-            0,
-            0,
-            0,
-            "I updated the config.",
-        ));
         assert!(!should_retry_fabricated_scheduled_response(
             false,
-            1,
+            0,
             0,
             0,
             "I updated the config.",
