@@ -1903,8 +1903,7 @@ impl Orchestrator {
                     private_network_overrides.clone(),
                 ),
             }
-            .with_recent_messages(recent_messages)
-            .with_agent_id(agent_id);
+            .with_recent_messages(recent_messages);
             let ctx = ctx.with_skill_registry(self.active_skill_registry());
             let ctx = if let Some((ref ch, ref co, ref cv, ref us)) = source_info {
                 ctx.with_source(ch.clone(), co.clone(), cv.clone())
@@ -2397,8 +2396,14 @@ pub fn build_tool_registry(
     )));
     registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
     let fact_store = clawhive_memory::fact_store::FactStore::new(memory.db());
-    registry.register(Box::new(MemoryWriteTool::new(fact_store.clone())));
-    registry.register(Box::new(MemoryForgetTool::new(fact_store)));
+    registry.register(Box::new(MemoryWriteTool::new(
+        fact_store.clone(),
+        "default".to_string(),
+    )));
+    registry.register(Box::new(MemoryForgetTool::new(
+        fact_store,
+        "default".to_string(),
+    )));
     let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
         Arc::new(router.clone()),
         agents_map,
