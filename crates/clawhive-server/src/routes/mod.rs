@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod agents;
+pub mod attachments;
 pub mod auth;
 pub mod channels;
 pub mod chat;
@@ -22,6 +23,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/agents", agents::router())
         .nest("/auth", auth::router())
         .nest("/chat", chat::router())
+        .nest("/chat/attachments", attachments::router())
         .nest("/channels", channels::router())
         .nest("/providers", providers::router())
         .nest("/routing", routing::router())
