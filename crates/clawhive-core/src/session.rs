@@ -39,6 +39,7 @@ pub struct SessionResult {
     pub expired_previous: bool,
 }
 
+#[derive(Clone)]
 pub struct SessionManager {
     store: Arc<MemoryStore>,
     default_ttl: i64,
@@ -62,7 +63,7 @@ impl SessionManager {
 
             if session.is_expired() {
                 let new_session = self.create_new(key, agent_id);
-                self.persist(&new_session).await?;
+                self.persist_session(&new_session).await?;
                 return Ok(SessionResult {
                     session: new_session,
                     expired_previous: true,
@@ -70,14 +71,14 @@ impl SessionManager {
             }
 
             session.touch();
-            self.persist(&session).await?;
+            self.persist_session(&session).await?;
             Ok(SessionResult {
                 session,
                 expired_previous: false,
             })
         } else {
             let session = self.create_new(key, agent_id);
-            self.persist(&session).await?;
+            self.persist_session(&session).await?;
             Ok(SessionResult {
                 session,
                 expired_previous: false,
@@ -101,7 +102,7 @@ impl SessionManager {
         }
     }
 
-    async fn persist(&self, session: &Session) -> Result<()> {
+    pub async fn persist_session(&self, session: &Session) -> Result<()> {
         let record = clawhive_memory::SessionRecord {
             session_key: session.session_key.0.clone(),
             agent_id: session.agent_id.clone(),

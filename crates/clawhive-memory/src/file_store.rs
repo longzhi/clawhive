@@ -79,6 +79,10 @@ impl MemoryFileStore {
         }
     }
 
+    pub fn workspace_dir(&self) -> &Path {
+        &self.workspace
+    }
+
     /// Read the entire MEMORY.md content. Returns empty string if file doesn't exist.
     pub async fn read_long_term(&self) -> Result<String> {
         let path = self.long_term_path();

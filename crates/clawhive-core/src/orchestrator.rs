@@ -1180,6 +1180,47 @@ impl Orchestrator {
             tracing::warn!("Failed to write assistant session entry: {e}");
         }
 
+        {
+            let mut session = session_result.session.clone();
+            session.increment_interaction();
+            if let Err(e) = self.session_mgr.persist_session(&session).await {
+                tracing::warn!("Failed to persist session interaction count: {e}");
+            }
+
+            let interval = agent
+                .memory_policy
+                .as_ref()
+                .map(|mp| mp.daily_summary_interval)
+                .unwrap_or(10);
+
+            if interval > 0 && session.interaction_count % interval == 0 {
+                let agent_id_owned = agent_id.to_string();
+                let session_key_clone = session_key.clone();
+                let agent_clone = agent.clone();
+                let interaction_count = session.interaction_count;
+                let file_store = self.file_store_for(agent_id).clone();
+                let memory = Arc::clone(&self.memory);
+                let router = view.router.clone();
+                tokio::spawn(async move {
+                    tracing::debug!(
+                        agent_id = %agent_id_owned,
+                        interaction_count,
+                        "Triggering periodic daily summary"
+                    );
+                    Self::generate_session_summary_static(
+                        &router,
+                        &file_store,
+                        &memory,
+                        &agent_id_owned,
+                        &session_key_clone,
+                        &agent_clone,
+                        "periodic_summary",
+                    )
+                    .await;
+                });
+            }
+        }
+
         let _ = self
             .bus
             .publish(BusMessage::ReplyReady {
@@ -1403,6 +1444,23 @@ impl Orchestrator {
 
         let trace_id = inbound.trace_id;
         let bus = self.bus.clone();
+        let session_mgr = self.session_mgr.clone();
+        let view_for_summary = view.clone();
+        let file_store_for_summary = self.file_store_for(agent_id).clone();
+        let memory_for_summary = Arc::clone(&self.memory);
+        let session_key_for_summary = session_key.clone();
+        let agent_for_summary = agent.clone();
+        let interval = agent
+            .memory_policy
+            .as_ref()
+            .map(|mp| mp.daily_summary_interval)
+            .unwrap_or(10);
+        let mut session = session_result.session.clone();
+        session.increment_interaction();
+        if let Err(e) = session_mgr.persist_session(&session).await {
+            tracing::warn!("Failed to persist session interaction count: {e}");
+        }
+        let periodic_summary_interaction_count = session.interaction_count;
         let agent_id_owned = agent_id.to_string();
         let channel_type = inbound.channel_type.clone();
         let connector_id = inbound.connector_id.clone();
@@ -1428,6 +1486,36 @@ impl Orchestrator {
             if let Ok(ref chunk) = chunk_result {
                 if !chunk.delta.is_empty() {
                     stream_accumulator.push_str(&chunk.delta);
+                }
+
+                if chunk.is_final
+                    && interval > 0
+                    && periodic_summary_interaction_count % interval == 0
+                {
+                    let agent_id_for_summary = agent_id_owned.clone();
+                    let session_key_clone = session_key_for_summary.clone();
+                    let agent_clone = agent_for_summary.clone();
+                    let interaction_count = periodic_summary_interaction_count;
+                    let fs = file_store_for_summary.clone();
+                    let mem = Arc::clone(&memory_for_summary);
+                    let router = view_for_summary.router.clone();
+                    tokio::spawn(async move {
+                        tracing::debug!(
+                            agent_id = %agent_id_for_summary,
+                            interaction_count,
+                            "Triggering periodic daily summary"
+                        );
+                        Orchestrator::generate_session_summary_static(
+                            &router,
+                            &fs,
+                            &mem,
+                            &agent_id_for_summary,
+                            &session_key_clone,
+                            &agent_clone,
+                            "periodic_summary",
+                        )
+                        .await;
+                    });
                 }
 
                 if chunk.is_final && !is_language_guard_exempt(&inbound_text_for_guard) {
@@ -1815,7 +1903,8 @@ impl Orchestrator {
                     private_network_overrides.clone(),
                 ),
             }
-            .with_recent_messages(recent_messages);
+            .with_recent_messages(recent_messages)
+            .with_agent_id(agent_id);
             let ctx = ctx.with_skill_registry(self.active_skill_registry());
             let ctx = if let Some((ref ch, ref co, ref cv, ref us)) = source_info {
                 ctx.with_source(ch.clone(), co.clone(), cv.clone())
@@ -2102,17 +2191,20 @@ impl Orchestrator {
         Ok(outbound)
     }
 
-    async fn try_fallback_summary(
-        &self,
-        view: &ConfigView,
+    /// Generate a summary and append it to daily memory. Can be called from
+    /// both instance methods and spawned background tasks (via the static variant).
+    async fn generate_session_summary_static(
+        router: &LlmRouter,
+        file_store: &clawhive_memory::file_store::MemoryFileStore,
+        memory: &Arc<MemoryStore>,
         agent_id: &str,
         session_key: &SessionKey,
         agent: &FullAgentConfig,
+        source: &str,
     ) {
-        let workspace = self.workspace_state_for(agent_id);
+        let reader = clawhive_memory::session::SessionReader::new(file_store.workspace_dir());
         let history_limit = history_message_limit(agent).max(20);
-        let messages = match workspace
-            .session_reader
+        let messages = match reader
             .load_recent_messages(&session_key.0, history_limit)
             .await
         {
@@ -2135,8 +2227,7 @@ impl Orchestrator {
 
         let llm_messages = vec![LlmMessage::user(conversation)];
 
-        match view
-            .router
+        match router
             .chat(
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
@@ -2147,20 +2238,16 @@ impl Orchestrator {
             .await
         {
             Ok(resp) => {
-                if let Err(e) = self
-                    .file_store_for(agent_id)
-                    .append_daily(today, &resp.text)
-                    .await
-                {
-                    tracing::warn!("Failed to write fallback summary: {e}");
+                if let Err(e) = file_store.append_daily(today, &resp.text).await {
+                    tracing::warn!("Failed to write {source}: {e}");
                 } else {
-                    tracing::info!("Wrote fallback summary for expired session");
-                    self.memory
+                    tracing::info!(source, "Wrote session summary");
+                    memory
                         .record_trace(
                             agent_id,
                             "write",
                             &serde_json::json!({
-                                "source": "fallback_summary",
+                                "source": source,
                                 "target": format!("memory/{}.md", today.format("%Y-%m-%d")),
                             })
                             .to_string(),
@@ -2170,9 +2257,28 @@ impl Orchestrator {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to generate fallback summary: {e}");
+                tracing::warn!("Failed to generate {source}: {e}");
             }
         }
+    }
+
+    async fn try_fallback_summary(
+        &self,
+        view: &ConfigView,
+        agent_id: &str,
+        session_key: &SessionKey,
+        agent: &FullAgentConfig,
+    ) {
+        Self::generate_session_summary_static(
+            &view.router,
+            &self.file_store_for(agent_id),
+            &self.memory,
+            agent_id,
+            session_key,
+            agent,
+            "fallback_summary",
+        )
+        .await;
     }
 
     async fn build_memory_context(
@@ -2291,14 +2397,8 @@ pub fn build_tool_registry(
     )));
     registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
     let fact_store = clawhive_memory::fact_store::FactStore::new(memory.db());
-    registry.register(Box::new(MemoryWriteTool::new(
-        fact_store.clone(),
-        "default".to_string(),
-    )));
-    registry.register(Box::new(MemoryForgetTool::new(
-        fact_store,
-        "default".to_string(),
-    )));
+    registry.register(Box::new(MemoryWriteTool::new(fact_store.clone())));
+    registry.register(Box::new(MemoryForgetTool::new(fact_store)));
     let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
         Arc::new(router.clone()),
         agents_map,
@@ -3096,6 +3196,7 @@ Body"#,
             write_scope: "session".to_string(),
             limit_history_turns: Some(7),
             max_injected_chars: 6000,
+            daily_summary_interval: 10,
         }));
 
         assert_eq!(history_message_limit(&agent), 14);

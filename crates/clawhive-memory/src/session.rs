@@ -111,6 +111,54 @@ impl SessionWriter {
         self.sessions_dir.join(format!("{session_id}.jsonl"))
     }
 
+    /// Move a session file to the archived directory instead of deleting.
+    pub async fn archive_session(&self, session_id: &str) -> Result<()> {
+        let source = self.session_path(session_id);
+        if tokio::fs::metadata(&source).await.is_err() {
+            return Err(anyhow::anyhow!("session file not found: {session_id}"));
+        }
+
+        let archived_dir = self.sessions_dir.join("archived");
+        tokio::fs::create_dir_all(&archived_dir).await?;
+        let dest = archived_dir.join(format!("{session_id}.jsonl"));
+        tokio::fs::rename(&source, &dest).await?;
+        tracing::info!(session_id = %session_id, "Session archived");
+        Ok(())
+    }
+
+    /// Remove archived session files older than `retention_days`.
+    /// Returns the number of files removed.
+    pub async fn cleanup_archived(&self, retention_days: u64) -> Result<usize> {
+        let archived_dir = self.sessions_dir.join("archived");
+        if tokio::fs::metadata(&archived_dir).await.is_err() {
+            return Ok(0);
+        }
+
+        let cutoff =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(retention_days * 86_400);
+        let mut removed = 0;
+
+        let mut entries = tokio::fs::read_dir(&archived_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if let Ok(metadata) = entry.metadata().await {
+                if let Ok(modified) = metadata.modified() {
+                    if modified < cutoff {
+                        if let Err(error) = tokio::fs::remove_file(entry.path()).await {
+                            tracing::warn!(%error, "Failed to remove archived session");
+                        } else {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if removed > 0 {
+            tracing::info!(removed, retention_days, "Cleaned up archived sessions");
+        }
+        Ok(removed)
+    }
+
     /// Clear (delete) a session file. Returns true if the file was deleted.
     pub async fn clear_session(&self, session_id: &str) -> Result<bool> {
         let path = self.session_path(session_id);
@@ -606,5 +654,50 @@ mod tests {
         // Clear again returns false
         let cleared = writer.clear_session("s1").await.expect("clear again");
         assert!(!cleared);
+    }
+
+    #[tokio::test]
+    async fn archive_session_moves_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = SessionWriter::new(tmp.path());
+        writer.start_session("s1", "agent1").await.unwrap();
+        writer.append_message("s1", "user", "hello").await.unwrap();
+
+        writer.archive_session("s1").await.unwrap();
+
+        assert!(!tmp.path().join("sessions/s1.jsonl").exists());
+        assert!(tmp.path().join("sessions/archived/s1.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn archive_session_missing_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = SessionWriter::new(tmp.path());
+        let result = writer.archive_session("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cleanup_archived_removes_old_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = SessionWriter::new(tmp.path());
+        writer.start_session("s1", "agent1").await.unwrap();
+        writer.archive_session("s1").await.unwrap();
+
+        let removed = writer.cleanup_archived(0).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(!tmp.path().join("sessions/archived/s1.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_archived_keeps_recent_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = SessionWriter::new(tmp.path());
+        writer.start_session("s1", "agent1").await.unwrap();
+        writer.archive_session("s1").await.unwrap();
+
+        let removed = writer.cleanup_archived(30).await.unwrap();
+        assert_eq!(removed, 0);
+        assert!(tmp.path().join("sessions/archived/s1.jsonl").exists());
     }
 }
