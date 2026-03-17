@@ -940,7 +940,7 @@ impl Orchestrator {
                 .await;
         }
 
-        let inbound_text = inbound.text.clone();
+        let session_text = build_session_text(&inbound.text, &inbound.attachments);
 
         let system_prompt = view
             .persona(agent_id)
@@ -1153,7 +1153,7 @@ impl Orchestrator {
         let workspace = self.workspace_state_for(agent_id);
         if let Err(e) = workspace
             .session_writer
-            .append_message(&session_key.0, "user", &inbound_text)
+            .append_message(&session_key.0, "user", &session_text)
             .await
         {
             tracing::warn!("Failed to write user session entry: {e}");
@@ -2539,6 +2539,29 @@ fn build_attachment_blocks(attachments: &[clawhive_schema::Attachment]) -> Vec<C
         }
     }
     blocks
+}
+
+fn build_session_text(user_text: &str, attachments: &[clawhive_schema::Attachment]) -> String {
+    use base64::Engine;
+
+    let mut parts = vec![user_text.to_string()];
+    for a in attachments {
+        if matches!(a.kind, clawhive_schema::AttachmentKind::Image) {
+            continue;
+        }
+        let mime = a.mime_type.as_deref().unwrap_or("application/octet-stream");
+        if is_text_mime(mime) {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&a.url) {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    let label = a.file_name.as_deref().unwrap_or("attachment");
+                    parts.push(format!(
+                        "<attachment name=\"{label}\" type=\"{mime}\">\n{text}\n</attachment>"
+                    ));
+                }
+            }
+        }
+    }
+    parts.join("\n\n")
 }
 
 fn build_messages_from_history(history_messages: &[SessionMessage]) -> Vec<LlmMessage> {
