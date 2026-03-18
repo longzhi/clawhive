@@ -135,7 +135,9 @@ export default function Chat() {
         <MessageStream />
 
         {/* Input area */}
-        <MessageInput onSend={handleSend} onCancel={cancelRequest} />
+        {activeConversationId && (
+          <MessageInput onSend={handleSend} onCancel={cancelRequest} />
+        )}
       </div>
     </div>
   );
