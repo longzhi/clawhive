@@ -141,6 +141,36 @@ Skills declare permissions in `SKILL.md` YAML frontmatter (`permissions.exec`, `
 
 ## Code Style
 
+### File Size & Module Organization
+
+No hard line limit — cohesion matters more than line count.
+
+**Thresholds:**
+- **< 600 lines**: No action needed
+- **600–1000 lines**: Review — does the file contain multiple independent types?
+- **> 1000 lines**: Split required unless it's a single cohesive type/API surface
+
+**Split triggers** (take priority over line count):
+- File contains 2+ independent public types with distinct responsibilities → split by type
+- Inline `mod tests` exceeds 300 lines → extract to `tests/` integration test
+- A function exceeds 100 lines → refactor (clippy `too_many_lines` threshold)
+
+**Split pattern:**
+
+```
+module_name/
+├── mod.rs       # Public API, re-exports — NO business logic
+├── types.rs     # Struct/enum definitions
+├── ...          # Name files by their domain responsibility
+```
+
+`mod.rs` is a **thin orchestration layer**: module declarations, re-exports only. All business logic goes in named submodules.
+
+**When NOT to split:**
+- Single type with large but cohesive impl (e.g., builder pattern)
+- Tightly coupled types that would create circular deps if separated
+- Generated or macro-heavy code
+
 ### Imports
 
 Order: std → external crates → workspace crates → `super::`/`crate::` locals. One blank line between groups.
