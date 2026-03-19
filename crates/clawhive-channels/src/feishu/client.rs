@@ -241,7 +241,7 @@ impl FeishuClient {
     ) -> Result<String> {
         let content = serde_json::to_string(card_json)?;
         let token = self.token.read().await.clone();
-        let resp = self
+        let resp: serde_json::Value = self
             .http
             .post(format!(
                 "{FEISHU_BASE_URL}/im/v1/messages/{message_id}/reply"
@@ -253,8 +253,13 @@ impl FeishuClient {
             }))
             .send()
             .await?
-            .json::<serde_json::Value>()
+            .json()
             .await?;
+
+        let code = resp.pointer("/code").and_then(|v| v.as_i64()).unwrap_or(0);
+        if code != 0 {
+            anyhow::bail!("feishu: reply_card failed: {resp}");
+        }
 
         let reply_msg_id = resp
             .pointer("/data/message_id")
