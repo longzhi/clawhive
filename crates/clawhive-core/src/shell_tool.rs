@@ -70,7 +70,12 @@ impl ExecuteCommandTool {
         };
 
         let trace_id = uuid::Uuid::new_v4();
-        tracing::info!(command, %trace_id, "requesting exec approval");
+        let has_bus = self.bus.is_some();
+        let has_source = source_info.is_some();
+        tracing::info!(
+            command, %trace_id, has_bus, has_source,
+            "requesting exec approval"
+        );
 
         let rx = registry
             .request(trace_id, command.to_string(), self.agent_id.clone())

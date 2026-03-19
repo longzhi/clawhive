@@ -51,7 +51,16 @@ pub fn spawn_approval_listener(
 ) {
     tokio::spawn(async move {
         let mut rx = bus.subscribe(Topic::DeliverApprovalRequest).await;
+        tracing::info!(
+            target: "clawhive::channel::feishu",
+            %connector_id,
+            "feishu approval listener subscribed"
+        );
         while let Some(msg) = rx.recv().await {
+            tracing::info!(
+                target: "clawhive::channel::feishu",
+                "feishu approval listener: received DeliverApprovalRequest"
+            );
             let BusMessage::DeliverApprovalRequest {
                 channel_type,
                 connector_id: msg_connector_id,
@@ -65,12 +74,22 @@ pub fn spawn_approval_listener(
             };
 
             if channel_type != "feishu" || msg_connector_id != connector_id {
+                tracing::debug!(
+                    target: "clawhive::channel::feishu",
+                    %channel_type, %msg_connector_id, %connector_id,
+                    "feishu approval listener: skipping, not for us"
+                );
                 continue;
             }
 
             let chat_id = conversation_scope.trim_start_matches("chat:");
             let card = build_approval_card(&agent_id, &command, &short_id);
 
+            tracing::info!(
+                target: "clawhive::channel::feishu",
+                %chat_id, %short_id,
+                "feishu approval listener: sending card"
+            );
             if let Err(e) = client.send_card(chat_id, &card).await {
                 tracing::error!(
                     target: "clawhive::channel::feishu",

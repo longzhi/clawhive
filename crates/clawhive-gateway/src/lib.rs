@@ -925,7 +925,9 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
     tokio::spawn(async move {
         let publisher = bus.publisher();
         let mut rx = bus.subscribe(Topic::NeedHumanApproval).await;
+        tracing::debug!("approval_delivery_listener: subscribed, waiting for events");
         while let Some(msg) = rx.recv().await {
+            tracing::info!("approval_delivery_listener: received NeedHumanApproval event");
             let BusMessage::NeedHumanApproval {
                 trace_id,
                 reason: _,
@@ -937,6 +939,9 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                 source_conversation_scope,
             } = msg
             else {
+                tracing::warn!(
+                    "approval_delivery_listener: message did not match NeedHumanApproval"
+                );
                 continue;
             };
 
@@ -945,8 +950,14 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                 source_connector_id,
                 source_conversation_scope,
             ) else {
+                tracing::warn!("approval_delivery_listener: missing source info, skipping");
                 continue;
             };
+
+            tracing::info!(
+                %trace_id, %ch_type, %conn_id, %conv_scope,
+                "approval_delivery_listener: forwarding to channel"
+            );
 
             let short_id = trace_id.to_string()[..8].to_string();
             let command = if let Some(target) = network_target {
@@ -966,6 +977,7 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                 })
                 .await;
         }
+        tracing::warn!("approval_delivery_listener: loop exited");
     })
 }
 
