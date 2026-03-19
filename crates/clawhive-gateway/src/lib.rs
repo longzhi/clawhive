@@ -186,6 +186,9 @@ impl Gateway {
                     "group" => {
                         return binding.agent_id.clone();
                     }
+                    "all" => {
+                        return binding.agent_id.clone();
+                    }
                     _ => {}
                 }
             }
