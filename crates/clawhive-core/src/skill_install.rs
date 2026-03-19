@@ -86,7 +86,44 @@ pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
     if !local.exists() {
         anyhow::bail!("skill source does not exist: {}", local.display());
     }
+
+    if local.is_file() {
+        let path_lc = local.to_string_lossy().to_lowercase();
+        if path_lc.ends_with(".zip")
+            || path_lc.ends_with(".tar.gz")
+            || path_lc.ends_with(".tgz")
+            || path_lc.ends_with(".tar")
+        {
+            return extract_local_archive(&local);
+        }
+    }
+
     Ok(ResolvedSkillSource::Local(local))
+}
+
+fn extract_local_archive(archive_path: &Path) -> Result<ResolvedSkillSource> {
+    let body = std::fs::read(archive_path)?;
+    let temp = tempfile::tempdir()?;
+    let extract_root = temp.path().join("extracted-skill");
+    std::fs::create_dir_all(&extract_root)?;
+
+    let path_lc = archive_path.to_string_lossy().to_lowercase();
+    if path_lc.ends_with(".zip") {
+        extract_zip_bytes(&body, &extract_root)?;
+    } else if path_lc.ends_with(".tar.gz") || path_lc.ends_with(".tgz") {
+        extract_tar_gz_bytes(&body, &extract_root)?;
+    } else if path_lc.ends_with(".tar") {
+        extract_tar_bytes(&body, &extract_root)?;
+    } else {
+        anyhow::bail!("unsupported archive format: {}", archive_path.display());
+    }
+
+    let skill_root = find_skill_root(&extract_root)?;
+
+    Ok(ResolvedSkillSource::Remote {
+        _temp_dir: temp,
+        path: skill_root,
+    })
 }
 
 pub fn analyze_skill_source(source: &Path) -> Result<SkillAnalysisReport> {
@@ -930,5 +967,56 @@ mod tests {
         let r = normalize_github_url("https://example.com/skill.tar.gz");
         assert_eq!(r.url, "https://example.com/skill.tar.gz");
         assert!(r.subpath.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_skill_source_local_zip() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let skill_md = "---\nname: zipped-skill\ndescription: From zip\n---\nHello";
+        let zip_path = temp.path().join("skill.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zip, skill_md.as_bytes()).unwrap();
+        zip.finish().unwrap();
+
+        let resolved = resolve_skill_source(zip_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(resolved.local_path().join("SKILL.md").exists());
+
+        let report = analyze_skill_source(resolved.local_path()).unwrap();
+        assert_eq!(report.skill_name, "zipped-skill");
+    }
+
+    #[tokio::test]
+    async fn resolve_skill_source_local_tar_gz() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let staging = temp.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("SKILL.md"),
+            "---\nname: tarred-skill\ndescription: From tar.gz\n---\n",
+        )
+        .unwrap();
+
+        let tar_gz_path = temp.path().join("skill.tar.gz");
+        let file = std::fs::File::create(&tar_gz_path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        tar.append_dir_all(".", &staging).unwrap();
+        tar.finish().unwrap();
+        drop(tar);
+
+        let resolved = resolve_skill_source(tar_gz_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(resolved.local_path().join("SKILL.md").exists());
+
+        let report = analyze_skill_source(resolved.local_path()).unwrap();
+        assert_eq!(report.skill_name, "tarred-skill");
     }
 }
