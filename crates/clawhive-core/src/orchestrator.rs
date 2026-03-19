@@ -664,6 +664,16 @@ impl Orchestrator {
             }
         }
 
+        for skill in self.active_skill_registry().available() {
+            if let Some(perms) = &skill.permissions {
+                for var in &perms.env {
+                    if !sandbox_config.env_inherit.contains(var) {
+                        sandbox_config.env_inherit.push(var.clone());
+                    }
+                }
+            }
+        }
+
         match name {
             "read" | "read_file" => ReadFileTool::new(ws, gate).execute(input, ctx).await,
             "write" | "write_file" => WriteFileTool::new(ws, gate).execute(input, ctx).await,
