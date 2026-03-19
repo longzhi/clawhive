@@ -32,6 +32,8 @@ struct InstallSkillFrontmatter {
     name: String,
     description: String,
     #[serde(default)]
+    requires: crate::skill::SkillRequirements,
+    #[serde(default)]
     permissions: Option<SkillPermissions>,
 }
 
@@ -49,8 +51,23 @@ pub struct SkillAnalysisReport {
     pub source: PathBuf,
     pub skill_name: String,
     pub description: String,
+    pub requires: crate::skill::SkillRequirements,
     pub permissions: Option<SkillPermissions>,
     pub findings: Vec<SkillRiskFinding>,
+}
+
+impl SkillAnalysisReport {
+    pub fn all_required_env_vars(&self) -> Vec<String> {
+        let mut vars: Vec<String> = self.requires.env.clone();
+        if let Some(ref perms) = self.permissions {
+            for v in &perms.env {
+                if !vars.contains(v) {
+                    vars.push(v.clone());
+                }
+            }
+        }
+        vars
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +105,7 @@ pub fn analyze_skill_source(source: &Path) -> Result<SkillAnalysisReport> {
         source: source.to_path_buf(),
         skill_name: fm.name,
         description: fm.description,
+        requires: fm.requires,
         permissions: fm.permissions,
         findings,
     })

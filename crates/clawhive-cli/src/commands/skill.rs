@@ -133,6 +133,24 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                     report.skill_name,
                     installed.target.display()
                 );
+
+                let env_vars = report.all_required_env_vars();
+                let missing = clawhive_core::dotenv::missing_env_vars(&env_vars);
+                if !missing.is_empty() {
+                    let dotenv_path = clawhive_core::dotenv::dotenv_path_for_root(root);
+                    println!(
+                        "\nThis skill requires {} environment variable(s): {}",
+                        missing.len(),
+                        missing.join(", ")
+                    );
+                    for var in &missing {
+                        let value: String = dialoguer::Input::new()
+                            .with_prompt(format!("Enter value for {var}"))
+                            .interact_text()?;
+                        clawhive_core::dotenv::append_dotenv(&dotenv_path, var, &value)?;
+                        println!("  Saved {var} to {}", dotenv_path.display());
+                    }
+                }
             }
         }
     }

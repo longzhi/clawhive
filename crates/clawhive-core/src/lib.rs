@@ -6,6 +6,7 @@ pub mod config_diff;
 pub mod config_view;
 pub mod consolidation;
 pub mod context;
+pub mod dotenv;
 pub mod file_tools;
 pub mod heartbeat;
 pub mod hooks;

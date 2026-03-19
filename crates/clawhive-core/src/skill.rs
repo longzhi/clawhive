@@ -102,7 +102,7 @@ impl Skill {
             }
         }
         for env_var in &self.requires.env {
-            if std::env::var(env_var).is_err() {
+            if crate::dotenv::resolve_env(env_var).is_none() {
                 return false;
             }
         }

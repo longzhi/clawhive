@@ -442,13 +442,22 @@ impl Orchestrator {
         )?;
         self.reload_skills();
 
-        let text = format!(
+        let mut text = format!(
             "Installed skill '{}' to {} (findings: {}, high-risk: {}).",
             report.skill_name,
             installed.target.display(),
             report.findings.len(),
             installed.high_risk
         );
+
+        let env_vars = report.all_required_env_vars();
+        let missing = crate::dotenv::missing_env_vars(&env_vars);
+        if !missing.is_empty() {
+            text.push_str(&format!(
+                "\n\n⚠️ Missing environment variables: {}\nAdd them to ~/.clawhive/.env (KEY=value format) for this skill to work.",
+                missing.join(", ")
+            ));
+        }
 
         Ok(OutboundMessage {
             trace_id: inbound.trace_id,

@@ -729,7 +729,7 @@ pub fn resolve_env_var(raw: &str) -> String {
         };
 
         let key = &candidate[..end];
-        output.push_str(&std::env::var(key).unwrap_or_default());
+        output.push_str(&crate::dotenv::resolve_env(key).unwrap_or_default());
         rest = &candidate[end + 1..];
     }
 

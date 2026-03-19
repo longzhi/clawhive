@@ -416,7 +416,7 @@ fn collect_env_vars(env_inherit: &[String]) -> HashMap<String, String> {
             env_vars.insert(key.clone(), merged);
             continue;
         }
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = crate::dotenv::resolve_env(key) {
             env_vars.insert(key.clone(), val);
         }
     }
