@@ -28,7 +28,7 @@ interface RoutingBinding {
   agent_id: string;
 }
 
-const CHANNEL_OPTIONS = ["telegram", "discord", "slack", "whatsapp", "imessage"];
+const CHANNEL_OPTIONS = ["telegram", "discord", "slack", "whatsapp", "imessage", "feishu", "dingtalk", "wecom", "webhook"];
 const MATCH_KIND_OPTIONS = ["dm", "group", "all"];
 
 function emptyBinding(): RoutingBinding {
