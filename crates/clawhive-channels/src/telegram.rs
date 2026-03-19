@@ -8,8 +8,8 @@ use clawhive_schema::{ActionKind, Attachment, AttachmentKind, InboundMessage, Ou
 use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{
-    BotCommand, CallbackQuery, ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, Message,
-    MessageEntityKind, MessageId, ParseMode, ReactionType,
+    BotCommand, CallbackQuery, ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
+    Message, MessageEntityKind, MessageId, ParseMode, ReactionType,
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -338,54 +338,85 @@ impl TelegramBot {
 
                     match result {
                         Ok(outbound) => {
-                            if outbound.text.trim().is_empty() {
-                                tracing::warn!(
-                                    trace_id = %trace_id,
-                                    chat_id = chat_id.0,
-                                    user_id,
-                                    message_id,
-                                    "telegram outbound text is empty"
-                                );
+                            match attachment_text_mode(
+                                &outbound.text,
+                                !outbound.attachments.is_empty(),
+                            ) {
+                                AttachmentTextMode::Empty => {
+                                    tracing::warn!(
+                                        trace_id = %trace_id,
+                                        chat_id = chat_id.0,
+                                        user_id,
+                                        message_id,
+                                        "telegram outbound text is empty"
+                                    );
 
-                                if let Some(fallback_text) = empty_outbound_fallback_text(chat_id.0)
-                                {
-                                    if let Err(send_err) =
-                                        bot.send_message(chat_id, fallback_text).await
+                                    if let Some(fallback_text) =
+                                        empty_outbound_fallback_text(chat_id.0)
                                     {
+                                        if let Err(send_err) =
+                                            bot.send_message(chat_id, fallback_text).await
+                                        {
+                                            tracing::error!(
+                                                trace_id = %trace_id,
+                                                chat_id = chat_id.0,
+                                                user_id,
+                                                message_id,
+                                                error = %send_err,
+                                                "failed to send telegram empty-outbound fallback"
+                                            );
+                                        }
+                                    } else {
+                                        tracing::info!(
+                                            trace_id = %trace_id,
+                                            chat_id = chat_id.0,
+                                            user_id,
+                                            message_id,
+                                            "telegram empty outbound suppressed for non-DM chat"
+                                        );
+                                    }
+                                }
+                                AttachmentTextMode::TextOnly => {
+                                    let html = md_to_telegram_html(&outbound.text);
+                                    if let Err(err) = send_long_html(&bot, chat_id, &html).await {
                                         tracing::error!(
                                             trace_id = %trace_id,
                                             chat_id = chat_id.0,
                                             user_id,
                                             message_id,
-                                            error = %send_err,
-                                            "failed to send telegram empty-outbound fallback"
+                                            error = %err,
+                                            "failed to send telegram reply"
                                         );
                                     }
-                                } else {
-                                    tracing::info!(
-                                        trace_id = %trace_id,
-                                        chat_id = chat_id.0,
-                                        user_id,
-                                        message_id,
-                                        "telegram empty outbound suppressed for non-DM chat"
-                                    );
                                 }
-                            } else {
-                                let html = md_to_telegram_html(&outbound.text);
-                                if let Err(err) = send_long_html(&bot, chat_id, &html).await {
-                                    tracing::error!(
-                                        trace_id = %trace_id,
-                                        chat_id = chat_id.0,
-                                        user_id,
-                                        message_id,
-                                        error = %err,
-                                        "failed to send telegram reply"
-                                    );
+                                AttachmentTextMode::CaptionFirstAttachment => {
+                                    send_attachments(
+                                        &bot,
+                                        chat_id,
+                                        &outbound.attachments,
+                                        Some(outbound.text.as_str()),
+                                    )
+                                    .await;
                                 }
-                            }
-
-                            if !outbound.attachments.is_empty() {
-                                send_attachments(&bot, chat_id, &outbound.attachments).await;
+                                AttachmentTextMode::TextThenAttachments => {
+                                    let html = md_to_telegram_html(&outbound.text);
+                                    if let Err(err) = send_long_html(&bot, chat_id, &html).await {
+                                        tracing::error!(
+                                            trace_id = %trace_id,
+                                            chat_id = chat_id.0,
+                                            user_id,
+                                            message_id,
+                                            error = %err,
+                                            "failed to send telegram reply"
+                                        );
+                                    }
+                                    send_attachments(&bot, chat_id, &outbound.attachments, None)
+                                        .await;
+                                }
+                                AttachmentTextMode::AttachmentsOnly => {
+                                    send_attachments(&bot, chat_id, &outbound.attachments, None)
+                                        .await;
+                                }
                             }
                         }
                         Err(err) => {
@@ -964,6 +995,16 @@ fn mime_from_filename(name: Option<&str>) -> Option<String> {
 
 /// Maximum length for a single Telegram message.
 const TELEGRAM_MAX_LEN: usize = 4096;
+const TELEGRAM_CAPTION_MAX_LEN: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentTextMode {
+    TextOnly,
+    CaptionFirstAttachment,
+    TextThenAttachments,
+    AttachmentsOnly,
+    Empty,
+}
 
 /// Convert standard Markdown to Telegram-supported HTML subset.
 ///
@@ -1273,6 +1314,20 @@ fn empty_outbound_fallback_text(chat_id: i64) -> Option<&'static str> {
     }
 }
 
+fn attachment_text_mode(text: &str, has_attachments: bool) -> AttachmentTextMode {
+    let has_text = !text.trim().is_empty();
+
+    match (has_text, has_attachments) {
+        (true, false) => AttachmentTextMode::TextOnly,
+        (true, true) if text.len() <= TELEGRAM_CAPTION_MAX_LEN => {
+            AttachmentTextMode::CaptionFirstAttachment
+        }
+        (true, true) => AttachmentTextMode::TextThenAttachments,
+        (false, true) => AttachmentTextMode::AttachmentsOnly,
+        (false, false) => AttachmentTextMode::Empty,
+    }
+}
+
 fn compose_inbound_text(user_text: &str, quoted_text: Option<&str>) -> String {
     let trimmed_user = user_text.trim();
     if trimmed_user.starts_with('/') {
@@ -1345,18 +1400,22 @@ fn default_file_name(kind: &AttachmentKind, mime_type: &Option<String>) -> Strin
         AttachmentKind::Image => format!("image.{ext}"),
         AttachmentKind::Video => format!("video.{ext}"),
         AttachmentKind::Audio => format!("audio.{ext}"),
-        AttachmentKind::Document | AttachmentKind::Other => format!("file.{ext}"),
+        AttachmentKind::Document => format!("document.{ext}"),
+        AttachmentKind::Other => format!("file.{ext}"),
     }
 }
 
-async fn send_attachments(bot: &Bot, chat_id: ChatId, attachments: &[Attachment]) {
-    use teloxide::types::InputFile;
-
-    for att in attachments {
+async fn send_attachments(
+    bot: &Bot,
+    chat_id: ChatId,
+    attachments: &[Attachment],
+    caption: Option<&str>,
+) {
+    for (i, att) in attachments.iter().enumerate() {
         let bytes = match resolve_attachment_bytes(att).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to resolve attachment data for telegram");
+                tracing::warn!(error = %e, "failed to resolve attachment data");
                 continue;
             }
         };
@@ -1366,10 +1425,23 @@ async fn send_attachments(bot: &Bot, chat_id: ChatId, attachments: &[Attachment]
             .clone()
             .unwrap_or_else(|| default_file_name(&att.kind, &att.mime_type));
         let input = InputFile::memory(bytes).file_name(file_name);
+        let cap = if i == 0 { caption } else { None };
 
         let result = match att.kind {
-            AttachmentKind::Image => bot.send_photo(chat_id, input).await.map(|_| ()),
-            _ => bot.send_document(chat_id, input).await.map(|_| ()),
+            AttachmentKind::Image => {
+                let mut req = bot.send_photo(chat_id, input);
+                if let Some(c) = cap {
+                    req = req.caption(c);
+                }
+                req.await.map(|_| ())
+            }
+            _ => {
+                let mut req = bot.send_document(chat_id, input);
+                if let Some(c) = cap {
+                    req = req.caption(c);
+                }
+                req.await.map(|_| ())
+            }
         };
 
         if let Err(e) = result {
@@ -1605,5 +1677,47 @@ mod tests {
     fn strip_telegram_html_tags_removes_tags_and_decodes_entities() {
         let text = "<b>hello</b> <code>x &lt; y</code> &amp; done";
         assert_eq!(strip_telegram_html_tags(text), "hello x < y & done");
+    }
+
+    #[test]
+    fn default_file_name_uses_document_prefix_for_documents() {
+        let mime = Some("application/pdf".to_string());
+        assert_eq!(
+            default_file_name(&AttachmentKind::Document, &mime),
+            "document.pdf"
+        );
+    }
+
+    #[test]
+    fn attachment_text_mode_prefers_caption_for_short_text_with_attachments() {
+        assert_eq!(
+            attachment_text_mode("short text", true),
+            AttachmentTextMode::CaptionFirstAttachment
+        );
+    }
+
+    #[test]
+    fn attachment_text_mode_sends_text_first_for_long_text_with_attachments() {
+        let text = "x".repeat(1025);
+        assert_eq!(
+            attachment_text_mode(&text, true),
+            AttachmentTextMode::TextThenAttachments
+        );
+    }
+
+    #[test]
+    fn attachment_text_mode_returns_attachments_only_without_text() {
+        assert_eq!(
+            attachment_text_mode("   ", true),
+            AttachmentTextMode::AttachmentsOnly
+        );
+    }
+
+    #[test]
+    fn attachment_text_mode_keeps_text_only_behavior_without_attachments() {
+        assert_eq!(
+            attachment_text_mode("hello", false),
+            AttachmentTextMode::TextOnly
+        );
     }
 }

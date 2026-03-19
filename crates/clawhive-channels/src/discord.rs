@@ -377,30 +377,43 @@ impl EventHandler for DiscordHandler {
 
             match result {
                 Ok(outbound) => {
-                    let has_text = !outbound.text.trim().is_empty();
                     let has_attachments = !outbound.attachments.is_empty();
+                    let has_text = !outbound.text.trim().is_empty();
 
-                    if has_text {
-                        let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
-                        if let Err(err) =
-                            send_chunked(channel_id, &http, &outbound.text, Some(reply_to)).await
-                        {
-                            tracing::error!("failed to send discord reply: {err}");
-                        }
-                    } else if !has_attachments {
-                        if let Err(err) = channel_id
-                            .say(&http, "Sorry, I got an empty response. Please try again.")
-                            .await
-                        {
-                            tracing::error!("failed to send discord reply: {err}");
-                        }
-                    }
-
-                    if has_attachments {
-                        if let Err(err) =
-                            send_attachments(channel_id, &http, &outbound.attachments).await
+                    if has_text && has_attachments && outbound.text.len() <= DISCORD_MAX_LEN {
+                        if let Err(err) = send_attachments(
+                            channel_id,
+                            &http,
+                            &outbound.attachments,
+                            Some(outbound.text.as_str()),
+                        )
+                        .await
                         {
                             tracing::error!("failed to send discord attachments: {err}");
+                        }
+                    } else {
+                        if has_text {
+                            let reply = outbound.text.as_str();
+                            let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
+                            if let Err(err) =
+                                send_chunked(channel_id, &http, reply, Some(reply_to)).await
+                            {
+                                tracing::error!("failed to send discord reply: {err}");
+                            }
+                        } else if !has_attachments {
+                            let reply = "Sorry, I got an empty response. Please try again.";
+                            if let Err(err) = send_chunked(channel_id, &http, reply, None).await {
+                                tracing::error!("failed to send discord reply: {err}");
+                            }
+                        }
+
+                        if has_attachments {
+                            if let Err(err) =
+                                send_attachments(channel_id, &http, &outbound.attachments, None)
+                                    .await
+                            {
+                                tracing::error!("failed to send discord attachments: {err}");
+                            }
                         }
                     }
                 }
@@ -965,7 +978,8 @@ fn default_file_name(kind: &AttachmentKind, mime_type: &Option<String>) -> Strin
         AttachmentKind::Image => format!("image.{ext}"),
         AttachmentKind::Video => format!("video.{ext}"),
         AttachmentKind::Audio => format!("audio.{ext}"),
-        AttachmentKind::Document | AttachmentKind::Other => format!("file.{ext}"),
+        AttachmentKind::Document => format!("document.{ext}"),
+        AttachmentKind::Other => format!("file.{ext}"),
     }
 }
 
@@ -973,14 +987,15 @@ async fn send_attachments(
     channel_id: ChannelId,
     http: &Http,
     attachments: &[Attachment],
+    text: Option<&str>,
 ) -> Result<(), serenity::Error> {
-    let mut discord_files = Vec::new();
+    let mut discord_attachments = Vec::new();
 
     for att in attachments {
         let bytes = match resolve_attachment_bytes(att).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to resolve attachment data for discord");
+                tracing::warn!(error = %e, "failed to resolve attachment data");
                 continue;
             }
         };
@@ -989,16 +1004,21 @@ async fn send_attachments(
             .file_name
             .clone()
             .unwrap_or_else(|| default_file_name(&att.kind, &att.mime_type));
-        discord_files.push(CreateAttachment::bytes(bytes, file_name));
+        discord_attachments.push(CreateAttachment::bytes(bytes, file_name));
     }
 
-    if discord_files.is_empty() {
+    if discord_attachments.is_empty() {
         return Ok(());
     }
 
     let mut msg = CreateMessage::new();
-    for file in discord_files {
-        msg = msg.add_file(file);
+    if let Some(t) = text {
+        if t.len() <= DISCORD_MAX_LEN {
+            msg = msg.content(t);
+        }
+    }
+    for att in discord_attachments {
+        msg = msg.add_file(att);
     }
     channel_id.send_message(http, msg).await?;
     Ok(())
@@ -1007,6 +1027,8 @@ async fn send_attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
 
     #[test]
     fn adapter_to_inbound_dm_sets_fields() {
@@ -1198,5 +1220,56 @@ mod tests {
         assert_eq!(floor_char_boundary(s, 4), 2);
         assert_eq!(floor_char_boundary(s, 3), 2);
         assert_eq!(floor_char_boundary(s, 5), 5); // end of string
+    }
+
+    #[test]
+    fn default_file_name_uses_kind_specific_prefixes() {
+        let image = default_file_name(&AttachmentKind::Image, &Some("image/png".to_string()));
+        let video = default_file_name(&AttachmentKind::Video, &Some("video/mp4".to_string()));
+        let audio = default_file_name(&AttachmentKind::Audio, &Some("audio/mpeg".to_string()));
+        let document =
+            default_file_name(&AttachmentKind::Document, &Some("text/plain".to_string()));
+        let other = default_file_name(&AttachmentKind::Other, &None);
+
+        assert_eq!(image, "image.png");
+        assert_eq!(video, "video.mp4");
+        assert_eq!(audio, "audio.mpeg");
+        assert_eq!(document, "document.plain");
+        assert_eq!(other, "file.bin");
+    }
+
+    #[tokio::test]
+    async fn resolve_attachment_bytes_decodes_base64() {
+        let att = Attachment {
+            kind: AttachmentKind::Document,
+            url: "aGVsbG8=".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            file_name: None,
+            size: None,
+        };
+
+        let bytes = resolve_attachment_bytes(&att).await.unwrap();
+
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[tokio::test]
+    async fn resolve_attachment_bytes_reads_local_file() {
+        let unique = Uuid::new_v4();
+        let path = std::env::temp_dir().join(format!("clawhive-discord-{unique}.txt"));
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(b"discord-file").unwrap();
+        let att = Attachment {
+            kind: AttachmentKind::Document,
+            url: path.display().to_string(),
+            mime_type: Some("text/plain".to_string()),
+            file_name: None,
+            size: None,
+        };
+
+        let bytes = resolve_attachment_bytes(&att).await.unwrap();
+
+        assert_eq!(bytes, b"discord-file");
+        fs::remove_file(path).unwrap();
     }
 }

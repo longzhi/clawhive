@@ -9,10 +9,14 @@ use clawhive_schema::{
     ActionKind, Attachment, AttachmentKind, BusMessage, InboundMessage, OutboundMessage,
 };
 use uuid::Uuid;
+use wacore::download::MediaType;
 use wacore::types::events::Event;
 use waproto::whatsapp as wa;
+use waproto::whatsapp::message::{DocumentMessage, ImageMessage};
 use whatsapp_rust::bot::Bot;
 use whatsapp_rust::client::Client;
+use whatsapp_rust::upload::UploadResponse;
+use whatsapp_rust::Jid;
 use whatsapp_rust_sqlite_storage::SqliteStore;
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
@@ -307,9 +311,19 @@ pub async fn start_whatsapp(
                                 }
 
                                 if has_attachments {
-                                    for att in &outbound.attachments {
-                                        if let Err(e) =
-                                            send_wa_attachment(&client, &chat_jid, att).await
+                                    for (i, att) in outbound.attachments.iter().enumerate() {
+                                        let caption = if i == 0 && has_text {
+                                            Some(outbound.text.as_str())
+                                        } else {
+                                            None
+                                        };
+                                        if let Err(e) = send_attachment(
+                                            &client,
+                                            &info.source.chat,
+                                            att,
+                                            caption,
+                                        )
+                                        .await
                                         {
                                             tracing::error!(
                                                 error = %e,
@@ -317,9 +331,19 @@ pub async fn start_whatsapp(
                                             );
                                         }
                                     }
+
+                                    if has_text {
+                                        tracing::info!(
+                                            sender = %sender_jid,
+                                            chat = %chat_jid,
+                                            attachments = outbound.attachments.len(),
+                                            "WhatsApp reply with attachments sent"
+                                        );
+                                        return;
+                                    }
                                 }
 
-                                if has_text {
+                                if has_text && !has_attachments {
                                     let reply = wa::Message {
                                         conversation: Some(outbound.text),
                                         ..Default::default()
@@ -328,16 +352,14 @@ pub async fn start_whatsapp(
                                         client.send_message(info.source.chat.clone(), reply).await
                                     {
                                         tracing::error!("Failed to send WhatsApp reply: {e}");
+                                    } else {
+                                        tracing::info!(
+                                            sender = %sender_jid,
+                                            chat = %chat_jid,
+                                            "WhatsApp reply sent"
+                                        );
                                     }
                                 }
-
-                                tracing::info!(
-                                    sender = %sender_jid,
-                                    chat = %chat_jid,
-                                    has_text,
-                                    attachments = outbound.attachments.len(),
-                                    "WhatsApp reply sent"
-                                );
                             }
                             Err(err) => {
                                 let _ = client.chatstate().send_paused(&info.source.chat).await;
@@ -526,44 +548,40 @@ async fn spawn_delivery_listener(bus: Arc<EventBus>, connector_id: String, clien
 
 async fn resolve_attachment_bytes(att: &Attachment) -> anyhow::Result<Vec<u8>> {
     let url = &att.url;
-    if url.starts_with('/') || url.starts_with("./") {
+
+    if url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+        || std::path::Path::new(url).exists()
+    {
         return tokio::fs::read(url)
             .await
             .map_err(|e| anyhow::anyhow!("read file {url}: {e}"));
     }
+
     if url.starts_with("http://") || url.starts_with("https://") {
-        let resp = reqwest::get(url).await?;
+        let resp = reqwest::get(url).await?.error_for_status()?;
         return Ok(resp.bytes().await?.to_vec());
     }
+
     BASE64_STANDARD
         .decode(url)
         .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))
 }
 
-async fn send_wa_attachment(
-    client: &std::sync::Arc<Client>,
-    chat_jid_str: &str,
-    att: &Attachment,
-) -> anyhow::Result<()> {
-    use wacore::download::MediaType;
-    use waproto::whatsapp::message::{DocumentMessage, ImageMessage};
-
-    let chat_jid = chat_jid_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid JID: {chat_jid_str}"))?;
-
-    let bytes = resolve_attachment_bytes(att).await?;
-
-    let media_type = match att.kind {
+fn attachment_media_type(kind: AttachmentKind) -> MediaType {
+    match kind {
         AttachmentKind::Image => MediaType::Image,
-        AttachmentKind::Video => MediaType::Video,
-        AttachmentKind::Audio => MediaType::Audio,
         _ => MediaType::Document,
-    };
+    }
+}
 
-    let upload = client.upload(bytes, media_type).await?;
-
-    let message = match att.kind {
+fn build_attachment_message(
+    att: &Attachment,
+    upload: UploadResponse,
+    caption: Option<&str>,
+) -> wa::Message {
+    match att.kind {
         AttachmentKind::Image => wa::Message {
             image_message: Some(Box::new(ImageMessage {
                 url: Some(upload.url),
@@ -573,6 +591,7 @@ async fn send_wa_attachment(
                 file_sha256: Some(upload.file_sha256),
                 file_length: Some(upload.file_length),
                 mimetype: att.mime_type.clone(),
+                caption: caption.map(ToString::to_string),
                 ..Default::default()
             })),
             ..Default::default()
@@ -586,6 +605,7 @@ async fn send_wa_attachment(
                     .unwrap_or("bin");
                 format!("file.{ext}")
             });
+
             wa::Message {
                 document_message: Some(Box::new(DocumentMessage {
                     url: Some(upload.url),
@@ -596,21 +616,50 @@ async fn send_wa_attachment(
                     file_length: Some(upload.file_length),
                     mimetype: att.mime_type.clone(),
                     file_name: Some(file_name),
+                    caption: caption.map(ToString::to_string),
                     ..Default::default()
                 })),
                 ..Default::default()
             }
         }
-    };
+    }
+}
 
-    client.send_message(chat_jid, message).await?;
+async fn send_attachment(
+    client: &Client,
+    chat_jid: &Jid,
+    att: &Attachment,
+    caption: Option<&str>,
+) -> anyhow::Result<()> {
+    let bytes = resolve_attachment_bytes(att).await?;
+    let media_type = attachment_media_type(att.kind.clone());
+
+    let upload = client.upload(bytes, media_type).await?;
+    let message = build_attachment_message(att, upload, caption);
+
+    client.send_message(chat_jid.clone(), message).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
+
     use super::*;
+    use wacore::download::MediaType;
     use waproto::whatsapp::message::{DocumentMessage, ImageMessage, VideoMessage};
+
+    fn test_upload_response() -> UploadResponse {
+        UploadResponse {
+            url: "https://example.com/media".to_string(),
+            direct_path: "/v/t62/example".to_string(),
+            media_key: vec![1, 2, 3],
+            file_enc_sha256: vec![4, 5, 6],
+            file_sha256: vec![7, 8, 9],
+            file_length: 42,
+        }
+    }
 
     #[test]
     fn adapter_to_inbound_sets_fields() {
@@ -696,5 +745,92 @@ mod tests {
 
         assert!(policy.is_allowed_group("1234567890@s.whatsapp.net"));
         assert!(!policy.is_allowed_group("9876543210@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn build_attachment_message_uses_caption_for_first_image() {
+        let attachment = Attachment {
+            kind: AttachmentKind::Image,
+            url: "aGVsbG8=".to_string(),
+            mime_type: Some("image/png".to_string()),
+            file_name: None,
+            size: Some(42),
+        };
+
+        let message =
+            build_attachment_message(&attachment, test_upload_response(), Some("caption"));
+
+        assert_eq!(message.conversation, None);
+        let image = message.image_message.expect("expected image message");
+        assert_eq!(image.caption.as_deref(), Some("caption"));
+        assert_eq!(image.mimetype.as_deref(), Some("image/png"));
+        assert_eq!(image.file_length, Some(42));
+    }
+
+    #[test]
+    fn build_attachment_message_generates_document_filename_from_mime() {
+        let attachment = Attachment {
+            kind: AttachmentKind::Document,
+            url: "aGVsbG8=".to_string(),
+            mime_type: Some("application/pdf".to_string()),
+            file_name: None,
+            size: Some(42),
+        };
+
+        let message =
+            build_attachment_message(&attachment, test_upload_response(), Some("doc caption"));
+
+        let document = message.document_message.expect("expected document message");
+        assert_eq!(document.file_name.as_deref(), Some("file.pdf"));
+        assert_eq!(document.caption.as_deref(), Some("doc caption"));
+        assert_eq!(document.mimetype.as_deref(), Some("application/pdf"));
+    }
+
+    #[test]
+    fn attachment_media_type_uses_document_for_non_images() {
+        assert!(matches!(
+            attachment_media_type(AttachmentKind::Image),
+            MediaType::Image
+        ));
+        assert!(matches!(
+            attachment_media_type(AttachmentKind::Video),
+            MediaType::Document
+        ));
+        assert!(matches!(
+            attachment_media_type(AttachmentKind::Audio),
+            MediaType::Document
+        ));
+        assert!(matches!(
+            attachment_media_type(AttachmentKind::Document),
+            MediaType::Document
+        ));
+        assert!(matches!(
+            attachment_media_type(AttachmentKind::Other),
+            MediaType::Document
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_attachment_bytes_reads_plain_relative_path() {
+        let old_dir = env::current_dir().expect("cwd");
+        let temp_dir = env::temp_dir().join(format!("clawhive-whatsapp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let file_path = temp_dir.join("note.txt");
+        fs::write(&file_path, b"hello").expect("write file");
+        env::set_current_dir(&temp_dir).expect("set cwd");
+
+        let attachment = Attachment {
+            kind: AttachmentKind::Document,
+            url: "note.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            file_name: Some("note.txt".to_string()),
+            size: Some(5),
+        };
+
+        let result = resolve_attachment_bytes(&attachment).await;
+
+        env::set_current_dir(old_dir).expect("restore cwd");
+        fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
+        assert_eq!(result.expect("read bytes"), b"hello");
     }
 }
