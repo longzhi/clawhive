@@ -34,3 +34,6 @@ pub mod web_console;
 
 #[cfg(feature = "webhook")]
 pub mod webhook;
+
+#[cfg(feature = "weixin")]
+pub mod weixin;

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["telegram", "discord", "feishu", "dingtalk", "wecom", "web_console", "webhook"]
+default = ["telegram", "discord", "feishu", "dingtalk", "wecom", "web_console", "webhook", "weixin"]
 telegram = ["dep:teloxide", "dep:log"]
 discord = ["dep:serenity"]
 slack = ["dep:slack-morphism"]
@@ -16,6 +16,7 @@ feishu = ["dep:tokio-tungstenite", "dep:prost", "dep:futures-util", "dep:url"]
 dingtalk = ["dep:tokio-tungstenite", "dep:futures-util"]
 wecom = ["dep:tokio-tungstenite", "dep:futures-util"]
 webhook = []
+weixin = ["dep:aes", "dep:ecb", "dep:qrcode", "dep:md-5"]
 
 [dependencies]
 anyhow.workspace = true
@@ -46,3 +47,9 @@ tokio-tungstenite = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+rand.workspace = true
+hex.workspace = true
+aes = { version = "0.8", optional = true }
+ecb = { version = "0.1", features = ["alloc"], optional = true }
+qrcode = { version = "0.14", optional = true }
+md-5 = { version = "0.10", optional = true }

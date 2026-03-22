@@ -666,6 +666,7 @@ dependencies = [
 name = "clawhive-channels"
 version = "0.1.0-alpha.34"
 dependencies = [
+ "aes",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -673,9 +674,14 @@ dependencies = [
  "clawhive-bus",
  "clawhive-gateway",
  "clawhive-schema",
+ "ecb",
  "futures-util",
+ "hex",
  "log",
+ "md-5",
  "prost 0.13.5",
+ "qrcode",
+ "rand 0.8.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1600,6 +1606,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "ecb"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a8bfa975b1aec2145850fcaa1c6fe269a16578c44705a532ae3edc92b8881c7"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -2837,6 +2852,16 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
 
 [[package]]
 name = "md5"
