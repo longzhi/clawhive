@@ -196,7 +196,7 @@ async fn get_channels_status(
                         && !bot_id.starts_with("${")
                         && !secret.starts_with("${")
                 }
-                "whatsapp" | "imessage" => true,
+                "whatsapp" | "imessage" | "weixin" => true,
                 "slack" => {
                     let bot_token = connector_map
                         .get(serde_yaml::Value::String("bot_token".to_string()))
