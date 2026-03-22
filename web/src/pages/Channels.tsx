@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -309,7 +310,9 @@ function WeixinQrLogin({ connectorId, status }: { connectorId: string; status: s
     <div className="flex flex-col gap-2">
       {qrUrl ? (
         <div className="flex flex-col items-center gap-2 py-2">
-          <img src={qrUrl} alt="WeChat QR Code" className="w-48 h-48 rounded-lg border" />
+          <div className="rounded-lg border p-3 bg-white">
+            <QRCodeSVG value={qrUrl} size={176} />
+          </div>
           <p className="text-xs text-muted-foreground">
             {polling ? "Waiting for scan..." : loginStatus === "confirmed" ? "Logged in!" : "Scan with WeChat"}
           </p>
