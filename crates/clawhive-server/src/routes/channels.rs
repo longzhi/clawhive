@@ -28,6 +28,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/{kind}/connectors", post(add_connector))
         .route("/{kind}/connectors/{id}", delete(remove_connector))
+        .route("/weixin/qr-login", post(weixin_qr_login))
+        .route("/weixin/qr-status", get(weixin_qr_status))
 }
 
 #[derive(Serialize)]
@@ -612,8 +614,8 @@ async fn add_connector(
                 serde_yaml::Value::String(secret.to_string()),
             );
         }
-        "imessage" | "whatsapp" => {
-            // No credentials needed — iMessage uses AppleScript, WhatsApp pairs via QR
+        "imessage" | "whatsapp" | "weixin" => {
+            // No credentials needed — iMessage uses AppleScript, WhatsApp/WeChat pair via QR
         }
         _ => {
             // Telegram, Discord, Slack, and other token-based channels
@@ -681,6 +683,145 @@ async fn remove_connector(
         "kind": kind,
         "connector_id": id,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// WeChat iLink QR Login
+// ---------------------------------------------------------------------------
+
+const ILINK_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+
+#[derive(Serialize)]
+struct QrLoginResponse {
+    qrcode_token: String,
+    qrcode_url: String,
+}
+
+async fn weixin_qr_login() -> Result<Json<QrLoginResponse>, StatusCode> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let resp = http
+        .get(format!(
+            "{ILINK_BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=3"
+        ))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to get weixin QR code");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    #[derive(Deserialize)]
+    struct ILinkQr {
+        qrcode: String,
+        qrcode_img_content: String,
+    }
+
+    let qr: ILinkQr = resp.json().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to parse weixin QR response");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(QrLoginResponse {
+        qrcode_token: qr.qrcode,
+        qrcode_url: qr.qrcode_img_content,
+    }))
+}
+
+#[derive(Deserialize)]
+struct QrStatusQuery {
+    token: String,
+    connector_id: String,
+}
+
+#[derive(Serialize)]
+struct QrStatusResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bot_id: Option<String>,
+}
+
+async fn weixin_qr_status(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<QrStatusQuery>,
+) -> Result<Json<QrStatusResponse>, StatusCode> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(40))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let url = format!(
+        "{ILINK_BASE_URL}/ilink/bot/get_qrcode_status?qrcode={}",
+        query.token
+    );
+    let resp = http
+        .get(&url)
+        .header("iLink-App-ClientVersion", "1")
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to poll weixin QR status");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    #[derive(Deserialize)]
+    struct ILinkStatus {
+        status: String,
+        #[serde(default)]
+        bot_token: Option<String>,
+        #[serde(default)]
+        ilink_bot_id: Option<String>,
+        #[serde(default)]
+        baseurl: Option<String>,
+        #[serde(default)]
+        ilink_user_id: Option<String>,
+    }
+
+    let status: ILinkStatus = resp.json().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to parse weixin QR status");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    if status.status == "confirmed" {
+        // Save session to data dir
+        let data_dir = state
+            .root
+            .join("data")
+            .join(format!("weixin-{}", query.connector_id));
+        let _ = std::fs::create_dir_all(&data_dir);
+        let session_path = data_dir.join("session.json");
+
+        let session = serde_json::json!({
+            "bot_token": status.bot_token.unwrap_or_default(),
+            "base_url": status.baseurl.unwrap_or_else(|| ILINK_BASE_URL.to_string()),
+            "bot_id": status.ilink_bot_id.clone().unwrap_or_default(),
+            "user_id": status.ilink_user_id.unwrap_or_default(),
+            "saved_at": chrono::Utc::now().to_rfc3339(),
+        });
+        let _ = std::fs::write(
+            &session_path,
+            serde_json::to_string_pretty(&session).unwrap_or_default(),
+        );
+
+        tracing::info!(
+            connector_id = %query.connector_id,
+            bot_id = %status.ilink_bot_id.as_deref().unwrap_or(""),
+            "weixin QR login confirmed via web console"
+        );
+
+        return Ok(Json(QrStatusResponse {
+            status: "confirmed".to_string(),
+            bot_id: status.ilink_bot_id,
+        }));
+    }
+
+    Ok(Json(QrStatusResponse {
+        status: status.status,
+        bot_id: None,
+    }))
 }
 
 #[cfg(test)]

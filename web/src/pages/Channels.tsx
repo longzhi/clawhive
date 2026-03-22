@@ -43,6 +43,7 @@ const CHANNEL_META: Record<string, { label: string; description: string; color: 
   feishu: { label: "Feishu", description: "Feishu Bot (WebSocket)", color: "text-cyan-500", tokenLink: "https://open.feishu.cn/app" },
   dingtalk: { label: "DingTalk", description: "DingTalk Bot (Stream)", color: "text-orange-500", tokenLink: "https://open-dev.dingtalk.com/" },
   wecom: { label: "WeCom", description: "WeCom AI Bot", color: "text-green-600", tokenLink: "https://developer.work.weixin.qq.com/" },
+  weixin: { label: "WeChat", description: "Personal account via iLink", color: "text-emerald-500", tokenLink: "" },
 };
 
 // ---------------------------------------------------------------------------
@@ -85,7 +86,8 @@ function AddChannelDialog({
   const handleSubmit = async () => {
     if (!selectedKind || !connectorId) return;
     const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(selectedKind);
-    if (!isChineseChannel && !token) return;
+    const isQrChannel = selectedKind === "weixin";
+    if (!isChineseChannel && !isQrChannel && !token) return;
     setSubmitting(true);
     try {
       const current = channels ?? {};
@@ -200,6 +202,10 @@ function AddChannelDialog({
                   <Input type="password" placeholder="Bot secret" value={secretField} onChange={(e) => setSecretField(e.target.value)} className="mt-1" />
                 </div>
               </>
+            ) : selectedKind === "weixin" ? (
+              <p className="text-sm text-muted-foreground">
+                No credentials needed. After adding, click the QR login button to scan with WeChat.
+              </p>
             ) : (
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Bot Token</label>
@@ -222,6 +228,7 @@ function AddChannelDialog({
               if (selectedKind === "feishu") return !appId || !appSecret;
               if (selectedKind === "dingtalk") return !clientId || !clientSecret;
               if (selectedKind === "wecom") return !botIdField || !secretField;
+              if (selectedKind === "weixin") return false;
               return !token;
             })()}
           >
@@ -230,6 +237,91 @@ function AddChannelDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WeChat QR Login Component
+// ---------------------------------------------------------------------------
+function WeixinQrLogin({ connectorId, status }: { connectorId: string; status: string }) {
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const [qrToken, setQrToken] = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
+  const [loginStatus, setLoginStatus] = useState<string | null>(null);
+
+  const startQrLogin = async () => {
+    setLoginStatus(null);
+    try {
+      const res = await fetch("/api/channels/weixin/qr-login", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setQrUrl(data.qrcode_url);
+      setQrToken(data.qrcode_token);
+      setPolling(true);
+    } catch (e) {
+      toast.error("Failed to get QR code");
+    }
+  };
+
+  useEffect(() => {
+    if (!polling || !qrToken) return;
+    let cancelled = false;
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/channels/weixin/qr-status?token=${encodeURIComponent(qrToken)}&connector_id=${encodeURIComponent(connectorId)}`);
+          if (!res.ok) break;
+          const data = await res.json();
+          if (data.status === "confirmed") {
+            setLoginStatus("confirmed");
+            setPolling(false);
+            setQrUrl(null);
+            toast.success(`WeChat logged in as ${data.bot_id ?? "unknown"}`);
+            return;
+          }
+          if (data.status === "expired") {
+            setLoginStatus("expired");
+            setPolling(false);
+            setQrUrl(null);
+            toast.error("QR code expired, try again");
+            return;
+          }
+          // "wait" or "scaned" — keep polling
+          await new Promise(r => setTimeout(r, 2000));
+        } catch {
+          break;
+        }
+      }
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, [polling, qrToken, connectorId]);
+
+  if (status === "connected") {
+    return (
+      <Badge variant="outline" className="w-fit text-[10px] text-green-600 border-green-200 bg-green-50">
+        Session active
+      </Badge>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {qrUrl ? (
+        <div className="flex flex-col items-center gap-2 py-2">
+          <img src={qrUrl} alt="WeChat QR Code" className="w-48 h-48 rounded-lg border" />
+          <p className="text-xs text-muted-foreground">
+            {polling ? "Waiting for scan..." : loginStatus === "confirmed" ? "Logged in!" : "Scan with WeChat"}
+          </p>
+          {polling && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+        </div>
+      ) : (
+        <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={startQrLogin}>
+          <Key className="h-3.5 w-3.5" />
+          QR Login
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -407,6 +499,9 @@ export default function ChannelsPage() {
                           </Button>
                         </div>
                       </div>
+                      {key === "weixin" ? (
+                        <WeixinQrLogin connectorId={connector.connector_id} status={runtimeStatus} />
+                      ) : (
                       <div className="flex flex-col gap-1">
                         <div className="flex items-center gap-2">
                           <div className="relative flex-1">
@@ -432,6 +527,7 @@ export default function ChannelsPage() {
                           {isEnvRef ? "Token not set" : "Token configured"}
                         </Badge>
                       </div>
+                      )}
                     </div>
                   );
                 })

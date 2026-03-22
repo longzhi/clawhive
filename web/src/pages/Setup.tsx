@@ -147,7 +147,7 @@ export default function SetupPage() {
   const [fetchedModels, setFetchedModels] = useState<ModelInfoResponse[]>([]);
 
   // Step 3: Channel
-  const [channelKind, setChannelKind] = useState<"telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | null>(null);
+  const [channelKind, setChannelKind] = useState<"telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | "weixin" | null>(null);
   const [channelToken, setChannelToken] = useState("");
   const [channelConnectorId, setChannelConnectorId] = useState("");
   const [channelGroups, setChannelGroups] = useState("");
@@ -283,7 +283,8 @@ export default function SetupPage() {
   const handleAddChannel = async () => {
     if (!channelKind || !channelConnectorId) return;
     const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(channelKind);
-    if (!isChineseChannel && !channelToken) return;
+    const isQrChannel = channelKind === "weixin";
+    if (!isChineseChannel && !isQrChannel && !channelToken) return;
     const groups = channelGroups
       .split(",")
       .map((s) => s.trim())
@@ -1046,8 +1047,8 @@ function StepChannel({
   botId, onBotIdChange,
   secret, onSecretChange,
 }: {
-  kind: "telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | null;
-  onKindChange: (v: "telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage") => void;
+  kind: "telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | "weixin" | null;
+  onKindChange: (v: "telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | "slack" | "whatsapp" | "imessage" | "weixin") => void;
   token: string;
   onTokenChange: (v: string) => void;
   connectorId: string;
@@ -1088,7 +1089,7 @@ function StepChannel({
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {(["telegram", "discord", "slack", "whatsapp", "imessage", "feishu", "dingtalk", "wecom"] as const).map((ch) => (
+        {(["telegram", "discord", "slack", "whatsapp", "imessage", "feishu", "dingtalk", "wecom", "weixin"] as const).map((ch) => (
           <button
             key={ch}
             onClick={() => { if (!isCreated) onKindChange(ch); }}
@@ -1099,9 +1100,9 @@ function StepChannel({
                 : "border-border hover:border-primary/40 hover:bg-muted/50"
             } ${isCreated ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
           >
-            <div className="text-sm font-medium capitalize">{ch === "dingtalk" ? "DingTalk" : ch === "wecom" ? "WeCom" : ch === "imessage" ? "iMessage" : ch === "whatsapp" ? "WhatsApp" : ch}</div>
+            <div className="text-sm font-medium capitalize">{ch === "dingtalk" ? "DingTalk" : ch === "wecom" ? "WeCom" : ch === "imessage" ? "iMessage" : ch === "whatsapp" ? "WhatsApp" : ch === "weixin" ? "WeChat" : ch}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">
-              {ch === "telegram" ? "Add a Telegram bot" : ch === "discord" ? "Add a Discord bot" : ch === "slack" ? "Add a Slack bot" : ch === "whatsapp" ? "Connect WhatsApp" : ch === "imessage" ? "Connect iMessage (macOS)" : ch === "feishu" ? "Add a Feishu bot" : ch === "dingtalk" ? "Add a DingTalk bot" : "Add a WeCom bot"}
+              {ch === "telegram" ? "Add a Telegram bot" : ch === "discord" ? "Add a Discord bot" : ch === "slack" ? "Add a Slack bot" : ch === "whatsapp" ? "Connect WhatsApp" : ch === "imessage" ? "Connect iMessage (macOS)" : ch === "feishu" ? "Add a Feishu bot" : ch === "dingtalk" ? "Add a DingTalk bot" : ch === "weixin" ? "Connect WeChat" : "Add a WeCom bot"}
             </div>
           </button>
         ))}
@@ -1124,9 +1125,9 @@ function StepChannel({
               <p className="text-xs text-muted-foreground mt-1">A unique name to identify this bot, no spaces (e.g. support_bot)</p>
             </div>
 
-            {kind === "imessage" || kind === "whatsapp" ? (
+            {kind === "imessage" || kind === "whatsapp" || kind === "weixin" ? (
               <p className="text-xs text-muted-foreground">
-                {kind === "imessage" ? "No credentials needed. Requires macOS with Full Disk Access." : "No credentials needed. WhatsApp will pair via QR code on first start."}
+                {kind === "imessage" ? "No credentials needed. Requires macOS with Full Disk Access." : kind === "weixin" ? "No credentials needed. Scan QR code after setup in Channels page." : "No credentials needed. WhatsApp will pair via QR code on first start."}
               </p>
             ) : kind === "feishu" ? (
               <>
