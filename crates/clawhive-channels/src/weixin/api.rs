@@ -7,58 +7,21 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use super::crypto;
 use super::types::*;
 
-const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
-const ILINK_QR_BASE: &str = "https://oai.weixin.qq.com/ilink";
-
-// ---------------------------------------------------------------------------
-// Session persistence
-// ---------------------------------------------------------------------------
-
-pub use super::types::WeixinSession;
-
-/// Save a session to a JSON file.
-pub fn save_session(session: &WeixinSession, path: &Path) -> Result<()> {
-    let json = serde_json::to_string_pretty(session)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, json)?;
-    tracing::info!(path = %path.display(), "weixin session saved");
-    Ok(())
-}
-
-/// Load a session from a JSON file.
-pub fn load_session(path: &Path) -> Result<WeixinSession> {
-    let json = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read session from {}", path.display()))?;
-    let session: WeixinSession =
-        serde_json::from_str(&json).context("failed to parse weixin session")?;
-    Ok(session)
-}
-
-// ---------------------------------------------------------------------------
-// Cursor persistence
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CursorState {
-    cursor: String,
-}
+const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
+const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(40);
+const API_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // ILinkClient
 // ---------------------------------------------------------------------------
 
 pub struct ILinkClient {
-    /// HTTP client with 40s timeout for long-poll requests.
     poll_client: reqwest::Client,
-    /// HTTP client with 30s timeout for normal API calls.
     api_client: reqwest::Client,
     session: WeixinSession,
     context_tokens: Arc<RwLock<HashMap<String, String>>>,
@@ -68,16 +31,16 @@ pub struct ILinkClient {
 impl ILinkClient {
     pub fn new(session: WeixinSession, data_dir: &Path) -> Self {
         let poll_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(40))
+            .timeout(LONG_POLL_TIMEOUT)
             .build()
             .expect("failed to build poll HTTP client");
 
         let api_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(API_TIMEOUT)
             .build()
             .expect("failed to build API HTTP client");
 
-        let sync_path = data_dir.join("weixin_cursor.json");
+        let sync_path = data_dir.join("sync.json");
 
         Self {
             poll_client,
@@ -88,19 +51,19 @@ impl ILinkClient {
         }
     }
 
-    /// Generate a random X-WECHAT-UIN header value.
+    /// Generate X-WECHAT-UIN header: random u32 → decimal string → base64.
     fn random_uin() -> String {
-        let mut rng = rand::thread_rng();
-        let n: u32 = rng.gen();
-        let decimal = n.to_string();
-        let engine = base64::engine::general_purpose::STANDARD;
-        engine.encode(decimal.as_bytes())
+        let val: u32 = rand::thread_rng().gen();
+        base64::engine::general_purpose::STANDARD.encode(val.to_string().as_bytes())
     }
 
-    /// Build common auth headers for iLink API requests.
+    /// Build common auth headers for authenticated POST requests.
     fn auth_headers(&self) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
-        headers.insert("AuthorizationType", HeaderValue::from_static("bot_token"));
+        headers.insert(
+            "AuthorizationType",
+            HeaderValue::from_static("ilink_bot_token"),
+        );
         headers.insert(
             "X-WECHAT-UIN",
             HeaderValue::from_str(&Self::random_uin())
@@ -114,409 +77,395 @@ impl ILinkClient {
         Ok(headers)
     }
 
-    /// Long-poll for new messages.
-    pub async fn get_updates(&self, cursor: Option<&str>) -> Result<GetUpdatesResponse> {
-        let url = format!("{}/ilink/bot/getupdates", self.session.base_url);
-        let body = GetUpdatesRequest {
-            base_info: BaseInfo::default(),
-            cursor: cursor.map(|s| s.to_string()),
-        };
+    fn api_url(&self, path: &str) -> String {
+        format!("{}{path}", self.session.base_url)
+    }
 
+    // ── Long-poll ──
+
+    pub async fn get_updates(&self, cursor: &str) -> Result<GetUpdatesResponse> {
+        let body = GetUpdatesRequest {
+            get_updates_buf: cursor.to_string(),
+            base_info: BaseInfo::default(),
+        };
         let resp = self
             .poll_client
-            .post(&url)
+            .post(self.api_url("/ilink/bot/getupdates"))
             .headers(self.auth_headers()?)
             .json(&body)
             .send()
             .await
-            .context("get_updates request failed")?;
+            .context("getupdates request failed")?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("get_updates HTTP {status}: {text}"));
+            return Err(anyhow!("getupdates HTTP {status}: {text}"));
         }
-
-        let data: GetUpdatesResponse = resp.json().await.context("get_updates parse failed")?;
-        Ok(data)
+        resp.json().await.context("getupdates parse failed")
     }
 
-    /// Send a text message to a user.
-    pub async fn send_text(
-        &self,
-        to_user_id: &str,
-        text: &str,
-        context_token: Option<&str>,
-    ) -> Result<()> {
-        let url = format!("{}/ilink/bot/sendmessage", self.session.base_url);
+    // ── Send text ──
+
+    pub async fn send_text(&self, to_user_id: &str, text: &str, context_token: &str) -> Result<()> {
         let body = SendMessageRequest {
-            base_info: BaseInfo::default(),
-            to_user_id: to_user_id.to_string(),
-            message: OutgoingMessage {
-                item_list: vec![OutgoingItem {
-                    item_type: "text".to_string(),
-                    text_item: Some(OutgoingTextItem {
-                        content: text.to_string(),
+            msg: OutgoingMessage {
+                from_user_id: String::new(),
+                to_user_id: to_user_id.to_string(),
+                client_id: Self::generate_client_id(),
+                message_type: 2,
+                message_state: 2,
+                context_token: context_token.to_string(),
+                item_list: vec![MessageItem {
+                    item_type: 1,
+                    text_item: Some(TextItem {
+                        text: text.to_string(),
                     }),
                     image_item: None,
                 }],
             },
-            context_token: context_token.map(|s| s.to_string()),
+            base_info: BaseInfo::default(),
         };
-
         let resp = self
             .api_client
-            .post(&url)
+            .post(self.api_url("/ilink/bot/sendmessage"))
             .headers(self.auth_headers()?)
             .json(&body)
             .send()
             .await
-            .context("send_text request failed")?;
+            .context("sendmessage request failed")?;
 
-        let status = resp.status();
-        let data: SendMessageResponse = resp.json().await.context("send_text parse failed")?;
-        if let Some(code) = data.errcode {
-            if code != 0 {
-                return Err(anyhow!(
-                    "send_text failed (HTTP {status}): code={code}, msg={}",
-                    data.errmsg.unwrap_or_default()
-                ));
-            }
+        let result: SendMessageResponse = resp.json().await?;
+        if result.ret != 0 {
+            return Err(anyhow!(
+                "sendmessage error: ret={}, errcode={}, msg={}",
+                result.ret,
+                result.errcode,
+                result.errmsg
+            ));
         }
         Ok(())
     }
 
-    /// Send an image message: encrypt, upload to CDN, then send via API.
+    // ── Send image ──
+
     pub async fn send_image(
         &self,
         to_user_id: &str,
         image_bytes: &[u8],
-        context_token: Option<&str>,
+        context_token: &str,
     ) -> Result<()> {
-        // 1. Generate AES key and encrypt
-        let mut rng = rand::thread_rng();
-        let mut aes_key = [0u8; 16];
-        rng.fill(&mut aes_key);
+        use super::crypto::{aes_ecb_encrypt, aes_ecb_padded_size};
+        use md5::Digest;
 
-        let encrypted = crypto::aes_ecb_encrypt(&aes_key, image_bytes)?;
-        let file_size = image_bytes.len() as u64;
-        let encrypted_size = encrypted.len() as u64;
+        let aes_key: [u8; 16] = rand::thread_rng().gen();
+        let filekey = hex::encode(rand::thread_rng().gen::<[u8; 16]>());
+        let rawsize = image_bytes.len() as u64;
+        let rawfilemd5 = format!("{:x}", md5::Md5::digest(image_bytes));
+        let filesize = aes_ecb_padded_size(rawsize);
+        let encrypted = aes_ecb_encrypt(&aes_key, image_bytes)?;
 
-        // 2. Get upload URL
-        let upload_url_api = format!("{}/ilink/bot/getuploadurl", self.session.base_url);
+        // Step 1: Get upload URL
         let upload_req = GetUploadUrlRequest {
+            filekey: filekey.clone(),
+            media_type: 1, // IMAGE
+            to_user_id: to_user_id.to_string(),
+            rawsize,
+            rawfilemd5,
+            filesize,
+            no_need_thumb: true,
+            aeskey: hex::encode(aes_key),
             base_info: BaseInfo::default(),
-            file_type: "image".to_string(),
-            file_name: format!("{}.png", Self::generate_client_id()),
-            file_size: encrypted_size,
         };
-
         let resp = self
             .api_client
-            .post(&upload_url_api)
+            .post(self.api_url("/ilink/bot/getuploadurl"))
             .headers(self.auth_headers()?)
             .json(&upload_req)
             .send()
-            .await
-            .context("getuploadurl request failed")?;
+            .await?;
+        let upload_resp: GetUploadUrlResponse = resp.json().await?;
+        if upload_resp.ret != 0 {
+            return Err(anyhow!("getuploadurl error: ret={}", upload_resp.ret));
+        }
 
-        let upload_info: GetUploadUrlResponse =
-            resp.json().await.context("getuploadurl parse failed")?;
-
-        // 3. Upload encrypted bytes to CDN
-        let cdn_upload_url = format!(
-            "{CDN_BASE}/upload?encrypted_query_param={}&filekey={}",
-            upload_info.upload_param, upload_info.filekey
+        // Step 2: Upload encrypted bytes to CDN
+        let cdn_url = format!(
+            "{CDN_BASE_URL}/upload?encrypted_query_param={}&filekey={filekey}",
+            upload_resp.upload_param
         );
-        let upload_resp = self
+        let cdn_resp = self
             .api_client
-            .post(&cdn_upload_url)
+            .post(&cdn_url)
             .header("Content-Type", "application/octet-stream")
             .body(encrypted)
             .send()
             .await
             .context("CDN upload failed")?;
 
-        let encrypted_param = upload_resp
+        if !cdn_resp.status().is_success() {
+            return Err(anyhow!("CDN upload HTTP {}", cdn_resp.status()));
+        }
+        let encrypt_query_param = cdn_resp
             .headers()
             .get("x-encrypted-param")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
+            .unwrap_or_default()
             .to_string();
 
-        // 4. Send image message
-        let engine = base64::engine::general_purpose::STANDARD;
-        let aes_key_b64 = engine.encode(aes_key);
-
-        let url = format!("{}/ilink/bot/sendmessage", self.session.base_url);
+        // Step 3: Send message with image reference
+        let aes_key_b64 =
+            base64::engine::general_purpose::STANDARD.encode(hex::encode(aes_key).as_bytes());
         let body = SendMessageRequest {
-            base_info: BaseInfo::default(),
-            to_user_id: to_user_id.to_string(),
-            message: OutgoingMessage {
-                item_list: vec![OutgoingItem {
-                    item_type: "image".to_string(),
+            msg: OutgoingMessage {
+                from_user_id: String::new(),
+                to_user_id: to_user_id.to_string(),
+                client_id: Self::generate_client_id(),
+                message_type: 2,
+                message_state: 2,
+                context_token: context_token.to_string(),
+                item_list: vec![MessageItem {
+                    item_type: 2,
                     text_item: None,
-                    image_item: Some(OutgoingImageItem {
-                        url: format!(
-                            "{CDN_BASE}/download?encrypted_query_param={}",
-                            encrypted_param
-                        ),
-                        encrypted_param: Some(encrypted_param),
-                        encrypted_aes_key: Some(aes_key_b64),
-                        file_size: Some(file_size),
-                        encrypted_file_size: Some(encrypted_size),
+                    image_item: Some(ImageItem {
+                        media: Some(CdnMedia {
+                            encrypt_query_param,
+                            aes_key: aes_key_b64,
+                            encrypt_type: 1,
+                        }),
+                        aeskey: None,
+                        mid_size: filesize,
                     }),
                 }],
             },
-            context_token: context_token.map(|s| s.to_string()),
+            base_info: BaseInfo::default(),
         };
-
         let resp = self
             .api_client
-            .post(&url)
+            .post(self.api_url("/ilink/bot/sendmessage"))
             .headers(self.auth_headers()?)
             .json(&body)
             .send()
-            .await
-            .context("send_image sendmessage failed")?;
+            .await?;
+        let result: SendMessageResponse = resp.json().await?;
+        if result.ret != 0 {
+            return Err(anyhow!("send image error: ret={}", result.ret));
+        }
+        Ok(())
+    }
 
-        let data: SendMessageResponse = resp
-            .json()
-            .await
-            .context("send_image sendmessage parse failed")?;
-        if let Some(code) = data.errcode {
-            if code != 0 {
+    // ── Download + decrypt inbound image ──
+
+    pub async fn download_image(&self, msg_image: &ImageItem) -> Result<Vec<u8>> {
+        use super::crypto::{aes_ecb_decrypt, parse_aes_key};
+
+        let media = msg_image
+            .media
+            .as_ref()
+            .ok_or_else(|| anyhow!("image has no media field"))?;
+
+        // Determine AES key: prefer hex aeskey field, fall back to media.aes_key
+        let key = if let Some(hex_key) = &msg_image.aeskey {
+            let decoded = hex::decode(hex_key).context("invalid hex aeskey")?;
+            if decoded.len() != 16 {
                 return Err(anyhow!(
-                    "send_image failed: code={code}, msg={}",
-                    data.errmsg.unwrap_or_default()
+                    "hex aeskey is {} bytes, expected 16",
+                    decoded.len()
                 ));
             }
-        }
-        Ok(())
-    }
+            decoded
+        } else {
+            parse_aes_key(&media.aes_key)?
+        };
 
-    /// Download and decrypt an image from CDN.
-    pub async fn download_image(&self, image: &ImageItem) -> Result<Vec<u8>> {
-        let media = image
-            .media_info
-            .as_ref()
-            .ok_or_else(|| anyhow!("image has no media_info"))?;
-
-        let query_param = media
-            .encrypt_query_param
-            .as_deref()
-            .ok_or_else(|| anyhow!("image media_info missing encrypt_query_param"))?;
-
-        let download_url = format!("{CDN_BASE}/download?encrypted_query_param={query_param}");
-
-        let resp = reqwest::get(&download_url)
-            .await
-            .context("CDN download failed")?;
-
+        let url = format!(
+            "{CDN_BASE_URL}/download?encrypted_query_param={}",
+            media.encrypt_query_param
+        );
+        let resp = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?
+            .get(&url)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("CDN download HTTP {status}: {body}"));
+            return Err(anyhow!("CDN download HTTP {}", resp.status()));
         }
-
-        let encrypted_bytes = resp.bytes().await?.to_vec();
-
-        // Decrypt if AES key is present
-        if let Some(aes_key_b64) = &media.aes_key {
-            let key = crypto::parse_aes_key(aes_key_b64)?;
-            let decrypted = crypto::aes_ecb_decrypt(&key, &encrypted_bytes)?;
-            Ok(decrypted)
-        } else {
-            // No encryption
-            Ok(encrypted_bytes)
-        }
+        let ciphertext = resp.bytes().await?.to_vec();
+        aes_ecb_decrypt(&key, &ciphertext)
     }
 
-    /// Send a typing indicator to a user.
+    // ── Typing indicator ──
+
     pub async fn send_typing(&self, user_id: &str, context_token: &str) -> Result<()> {
-        // First call getconfig (required before sendtyping)
-        let config_url = format!("{}/ilink/bot/getconfig", self.session.base_url);
-        let config_body = GetConfigRequest {
-            base_info: BaseInfo::default(),
-        };
-
-        let _config_resp = self
+        // Get typing ticket
+        let config_resp: GetConfigResponse = self
             .api_client
-            .post(&config_url)
+            .post(self.api_url("/ilink/bot/getconfig"))
             .headers(self.auth_headers()?)
-            .json(&config_body)
+            .json(&GetConfigRequest {
+                ilink_user_id: user_id.to_string(),
+                context_token: context_token.to_string(),
+                base_info: BaseInfo::default(),
+            })
             .send()
-            .await
-            .context("getconfig request failed")?;
+            .await?
+            .json()
+            .await?;
 
-        // Send typing indicator
-        let typing_url = format!("{}/ilink/bot/sendtyping", self.session.base_url);
-        let typing_body = SendTypingRequest {
-            base_info: BaseInfo::default(),
-            to_user_id: user_id.to_string(),
-            context_token: context_token.to_string(),
-        };
+        if config_resp.typing_ticket.is_empty() {
+            return Ok(());
+        }
 
-        self.api_client
-            .post(&typing_url)
+        // Send typing status
+        let _ = self
+            .api_client
+            .post(self.api_url("/ilink/bot/sendtyping"))
             .headers(self.auth_headers()?)
-            .json(&typing_body)
+            .json(&SendTypingRequest {
+                ilink_user_id: user_id.to_string(),
+                typing_ticket: config_resp.typing_ticket,
+                status: 1,
+                base_info: BaseInfo::default(),
+            })
             .send()
-            .await
-            .context("sendtyping request failed")?;
-
+            .await;
         Ok(())
     }
 
-    /// Set context_token for a user.
+    // ── Context token management ──
+
     pub async fn set_context_token(&self, user_id: &str, token: &str) {
-        let mut guard = self.context_tokens.write().await;
-        guard.insert(user_id.to_string(), token.to_string());
+        self.context_tokens
+            .write()
+            .await
+            .insert(user_id.to_string(), token.to_string());
     }
 
-    /// Get cached context_token for a user.
     pub async fn get_context_token(&self, user_id: &str) -> Option<String> {
-        let guard = self.context_tokens.read().await;
-        guard.get(user_id).cloned()
+        self.context_tokens.read().await.get(user_id).cloned()
     }
 
-    /// Load the persisted cursor for long-polling.
-    pub fn load_cursor(&self) -> Option<String> {
-        let data = std::fs::read_to_string(&self.sync_path).ok()?;
-        let state: CursorState = serde_json::from_str(&data).ok()?;
-        if state.cursor.is_empty() {
-            None
-        } else {
-            Some(state.cursor)
-        }
+    // ── Sync cursor persistence ──
+
+    pub fn load_cursor(&self) -> String {
+        std::fs::read_to_string(&self.sync_path)
+            .ok()
+            .and_then(|s| {
+                serde_json::from_str::<serde_json::Value>(&s)
+                    .ok()?
+                    .get("get_updates_buf")?
+                    .as_str()
+                    .map(String::from)
+            })
+            .unwrap_or_default()
     }
 
-    /// Persist the cursor for long-polling.
-    pub fn save_cursor(&self, cursor: &str) -> Result<()> {
-        if let Some(parent) = self.sync_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let state = CursorState {
-            cursor: cursor.to_string(),
-        };
-        let json = serde_json::to_string(&state)?;
-        std::fs::write(&self.sync_path, json)?;
-        Ok(())
+    pub fn save_cursor(&self, cursor: &str) {
+        let json = serde_json::json!({ "get_updates_buf": cursor });
+        let _ = std::fs::write(
+            &self.sync_path,
+            serde_json::to_string(&json).unwrap_or_default(),
+        );
     }
 
-    /// Generate a unique client ID.
-    pub fn generate_client_id() -> String {
+    // ── Helpers ──
+
+    fn generate_client_id() -> String {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let mut rng = rand::thread_rng();
-        let r: u64 = rng.gen();
-        format!("clawhive:{ts}-{:016x}", r)
+        let rand_hex = hex::encode(rand::thread_rng().gen::<[u8; 4]>());
+        format!("clawhive:{ts}-{rand_hex}")
     }
 }
 
 // ---------------------------------------------------------------------------
-// QR login flow
+// QR Code Login (standalone, before ILinkClient is created)
 // ---------------------------------------------------------------------------
 
-/// Perform QR code login and return a session.
 pub async fn qr_login() -> Result<WeixinSession> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(40))
         .build()?;
 
-    let mut attempts = 0;
-    const MAX_REFRESHES: u32 = 3;
+    // Step 1: Get QR code
+    let resp: QrCodeResponse = http
+        .get(format!(
+            "{DEFAULT_BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=3"
+        ))
+        .send()
+        .await?
+        .json()
+        .await
+        .context("failed to get QR code")?;
+
+    render_qr_terminal(&resp.qrcode_img_content);
+    tracing::info!("scan the QR code with WeChat to log in");
+
+    // Step 2: Poll for confirmation (up to 3 QR refreshes)
+    let mut qrcode_token = resp.qrcode;
+    let mut refreshes = 0u32;
 
     loop {
-        attempts += 1;
-        if attempts > MAX_REFRESHES {
-            return Err(anyhow!(
-                "QR login failed after {MAX_REFRESHES} refresh attempts"
-            ));
-        }
-
-        // 1. Get QR code
-        let qr_resp: QrCodeResponse = client
-            .post(format!("{ILINK_QR_BASE}/qrlogin/getqrcode"))
-            .json(&serde_json::json!({ "base_info": BaseInfo::default() }))
+        let status_url =
+            format!("{DEFAULT_BASE_URL}/ilink/bot/get_qrcode_status?qrcode={qrcode_token}");
+        let status: QrCodeStatusResponse = http
+            .get(&status_url)
+            .header("iLink-App-ClientVersion", "1")
             .send()
-            .await
-            .context("getqrcode request failed")?
+            .await?
             .json()
-            .await
-            .context("getqrcode parse failed")?;
+            .await?;
 
-        tracing::info!(uuid = %qr_resp.uuid, "weixin QR code generated");
-
-        // 2. Render QR in terminal
-        render_qr_terminal(&qr_resp.qr_code_url);
-
-        // 3. Poll for scan status
-        let mut scanned = false;
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-
-            let status_resp: QrCodeStatusResponse = client
-                .post(format!("{ILINK_QR_BASE}/qrlogin/getstatus"))
-                .json(&serde_json::json!({
-                    "base_info": BaseInfo::default(),
-                    "uuid": qr_resp.uuid,
-                }))
-                .send()
-                .await
-                .context("getstatus request failed")?
-                .json()
-                .await
-                .context("getstatus parse failed")?;
-
-            match status_resp.status.as_str() {
-                "waiting" => {
-                    if !scanned {
-                        tracing::debug!("waiting for QR scan...");
-                    }
+        match status.status.as_str() {
+            "confirmed" => {
+                let session = WeixinSession {
+                    bot_token: status
+                        .bot_token
+                        .ok_or_else(|| anyhow!("confirmed but no bot_token"))?,
+                    base_url: status
+                        .baseurl
+                        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+                    bot_id: status
+                        .ilink_bot_id
+                        .ok_or_else(|| anyhow!("confirmed but no ilink_bot_id"))?,
+                    user_id: status
+                        .ilink_user_id
+                        .ok_or_else(|| anyhow!("confirmed but no ilink_user_id"))?,
+                    saved_at: chrono::Utc::now().to_rfc3339(),
+                };
+                tracing::info!(bot_id = %session.bot_id, "weixin login successful");
+                return Ok(session);
+            }
+            "expired" => {
+                refreshes += 1;
+                if refreshes >= 3 {
+                    return Err(anyhow!("QR code expired 3 times, aborting login"));
                 }
-                "scanned" => {
-                    if !scanned {
-                        tracing::info!("QR code scanned, waiting for confirmation...");
-                        scanned = true;
-                    }
-                }
-                "confirmed" => {
-                    let session = WeixinSession {
-                        bot_token: status_resp
-                            .bot_token
-                            .ok_or_else(|| anyhow!("confirmed but no bot_token"))?,
-                        base_url: status_resp
-                            .base_url
-                            .ok_or_else(|| anyhow!("confirmed but no base_url"))?,
-                        bot_id: status_resp
-                            .bot_id
-                            .ok_or_else(|| anyhow!("confirmed but no bot_id"))?,
-                        user_id: status_resp
-                            .user_id
-                            .ok_or_else(|| anyhow!("confirmed but no user_id"))?,
-                        saved_at: Some(chrono::Utc::now().to_rfc3339()),
-                    };
-                    tracing::info!(bot_id = %session.bot_id, "weixin login confirmed");
-                    return Ok(session);
-                }
-                "expired" => {
-                    tracing::warn!(
-                        "QR code expired, refreshing (attempt {attempts}/{MAX_REFRESHES})"
-                    );
-                    break; // Break inner loop → refresh QR
-                }
-                other => {
-                    tracing::warn!(status = %other, "unexpected QR status");
-                }
+                tracing::warn!("QR code expired, refreshing ({refreshes}/3)");
+                let new_resp: QrCodeResponse = http
+                    .get(format!(
+                        "{DEFAULT_BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=3"
+                    ))
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+                render_qr_terminal(&new_resp.qrcode_img_content);
+                qrcode_token = new_resp.qrcode;
+            }
+            // "wait" = not scanned, "scaned" = scanned but not confirmed (sic — protocol typo)
+            "wait" | "scaned" => {}
+            other => {
+                tracing::warn!(status = other, "unexpected QR status");
             }
         }
     }
 }
 
-/// Render a QR code in the terminal using Unicode block characters.
+/// Render a URL as a QR code in the terminal using Unicode block characters.
 fn render_qr_terminal(url: &str) {
     use qrcode::QrCode;
 
@@ -531,14 +480,31 @@ fn render_qr_terminal(url: &str) {
 
     let string = code
         .render::<char>()
-        .quiet_zone(false)
+        .quiet_zone(true)
         .module_dimensions(2, 1)
         .build();
 
-    // Print directly to stdout — this is user-facing CLI output during login
+    // Print to stdout — user-facing CLI output during login
     for line in string.lines() {
         println!("{line}");
     }
     println!();
-    tracing::info!(url = %url, "scan the QR code above to log in");
+    tracing::info!(url = %url, "scan the QR code above with WeChat");
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence
+// ---------------------------------------------------------------------------
+
+pub fn save_session(path: &Path, session: &WeixinSession) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(session)?;
+    std::fs::write(path, json).context("failed to save weixin session")
+}
+
+pub fn load_session(path: &Path) -> Option<WeixinSession> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
 }
