@@ -53,3 +53,9 @@ aes = { version = "0.8", optional = true }
 ecb = { version = "0.1", features = ["alloc"], optional = true }
 qrcode = { version = "0.14", optional = true }
 md-5 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+wiremock.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json.workspace = true

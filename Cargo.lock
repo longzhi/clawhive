@@ -688,6 +688,7 @@ dependencies = [
  "serenity",
  "slack-morphism",
  "teloxide",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",
@@ -699,6 +700,7 @@ dependencies = [
  "whatsapp-rust-sqlite-storage",
  "whatsapp-rust-tokio-transport",
  "whatsapp-rust-ureq-http-client",
+ "wiremock",
 ]
 
 [[package]]
