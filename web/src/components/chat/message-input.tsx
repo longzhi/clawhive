@@ -12,7 +12,7 @@ const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
 const SLASH_COMMANDS = [
   { command: "/new", args: "[model]", description: "Start a fresh session" },
-  { command: "/model", args: "", description: "Show current model info" },
+  { command: "/model", args: "[provider/model]", description: "Show or change model" },
   { command: "/status", args: "", description: "Show session status" },
   { command: "/skill analyze", args: "<url>", description: "Analyze a skill from URL" },
   { command: "/skill install", args: "<url>", description: "Install a skill from URL" },

@@ -93,7 +93,7 @@ impl TelegramBot {
         let commands = vec![
             BotCommand::new("new", "Start a fresh session"),
             BotCommand::new("status", "Show session status"),
-            BotCommand::new("model", "Show current model info"),
+            BotCommand::new("model", "Show or change model (e.g. /model openai/gpt-5.2)"),
             BotCommand::new("help", "Show available commands"),
             BotCommand::new("skill_analyze", "Analyze a skill before installing"),
             BotCommand::new("skill_install", "Install a skill (analyze first)"),

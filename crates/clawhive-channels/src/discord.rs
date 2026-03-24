@@ -198,7 +198,16 @@ impl EventHandler for DiscordHandler {
                     .required(false),
                 ),
             CreateCommand::new("status").description("Show session status"),
-            CreateCommand::new("model").description("Show current model info"),
+            CreateCommand::new("model")
+                .description("Show or change current model")
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "model",
+                        "New model (e.g. openai/gpt-5.2)",
+                    )
+                    .required(false),
+                ),
             CreateCommand::new("help").description("Show available commands"),
             CreateCommand::new("skill")
                 .description("Manage skills")
@@ -541,12 +550,19 @@ impl DiscordHandler {
                 }
                 text
             }
+            "model" => {
+                let model_arg = cmd.data.options.first().and_then(|o| o.value.as_str());
+                match model_arg {
+                    Some(m) => format!("/model {m}"),
+                    None => "/model".to_string(),
+                }
+            }
             "help" => {
                 // /help replies directly, doesn't go through gateway
                 let help_text = "**Available Commands**\n\
                     /new — Start a fresh session\n\
                     /status — Show session status\n\
-                    /model — Show current model info\n\
+                    /model [provider/model] — Show or change model\n\
                     /skill analyze <source> — Analyze a skill\n\
                     /skill install <source> — Install a skill\n\
                     /skill confirm <token> — Confirm installation";
