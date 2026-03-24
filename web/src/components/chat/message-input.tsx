@@ -45,6 +45,9 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
     const trimmed = text.trimStart();
     if (!trimmed.startsWith("/")) return [];
     const input = trimmed.toLowerCase();
+    // Hide autocomplete when input exactly matches a command (with or without trailing space)
+    const exact = SLASH_COMMANDS.some((cmd) => input === cmd.command || input === cmd.command + " ");
+    if (exact) return [];
     return SLASH_COMMANDS.filter(
       (cmd) => cmd.command.startsWith(input) || `${cmd.command} ${cmd.args}`.trimEnd().startsWith(input)
     );
