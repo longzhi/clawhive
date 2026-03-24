@@ -87,12 +87,6 @@ impl ProviderId {
             .unwrap_or(self.as_str())
     }
 
-    fn default_model(self) -> &'static str {
-        clawhive_schema::provider_presets::preset_by_id(self.as_str())
-            .map(|p| p.default_model)
-            .unwrap_or("unknown")
-    }
-
     fn api_base(self) -> &'static str {
         clawhive_schema::provider_presets::preset_by_id(self.as_str())
             .map(|p| p.api_base)
@@ -200,6 +194,17 @@ pub(super) async fn handle_add_provider(
             None
         } else {
             Some(base)
+        }
+    } else if provider == ProviderId::Moonshot {
+        let regions = ["China (api.moonshot.cn)", "International (api.moonshot.ai)"];
+        let selected = Select::with_theme(theme)
+            .with_prompt("API region")
+            .items(&regions)
+            .default(0)
+            .interact()?;
+        match selected {
+            1 => Some("https://api.moonshot.ai/v1".to_string()),
+            _ => None, // default preset is already China
         }
     } else {
         None
@@ -402,42 +407,47 @@ fn generate_provider_yaml(
             // OpenAI OAuth uses the chatgpt codex endpoint and registers as
             // a separate "openai-chatgpt" provider so it can coexist with
             // the API-key-based "openai" provider.
-            let (pid, base, model) = match provider {
-                ProviderId::OpenAi => (
-                    "openai-chatgpt",
-                    "https://chatgpt.com/backend-api/codex",
-                    "gpt-5.3-codex",
-                ),
-                _ => (provider.as_str(), base_url, provider.default_model()),
+            let (pid, base) = match provider {
+                ProviderId::OpenAi => ("openai-chatgpt", "https://chatgpt.com/backend-api/codex"),
+                _ => (provider.as_str(), base_url),
             };
+            let models_yaml = format_preset_models_yaml(pid);
             format!(
-                "provider_id: {pid}\nenabled: true\napi_base: {base}\nauth_profile: \"{profile}\"\nmodels:\n  - {model}\n",
-                pid = pid,
-                base = base,
+                "provider_id: {pid}\nenabled: true\napi_base: {base}\nauth_profile: \"{profile}\"\nmodels:\n{models_yaml}\n",
                 profile = profile_name,
-                model = model,
             )
         }
         AuthChoice::ApiKey { api_key } => {
+            let pid = provider.as_str();
+            let models_yaml = format_preset_models_yaml(pid);
             if api_key.is_empty() {
                 // Ollama or other local providers without auth
                 format!(
-                    "provider_id: {provider}\nenabled: true\napi_base: {base}\nmodels:\n  - {model}\n",
-                    provider = provider.as_str(),
+                    "provider_id: {pid}\nenabled: true\napi_base: {base}\nmodels:\n{models_yaml}\n",
                     base = base_url,
-                    model = provider.default_model(),
                 )
             } else {
                 format!(
-                    "provider_id: {provider}\nenabled: true\napi_base: {base}\napi_key: \"{key}\"\nmodels:\n  - {model}\n",
-                    provider = provider.as_str(),
+                    "provider_id: {pid}\nenabled: true\napi_base: {base}\napi_key: \"{key}\"\nmodels:\n{models_yaml}\n",
                     base = base_url,
                     key = api_key,
-                    model = provider.default_model(),
                 )
             }
         }
     }
+}
+
+/// Format all preset model IDs for a provider as YAML list items.
+fn format_preset_models_yaml(provider_id: &str) -> String {
+    clawhive_schema::provider_presets::preset_by_id(provider_id)
+        .map(|p| {
+            p.models
+                .iter()
+                .map(|m| format!("  - {}", m.id))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|| "  - unknown".to_string())
 }
 
 async fn handle_add_custom_provider(
@@ -662,5 +672,21 @@ mod tests {
         use clawhive_schema::provider_presets::provider_models_for_id;
         let models = provider_models_for_id("custom");
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn provider_yaml_includes_all_preset_models() {
+        let yaml = generate_provider_yaml(
+            ProviderId::Moonshot,
+            &AuthChoice::ApiKey {
+                api_key: "sk-test".to_string(),
+            },
+            None,
+        );
+        // Should contain all preset models, not just the default
+        assert!(yaml.contains("kimi-k2.5"));
+        assert!(yaml.contains("kimi-k2-0905-preview"));
+        assert!(yaml.contains("moonshot-v1-128k"));
+        assert!(yaml.contains("moonshot-v1-8k"));
     }
 }

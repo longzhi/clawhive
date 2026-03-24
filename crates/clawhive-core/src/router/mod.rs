@@ -40,6 +40,16 @@ impl LlmRouter {
         }
     }
 
+    /// Check if a provider is registered.
+    pub fn has_provider(&self, provider_id: &str) -> bool {
+        self.registry.get(provider_id).is_ok()
+    }
+
+    /// List all registered provider IDs.
+    pub fn provider_ids(&self) -> Vec<String> {
+        self.registry.list().into_iter().map(String::from).collect()
+    }
+
     /// Check if a provider is currently in cooldown
     fn is_provider_in_cooldown(&self, provider_id: &str) -> bool {
         self.cooldowns

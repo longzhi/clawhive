@@ -230,11 +230,30 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.moonshot.cn/v1",
         needs_key: true,
         needs_base_url: false,
-        default_model: "moonshot-v1-128k",
+        default_model: "kimi-k2.5",
         models: &[
+            // Flagship multimodal
+            m("kimi-k2.5", 256_000, 8192, false, true),
+            // K2 series
+            m("kimi-k2-0905-preview", 256_000, 8192, false, false),
+            m("kimi-k2-0711-preview", 128_000, 8192, false, false),
+            m("kimi-k2-turbo-preview", 256_000, 8192, false, false),
+            m("kimi-k2-thinking", 256_000, 8192, true, false),
+            m("kimi-k2-thinking-turbo", 256_000, 8192, true, false),
+            // Classic moonshot-v1
             m("moonshot-v1-128k", 128_000, 8192, false, false),
             m("moonshot-v1-32k", 32_768, 8192, false, false),
             m("moonshot-v1-8k", 8_192, 4096, false, false),
+            // Vision variants
+            m(
+                "moonshot-v1-128k-vision-preview",
+                128_000,
+                8192,
+                false,
+                true,
+            ),
+            m("moonshot-v1-32k-vision-preview", 32_768, 8192, false, true),
+            m("moonshot-v1-8k-vision-preview", 8_192, 4096, false, true),
         ],
     },
     ProviderPreset {

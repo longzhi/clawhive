@@ -389,6 +389,11 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
                 onChange={(e) => setApiBase(e.target.value)}
                 className="mt-1"
               />
+              {selected.id === "moonshot" && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  China: api.moonshot.cn/v1 · International: api.moonshot.ai/v1
+                </p>
+              )}
             </div>
             {selected.needs_key && (
               <div>

@@ -53,9 +53,10 @@ pub fn qwen(api_key: impl Into<String>) -> OpenAiProvider {
 }
 
 /// Moonshot / Kimi - OpenAI compatible
-/// https://platform.moonshot.ai/docs/api/chat
+/// https://platform.moonshot.cn/docs/api/chat
+/// Default: China site. International: https://api.moonshot.ai/v1
 pub fn moonshot(api_key: impl Into<String>) -> OpenAiProvider {
-    OpenAiProvider::new(api_key, "https://api.moonshot.ai/v1")
+    OpenAiProvider::new(api_key, "https://api.moonshot.cn/v1")
 }
 
 /// Zhipu GLM (智谱AI) - OpenAI compatible
