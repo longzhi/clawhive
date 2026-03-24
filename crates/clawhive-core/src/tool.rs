@@ -377,8 +377,9 @@ pub trait ToolExecutor: Send + Sync {
 }
 
 /// Registry of available tools.
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn ToolExecutor>>,
+    tools: HashMap<String, Arc<dyn ToolExecutor>>,
 }
 
 impl ToolRegistry {
@@ -392,7 +393,7 @@ impl ToolRegistry {
     /// Register a tool.
     pub fn register(&mut self, tool: Box<dyn ToolExecutor>) {
         let name = tool.definition().name.clone();
-        self.tools.insert(name, tool);
+        self.tools.insert(name, Arc::from(tool));
     }
 
     /// Get all tool definitions.

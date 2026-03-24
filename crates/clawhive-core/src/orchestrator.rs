@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use arc_swap::ArcSwap;
 use clawhive_bus::BusPublisher;
 use clawhive_memory::embedding::EmbeddingProvider;
@@ -266,6 +266,91 @@ impl Orchestrator {
             skill_install_state: Arc::new(SkillInstallState::new(900)),
             language_prefs: LanguagePrefs::new(),
         }
+    }
+
+    /// Handle `/model provider/model` — validate, persist, and apply model change.
+    fn handle_model_change(
+        &self,
+        view: &Arc<ConfigView>,
+        agent_id: &str,
+        new_model: &str,
+    ) -> Result<String> {
+        // 1. Parse provider/model
+        let (provider_id, model_name) = new_model
+            .split_once('/')
+            .ok_or_else(|| anyhow!("格式错误，请使用 provider/model 格式，如: openai/gpt-5.2"))?;
+
+        if provider_id.is_empty() || model_name.is_empty() {
+            anyhow::bail!("provider 和 model 不能为空，请使用格式: provider/model");
+        }
+
+        // 2. Validate provider exists in registry
+        if !view.router.has_provider(provider_id) {
+            let mut available = view.router.provider_ids();
+            available.sort();
+            let available = available.join(", ");
+            anyhow::bail!("未找到 provider \"{provider_id}\"\n可用 providers: {available}");
+        }
+
+        // 3. Validate model exists in presets (only if provider has presets with models)
+        if let Some(preset) = clawhive_schema::provider_presets::preset_by_id(provider_id) {
+            if !preset.models.is_empty() && !preset.models.iter().any(|m| m.id == model_name) {
+                let available =
+                    clawhive_schema::provider_presets::provider_models_for_id(provider_id)
+                        .join(", ");
+                anyhow::bail!(
+                    "provider \"{provider_id}\" 中未找到模型 \"{model_name}\"\n可用模型: {available}"
+                );
+            }
+        }
+
+        // 4. Persist to YAML
+        let agent_yaml_path = self
+            .workspace_root
+            .join("config/agents.d")
+            .join(format!("{agent_id}.yaml"));
+
+        let yaml_content = std::fs::read_to_string(&agent_yaml_path)
+            .with_context(|| format!("读取 agent 配置失败: {}", agent_yaml_path.display()))?;
+
+        let mut doc: serde_yaml::Value =
+            serde_yaml::from_str(&yaml_content).with_context(|| "解析 agent YAML 失败")?;
+
+        doc.get_mut("model_policy")
+            .and_then(|mp| mp.get_mut("primary"))
+            .map(|primary| *primary = serde_yaml::Value::String(new_model.to_string()))
+            .ok_or_else(|| anyhow!("agent YAML 中未找到 model_policy.primary 字段"))?;
+
+        let updated_yaml = serde_yaml::to_string(&doc)?;
+        std::fs::write(&agent_yaml_path, &updated_yaml)
+            .with_context(|| format!("写入 agent 配置失败: {}", agent_yaml_path.display()))?;
+
+        // 5. Swap in-memory config
+        let mut agents = view.agents.clone();
+        if let Some(agent_arc) = agents.get_mut(agent_id) {
+            let mut agent = agent_arc.as_ref().clone();
+            agent.model_policy.primary = new_model.to_string();
+            *agent_arc = Arc::new(agent);
+        }
+
+        let new_view = ConfigView {
+            generation: view.generation + 1,
+            agents,
+            personas: view.personas.clone(),
+            routing: view.routing.clone(),
+            router: view.router.clone(),
+            tool_registry: view.tool_registry.clone(),
+            embedding_provider: Arc::clone(&view.embedding_provider),
+        };
+        self.config_view.store(Arc::new(new_view));
+
+        tracing::info!(
+            agent_id = %agent_id,
+            new_model = %new_model,
+            "model changed via /model command"
+        );
+
+        Ok(format!("✅ 模型已切换为 **{new_model}**（已保存）"))
     }
 
     async fn handle_skill_analyze_or_install_command(
@@ -845,16 +930,27 @@ impl Orchestrator {
         // Handle slash commands before LLM
         if let Some(cmd) = super::slash_commands::parse_command(&inbound.text) {
             match cmd {
-                super::slash_commands::SlashCommand::Model { new_model: _ } => {
+                super::slash_commands::SlashCommand::Model { new_model } => {
+                    let text = match new_model {
+                        Some(model_str) => {
+                            match self.handle_model_change(&view, agent_id, &model_str) {
+                                Ok(msg) => msg,
+                                Err(e) => format!("❌ {e}"),
+                            }
+                        }
+                        None => {
+                            format!(
+                                "Model: **{}**\nSession: **{}**",
+                                agent.model_policy.primary, session_key.0
+                            )
+                        }
+                    };
                     return Ok(OutboundMessage {
                         trace_id: inbound.trace_id,
                         channel_type: inbound.channel_type,
                         connector_id: inbound.connector_id,
                         conversation_scope: inbound.conversation_scope,
-                        text: format!(
-                            "Model: **{}**\nSession: **{}**",
-                            agent.model_policy.primary, session_key.0
-                        ),
+                        text,
                         at: chrono::Utc::now(),
                         reply_to: None,
                         attachments: vec![],
