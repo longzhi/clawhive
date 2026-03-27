@@ -3,6 +3,7 @@ use std::sync::Arc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_schema::{ActionKind, BusMessage};
 
+use super::bot::parse_feishu_chat_id;
 use super::client::FeishuClient;
 use super::message::{
     build_approval_card, build_skill_confirm_card, has_formatting, md_to_feishu_card,
@@ -30,7 +31,7 @@ pub fn spawn_delivery_listener(
                 continue;
             }
 
-            let chat_id = conversation_scope.trim_start_matches("chat:");
+            let chat_id = parse_feishu_chat_id(&conversation_scope);
             let content = serde_json::json!({"text": text}).to_string();
 
             if let Err(e) = client.send_message(chat_id, "text", &content).await {
@@ -83,13 +84,13 @@ pub fn spawn_approval_listener(
                 continue;
             }
 
-            let chat_id = conversation_scope.trim_start_matches("chat:");
+            let chat_id = parse_feishu_chat_id(&conversation_scope);
             let display = clawhive_schema::ApprovalDisplay::new(
                 &agent_id,
                 &command,
                 network_target.as_deref(),
             );
-            let card = build_approval_card(&display, &short_id);
+            let card = build_approval_card(&display, &short_id, &conversation_scope);
 
             tracing::info!(
                 target: "clawhive::channel::feishu",
@@ -131,8 +132,8 @@ pub fn spawn_skill_confirm_listener(
                 continue;
             }
 
-            let chat_id = conversation_scope.trim_start_matches("chat:");
-            let card = build_skill_confirm_card(&skill_name, &token);
+            let chat_id = parse_feishu_chat_id(&conversation_scope);
+            let card = build_skill_confirm_card(&skill_name, &token, &conversation_scope);
 
             if let Err(e) = client.send_card(chat_id, &card).await {
                 tracing::error!(

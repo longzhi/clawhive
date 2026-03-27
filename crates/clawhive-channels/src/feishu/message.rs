@@ -1,7 +1,11 @@
 use anyhow::Result;
 use clawhive_schema::{ApprovalDisplay, Attachment, AttachmentKind};
 
-pub fn build_approval_card(display: &ApprovalDisplay, short_id: &str) -> serde_json::Value {
+pub fn build_approval_card(
+    display: &ApprovalDisplay,
+    short_id: &str,
+    scope: &str,
+) -> serde_json::Value {
     let mut md_content = format!(
         "**Agent:** `{}`\n**Program:** `{}`",
         display.agent_id, display.program,
@@ -32,7 +36,7 @@ pub fn build_approval_card(display: &ApprovalDisplay, short_id: &str) -> serde_j
                                 "tag": "button",
                                 "text": { "tag": "plain_text", "content": "✅ Allow Once" },
                                 "type": "primary",
-                                "value": { "action": "approve_allow", "short_id": short_id }
+                                "value": { "action": "approve_allow", "short_id": short_id, "scope": scope }
                             }]
                         },
                         {
@@ -43,7 +47,7 @@ pub fn build_approval_card(display: &ApprovalDisplay, short_id: &str) -> serde_j
                                 "tag": "button",
                                 "text": { "tag": "plain_text", "content": "🔓 Always Allow" },
                                 "type": "default",
-                                "value": { "action": "approve_always", "short_id": short_id }
+                                "value": { "action": "approve_always", "short_id": short_id, "scope": scope }
                             }]
                         },
                         {
@@ -54,7 +58,7 @@ pub fn build_approval_card(display: &ApprovalDisplay, short_id: &str) -> serde_j
                                 "tag": "button",
                                 "text": { "tag": "plain_text", "content": "❌ Deny" },
                                 "type": "danger",
-                                "value": { "action": "approve_deny", "short_id": short_id }
+                                "value": { "action": "approve_deny", "short_id": short_id, "scope": scope }
                             }]
                         }
                     ]
@@ -64,7 +68,7 @@ pub fn build_approval_card(display: &ApprovalDisplay, short_id: &str) -> serde_j
     })
 }
 
-pub fn build_skill_confirm_card(skill_name: &str, token: &str) -> serde_json::Value {
+pub fn build_skill_confirm_card(skill_name: &str, token: &str, scope: &str) -> serde_json::Value {
     serde_json::json!({
         "schema": "2.0",
         "header": {
@@ -86,7 +90,7 @@ pub fn build_skill_confirm_card(skill_name: &str, token: &str) -> serde_json::Va
                                 "tag": "button",
                                 "text": { "tag": "plain_text", "content": format!("✅ Install {skill_name}") },
                                 "type": "primary",
-                                "value": { "action": "skill_confirm", "token": token }
+                                "value": { "action": "skill_confirm", "token": token, "scope": scope }
                             }]
                         },
                         {
@@ -97,7 +101,7 @@ pub fn build_skill_confirm_card(skill_name: &str, token: &str) -> serde_json::Va
                                 "tag": "button",
                                 "text": { "tag": "plain_text", "content": "❌ Cancel" },
                                 "type": "danger",
-                                "value": { "action": "skill_cancel", "token": token }
+                                "value": { "action": "skill_cancel", "token": token, "scope": scope }
                             }]
                         }
                     ]
@@ -325,7 +329,7 @@ mod tests {
     #[test]
     fn build_approval_card_structure() {
         let display = ApprovalDisplay::new("test-agent", "rm -rf /tmp", None);
-        let card = build_approval_card(&display, "abc123");
+        let card = build_approval_card(&display, "abc123", "group:chat:oc_test");
         let elements = card.pointer("/body/elements").unwrap().as_array().unwrap();
         assert_eq!(elements.len(), 2);
         let columns = elements[1].pointer("/columns").unwrap().as_array().unwrap();
@@ -354,7 +358,7 @@ mod tests {
             "curl api.example.com",
             Some("api.example.com:443"),
         );
-        let card = build_approval_card(&display, "abc123");
+        let card = build_approval_card(&display, "abc123", "group:chat:oc_test");
         let content = card
             .pointer("/body/elements/0/content")
             .unwrap()
@@ -372,7 +376,7 @@ mod tests {
 
     #[test]
     fn build_skill_confirm_card_structure() {
-        let card = build_skill_confirm_card("weather", "tok_123");
+        let card = build_skill_confirm_card("weather", "tok_123", "group:chat:oc_test");
         let elements = card.pointer("/body/elements").unwrap().as_array().unwrap();
         assert_eq!(elements.len(), 2);
         let columns = elements[1].pointer("/columns").unwrap().as_array().unwrap();

@@ -48,11 +48,14 @@ impl FeishuAdapter {
             .map(|m| !m.is_empty())
             .unwrap_or(false);
 
+        let conversation_scope =
+            feishu_scope(&event.event.message.chat_id, &event.event.message.chat_type);
+
         InboundMessage {
             trace_id: Uuid::new_v4(),
             channel_type: "feishu".to_string(),
             connector_id: self.connector_id.clone(),
-            conversation_scope: format!("chat:{}", event.event.message.chat_id),
+            conversation_scope,
             user_scope: format!("user:{}", event.event.sender.sender_id.open_id),
             text,
             at: Utc::now(),
@@ -72,6 +75,7 @@ pub struct FeishuBot {
     pub(crate) connector_id: String,
     gateway: Arc<Gateway>,
     bus: Arc<EventBus>,
+    require_mention: bool,
 }
 
 impl FeishuBot {
@@ -88,7 +92,13 @@ impl FeishuBot {
             connector_id: connector_id.into(),
             gateway,
             bus,
+            require_mention: true,
         }
+    }
+
+    pub fn with_require_mention(mut self, require: bool) -> Self {
+        self.require_mention = require;
+        self
     }
 
     pub async fn run_impl(self) -> Result<()> {
@@ -96,6 +106,25 @@ impl FeishuBot {
 
         client.refresh_token().await?;
         client.spawn_token_refresh();
+
+        let bot_open_id = match client.get_bot_open_id().await {
+            Ok(id) => {
+                tracing::info!(
+                    target: "clawhive::channel::feishu",
+                    bot_open_id = %id,
+                    "fetched bot identity"
+                );
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "clawhive::channel::feishu",
+                    error = %e,
+                    "failed to fetch bot open_id, mention filtering may be inaccurate"
+                );
+                None
+            }
+        };
 
         let adapter = Arc::new(FeishuAdapter::new(&self.connector_id));
 
@@ -126,8 +155,13 @@ impl FeishuBot {
             "feishu bot starting WebSocket connection"
         );
 
+        let bot_open_id = Arc::new(bot_open_id);
+
         loop {
-            match self.connect_and_listen(&client, &adapter).await {
+            match self
+                .connect_and_listen(&client, &adapter, &bot_open_id)
+                .await
+            {
                 Ok(()) => {
                     tracing::info!(
                         target: "clawhive::channel::feishu",
@@ -150,6 +184,7 @@ impl FeishuBot {
         &self,
         client: &Arc<FeishuClient>,
         adapter: &Arc<FeishuAdapter>,
+        bot_open_id: &Arc<Option<String>>,
     ) -> Result<()> {
         let (wss_url, config) = client.get_ws_endpoint().await?;
 
@@ -184,7 +219,7 @@ impl FeishuBot {
                     match msg {
                         Some(Ok(WsMessage::Binary(data))) => {
                             if let Ok(frame) = Frame::decode(&data[..]) {
-                                let ack = self.handle_frame(&frame, adapter, client).await;
+                                let ack = self.handle_frame(&frame, adapter, client, bot_open_id).await;
                                 if let Some(ack_bytes) = ack {
                                     if let Err(e) = write.send(WsMessage::Binary(ack_bytes.into())).await {
                                         tracing::error!(target: "clawhive::channel::feishu", error = %e, "failed to send ACK");
@@ -195,7 +230,7 @@ impl FeishuBot {
                         }
                         Some(Ok(WsMessage::Text(data))) => {
                             if let Ok(frame) = Frame::decode(data.as_bytes()) {
-                                let ack = self.handle_frame(&frame, adapter, client).await;
+                                let ack = self.handle_frame(&frame, adapter, client, bot_open_id).await;
                                 if let Some(ack_bytes) = ack {
                                     if let Err(e) = write.send(WsMessage::Binary(ack_bytes.into())).await {
                                         tracing::error!(target: "clawhive::channel::feishu", error = %e, "failed to send ACK");
@@ -231,6 +266,7 @@ impl FeishuBot {
         frame: &Frame,
         adapter: &Arc<FeishuAdapter>,
         client: &Arc<FeishuClient>,
+        bot_open_id: &Arc<Option<String>>,
     ) -> Option<Vec<u8>> {
         let frame_type = frame.get_header("type").unwrap_or("");
 
@@ -256,7 +292,8 @@ impl FeishuBot {
                 match event_type {
                     "im.message.receive_v1" => {
                         if let Ok(event) = serde_json::from_value::<FeishuEvent>(raw) {
-                            self.handle_message_event(&event, adapter, client).await;
+                            self.handle_message_event(&event, adapter, client, bot_open_id)
+                                .await;
                         }
                     }
                     "card.action.trigger" => {
@@ -283,10 +320,35 @@ impl FeishuBot {
         event: &FeishuEvent,
         adapter: &Arc<FeishuAdapter>,
         client: &Arc<FeishuClient>,
+        bot_open_id: &Option<String>,
     ) {
         let chat_id = event.event.message.chat_id.clone();
         let chat_type = event.event.message.chat_type.clone();
         let message_id = event.event.message.message_id.clone();
+        let is_bot_mentioned = event
+            .event
+            .message
+            .mentions
+            .as_ref()
+            .map(|mentions| {
+                mentions.iter().any(|m| {
+                    bot_open_id
+                        .as_ref()
+                        .map(|bid| m.id.open_id == *bid)
+                        .unwrap_or(true) // fallback: treat any mention as bot mention
+                })
+            })
+            .unwrap_or(false);
+
+        if chat_type == "group" && self.require_mention && !is_bot_mentioned {
+            tracing::debug!(
+                target: "clawhive::channel::feishu",
+                %chat_id,
+                %message_id,
+                "feishu inbound skipped: group message without mention"
+            );
+            return;
+        }
 
         let attachments = Self::download_inbound_attachments(event, client).await;
         let inbound = adapter.to_inbound(event, attachments);
@@ -534,12 +596,17 @@ impl FeishuBot {
         let chat_id = event.event.context.open_chat_id.clone();
         let user_id = event.event.operator.open_id.clone();
         let msg_id = event.event.context.open_message_id.clone();
+        let conversation_scope = action_value
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("chat:{chat_id}"));
 
         let inbound = InboundMessage {
             trace_id: Uuid::new_v4(),
             channel_type: "feishu".to_string(),
             connector_id: self.connector_id.clone(),
-            conversation_scope: format!("chat:{chat_id}"),
+            conversation_scope,
             user_scope: format!("user:{user_id}"),
             text: format!("/approve {short_id} {decision}"),
             at: Utc::now(),
@@ -595,6 +662,11 @@ impl FeishuBot {
         let chat_id = event.event.context.open_chat_id.clone();
         let user_id = event.event.operator.open_id.clone();
         let msg_id = event.event.context.open_message_id.clone();
+        let conversation_scope = action_value
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("chat:{chat_id}"));
 
         if action_type == "skill_cancel" {
             let card = serde_json::json!({
@@ -611,7 +683,7 @@ impl FeishuBot {
             trace_id: Uuid::new_v4(),
             channel_type: "feishu".to_string(),
             connector_id: self.connector_id.clone(),
-            conversation_scope: format!("chat:{chat_id}"),
+            conversation_scope,
             user_scope: format!("user:{user_id}"),
             text: format!("/skill confirm {token}"),
             at: Utc::now(),
@@ -700,6 +772,26 @@ impl crate::ChannelBot for FeishuBot {
     }
 }
 
+/// Build conversation_scope for feishu based on chat_type.
+/// - `"p2p"` → `dm:{chat_id}`
+/// - `"group"` (and others) → `group:chat:{chat_id}`
+pub(crate) fn feishu_scope(chat_id: &str, chat_type: &str) -> String {
+    match chat_type {
+        "p2p" => format!("dm:{chat_id}"),
+        _ => format!("group:chat:{chat_id}"),
+    }
+}
+
+/// Extract the raw feishu chat_id from any conversation_scope format.
+/// Handles: `group:chat:{id}`, `dm:{id}`, `chat:{id}` (legacy).
+pub(crate) fn parse_feishu_chat_id(scope: &str) -> &str {
+    scope
+        .strip_prefix("group:chat:")
+        .or_else(|| scope.strip_prefix("dm:"))
+        .or_else(|| scope.strip_prefix("chat:"))
+        .unwrap_or(scope)
+}
+
 fn detect_image_mime(bytes: &[u8]) -> &'static str {
     match bytes {
         [0x89, 0x50, 0x4E, 0x47, ..] => "image/png",
@@ -721,7 +813,7 @@ mod tests {
         let inbound = adapter.to_inbound(&event, vec![]);
         assert_eq!(inbound.channel_type, "feishu");
         assert_eq!(inbound.connector_id, "feishu-main");
-        assert_eq!(inbound.conversation_scope, "chat:oc_chat1");
+        assert_eq!(inbound.conversation_scope, "group:chat:oc_chat1");
         assert_eq!(inbound.text, "hello world");
     }
 
@@ -758,6 +850,40 @@ mod tests {
             0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
         ];
         assert_eq!(detect_image_mime(&webp), "image/webp");
+    }
+
+    #[test]
+    fn feishu_scope_group() {
+        assert_eq!(feishu_scope("oc_123", "group"), "group:chat:oc_123");
+    }
+
+    #[test]
+    fn feishu_scope_dm() {
+        assert_eq!(feishu_scope("oc_456", "p2p"), "dm:oc_456");
+    }
+
+    #[test]
+    fn parse_feishu_chat_id_group() {
+        assert_eq!(parse_feishu_chat_id("group:chat:oc_123"), "oc_123");
+    }
+
+    #[test]
+    fn parse_feishu_chat_id_dm() {
+        assert_eq!(parse_feishu_chat_id("dm:oc_456"), "oc_456");
+    }
+
+    #[test]
+    fn parse_feishu_chat_id_legacy() {
+        assert_eq!(parse_feishu_chat_id("chat:oc_789"), "oc_789");
+    }
+
+    #[test]
+    fn adapter_to_inbound_dm_scope() {
+        let adapter = FeishuAdapter::new("feishu-main");
+        let mut event = make_test_event("oc_chat1", "ou_user1", "om_msg1", "hi");
+        event.event.message.chat_type = "p2p".to_string();
+        let inbound = adapter.to_inbound(&event, vec![]);
+        assert_eq!(inbound.conversation_scope, "dm:oc_chat1");
     }
 
     fn make_test_event(chat_id: &str, user_id: &str, msg_id: &str, text: &str) -> FeishuEvent {

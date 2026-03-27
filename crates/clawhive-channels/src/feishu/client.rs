@@ -97,6 +97,23 @@ impl FeishuClient {
         Ok(())
     }
 
+    pub async fn get_bot_open_id(&self) -> Result<String> {
+        let token = self.get_token().await;
+        let resp = self
+            .http
+            .get(format!("{FEISHU_BASE_URL}/bot/v3/info/"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        resp.pointer("/bot/open_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("feishu: missing bot open_id in /bot/v3/info response"))
+    }
+
     async fn get_token(&self) -> String {
         {
             let guard = self.token.read().await;
