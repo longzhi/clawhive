@@ -337,6 +337,8 @@ fn add_channel_to_config(
                 connector_id: cfg.connector_id.clone(),
                 token: cfg.token.clone(),
                 require_mention: cfg.require_mention,
+                allow_from: vec![],
+                dm_policy: "allowlist".to_string(),
             };
             match main_cfg.channels.telegram.as_mut() {
                 Some(tg) => {
@@ -813,6 +815,8 @@ fn generate_main_yaml(
                 connector_id: tg.connector_id,
                 token: tg.token,
                 require_mention: tg.require_mention,
+                allow_from: vec![],
+                dm_policy: "allowlist".to_string(),
             }],
         });
     }

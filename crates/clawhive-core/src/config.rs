@@ -68,6 +68,10 @@ pub struct TelegramConnectorConfig {
     pub token: String,
     #[serde(default = "default_true")]
     pub require_mention: bool,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_dm_policy")]
+    pub dm_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -849,6 +853,10 @@ fn resolve_main_env(main: &mut MainConfig) {
         for connector in &mut telegram.connectors {
             connector.connector_id = resolve_env_var(&connector.connector_id);
             connector.token = resolve_env_var(&connector.token);
+            connector.dm_policy = resolve_env_var(&connector.dm_policy);
+            for allow_from in &mut connector.allow_from {
+                *allow_from = resolve_env_var(allow_from);
+            }
         }
     }
 
