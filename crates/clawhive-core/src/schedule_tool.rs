@@ -516,6 +516,7 @@ impl ToolExecutor for ScheduleTool {
                     Ok(c) => c,
                     Err(e) => return Ok(tool_error(format!("Invalid job: {e}"))),
                 };
+
                 self.manager.add_schedule(config.clone()).await?;
                 let next = self.manager.get_next_run(&config.schedule_id).await;
 

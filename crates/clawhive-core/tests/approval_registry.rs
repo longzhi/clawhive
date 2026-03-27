@@ -145,3 +145,28 @@ async fn network_allow_pattern_with_wildcard_port() {
     assert!(reg.is_network_allowed("main", "api.example.com", 80).await);
     assert!(!reg.is_network_allowed("main", "other.com", 443).await);
 }
+
+#[tokio::test]
+async fn runtime_allow_matches_env_prefixed_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_allowlist.json");
+
+    let reg = ApprovalRegistry::with_persistence(path);
+    reg.add_runtime_allow_pattern("main", "printf *".into())
+        .await;
+
+    assert!(reg.is_runtime_allowed("main", "FOO=bar printf hello").await);
+    assert!(reg.is_runtime_allowed("main", "printf hello").await);
+}
+
+#[tokio::test]
+async fn runtime_allow_matches_absolute_and_bare_program_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_allowlist.json");
+
+    let reg = ApprovalRegistry::with_persistence(path);
+    reg.add_runtime_allow_pattern("main", "git *".into()).await;
+
+    assert!(reg.is_runtime_allowed("main", "/usr/bin/git status").await);
+    assert!(reg.is_runtime_allowed("main", "git status").await);
+}

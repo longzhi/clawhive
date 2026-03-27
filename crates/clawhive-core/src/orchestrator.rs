@@ -2115,6 +2115,7 @@ impl Orchestrator {
             } else {
                 ctx
             };
+            let ctx = ctx.with_scheduled_task(is_scheduled_task);
 
             // Execute tools in parallel
             let tool_futures: Vec<_> = tool_uses

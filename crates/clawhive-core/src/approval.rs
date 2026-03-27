@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clawhive_schema::ApprovalDecision;
+use clawhive_schema::{approval_program, ApprovalDecision};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
@@ -224,16 +224,12 @@ impl ApprovalRegistry {
 }
 
 fn pattern_matches(pattern: &str, command: &str) -> bool {
-    let first_token = command.split_whitespace().next().unwrap_or("");
-    let basename = std::path::Path::new(first_token)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(first_token);
+    let program = approval_program(command);
 
     if let Some(prefix) = pattern.strip_suffix(" *") {
-        basename == prefix || first_token == prefix
+        program == prefix
     } else {
-        command.eq_ignore_ascii_case(pattern) || basename == pattern
+        command.eq_ignore_ascii_case(pattern) || program == pattern
     }
 }
 

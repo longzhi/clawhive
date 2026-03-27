@@ -58,6 +58,8 @@ pub struct ToolContext {
     attachment_collector: Option<Arc<Mutex<Vec<Attachment>>>>,
     /// The agent that is currently executing this tool
     agent_id: Option<String>,
+    /// Whether this execution is from a scheduled task (auto-approve non-HardBaseline approvals)
+    is_scheduled_task: bool,
 }
 
 impl ToolContext {
@@ -81,6 +83,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -97,6 +100,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -115,6 +119,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -134,6 +139,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -153,6 +159,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -176,6 +183,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -196,6 +204,7 @@ impl ToolContext {
             skill_registry: None,
             attachment_collector: None,
             agent_id: None,
+            is_scheduled_task: false,
         }
     }
 
@@ -263,6 +272,11 @@ impl ToolContext {
         self
     }
 
+    pub fn with_scheduled_task(mut self, val: bool) -> Self {
+        self.is_scheduled_task = val;
+        self
+    }
+
     // ============================================================
     // Accessors
     // ============================================================
@@ -307,6 +321,10 @@ impl ToolContext {
 
     pub fn agent_id(&self) -> Option<&str> {
         self.agent_id.as_deref()
+    }
+
+    pub fn is_scheduled_task(&self) -> bool {
+        self.is_scheduled_task
     }
 
     /// Get recent messages up to a limit.

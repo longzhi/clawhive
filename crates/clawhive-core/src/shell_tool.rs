@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use clawhive_bus::BusPublisher;
 use clawhive_provider::ToolDef;
-use clawhive_schema::{ApprovalDecision, BusMessage};
+use clawhive_schema::{approval_program, ApprovalDecision, BusMessage};
 use corral_core::{
     start_broker, BrokerConfig, Permissions, PolicyEngine, Sandbox, SandboxConfig, ServiceHandler,
     ServicePermission,
@@ -100,8 +100,7 @@ impl ExecuteCommandTool {
         match rx.await {
             Ok(ApprovalDecision::AllowOnce) => Ok(None),
             Ok(ApprovalDecision::AlwaysAllow) => {
-                let first_token = command.split_whitespace().next().unwrap_or(command);
-                let pattern = format!("{first_token} *");
+                let pattern = format!("{} *", approval_program(command));
                 registry
                     .add_runtime_allow_pattern(&self.agent_id, pattern.clone())
                     .await;
@@ -729,7 +728,14 @@ impl ToolExecutor for ExecuteCommandTool {
                             });
                         }
                         ExecAskMode::OnMiss | ExecAskMode::Always => {
-                            if let Some(reason) =
+                            if ctx.is_scheduled_task() {
+                                tracing::info!(
+                                    target: "clawhive::audit::exec",
+                                    agent_id = %self.agent_id,
+                                    command = %command,
+                                    "auto-approved: scheduled task execution"
+                                );
+                            } else if let Some(reason) =
                                 self.wait_for_approval(command, source_info).await?
                             {
                                 return Ok(ToolOutput {
@@ -743,7 +749,10 @@ impl ToolExecutor for ExecuteCommandTool {
                             }
                         }
                     }
-                } else if self.exec_security.ask == ExecAskMode::Always {
+                } else if self.exec_security.ask == ExecAskMode::Always
+                    && !runtime_allowed
+                    && !ctx.is_scheduled_task()
+                {
                     if let Some(reason) = self.wait_for_approval(command, source_info).await? {
                         return Ok(ToolOutput {
                             content: reason,
@@ -753,7 +762,14 @@ impl ToolExecutor for ExecuteCommandTool {
                 }
             }
             ExecSecurityMode::Full => {
-                if self.exec_security.ask == ExecAskMode::Always {
+                let runtime_allowed = match self.approval_registry.as_ref() {
+                    Some(registry) => registry.is_runtime_allowed(&self.agent_id, command).await,
+                    None => false,
+                };
+                if self.exec_security.ask == ExecAskMode::Always
+                    && !runtime_allowed
+                    && !ctx.is_scheduled_task()
+                {
                     if let Some(reason) = self.wait_for_approval(command, source_info).await? {
                         return Ok(ToolOutput {
                             content: reason,
@@ -802,7 +818,15 @@ impl ToolExecutor for ExecuteCommandTool {
                 };
 
                 if !is_whitelisted && !is_pkg_manager && !is_runtime_allowed {
-                    if let Some(reason) = self
+                    if ctx.is_scheduled_task() {
+                        tracing::info!(
+                            target: "clawhive::audit::network",
+                            agent_id = %self.agent_id,
+                            host = %host,
+                            port = %port,
+                            "auto-approved: scheduled task network access"
+                        );
+                    } else if let Some(reason) = self
                         .wait_for_network_approval(command, host, *port, source_info)
                         .await?
                     {
@@ -819,17 +843,17 @@ impl ToolExecutor for ExecuteCommandTool {
                             content: reason,
                             is_error: true,
                         });
+                    } else {
+                        tracing::info!(
+                            target: "clawhive::audit::network",
+                            agent_id = %self.agent_id,
+                            tool = "execute_command",
+                            host = %host,
+                            port = %port,
+                            command = %command,
+                            "network access granted"
+                        );
                     }
-
-                    tracing::info!(
-                        target: "clawhive::audit::network",
-                        agent_id = %self.agent_id,
-                        tool = "execute_command",
-                        host = %host,
-                        port = %port,
-                        command = %command,
-                        "network access granted"
-                    );
                 }
             }
         }
@@ -1563,6 +1587,120 @@ mod tests {
         let second_output = second.await.unwrap();
         assert!(!second_output.is_error);
         assert!(second_output.content.contains("persist"));
+    }
+
+    #[tokio::test]
+    async fn always_allow_normalizes_env_prefixed_command() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate.clone(),
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+
+        let first = tokio::spawn(async move {
+            tool.execute(
+                serde_json::json!({"command": "FOO=bar printf normalized"}),
+                &ctx,
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let pending = approval_registry.pending_list().await;
+        let (trace_id, _, _) = pending.first().unwrap();
+        approval_registry
+            .resolve(*trace_id, ApprovalDecision::AlwaysAllow)
+            .await
+            .unwrap();
+        let first_output = first.await.unwrap();
+        assert!(!first_output.is_error);
+
+        let tool_again = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::OnMiss,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx2 = ToolContext::builtin();
+        let second = tokio::spawn(async move {
+            tool_again
+                .execute(serde_json::json!({"command": "printf normalized"}), &ctx2)
+                .await
+                .unwrap()
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !approval_registry.has_pending().await,
+            "normalized command should not require approval"
+        );
+
+        let second_output = second.await.unwrap();
+        assert!(!second_output.is_error);
+        assert!(second_output.content.contains("normalized"));
+    }
+
+    #[tokio::test]
+    async fn ask_always_skips_repeat_prompt_when_runtime_allowed() {
+        let tmp = TempDir::new().unwrap();
+        let gate = make_gate(tmp.path());
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+        approval_registry
+            .add_runtime_allow_pattern("agent-test", "printf *".to_string())
+            .await;
+
+        let tool = ExecuteCommandTool::new(
+            tmp.path().to_path_buf(),
+            10,
+            gate,
+            ExecSecurityConfig {
+                security: ExecSecurityMode::Allowlist,
+                ask: ExecAskMode::Always,
+                allowlist: vec![],
+                safe_bins: vec![],
+            },
+            SandboxPolicyConfig::default(),
+            Some(approval_registry.clone()),
+            None,
+            "agent-test".to_string(),
+        );
+        let ctx = ToolContext::builtin();
+
+        let output = tool
+            .execute(serde_json::json!({"command": "printf no-repeat"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("no-repeat"));
+        assert!(
+            !approval_registry.has_pending().await,
+            "runtime-allowed command should bypass ask=Always"
+        );
     }
 
     #[tokio::test]
