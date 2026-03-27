@@ -159,6 +159,8 @@ export default function SetupPage() {
   const [channelSecret, setChannelSecret] = useState("");
   const [channelRequireMention, setChannelRequireMention] = useState(true);
   const [channelRoutingKinds, setChannelRoutingKinds] = useState<("dm" | "group")[]>(["dm", "group"]);
+  const [channelDmPolicy, setChannelDmPolicy] = useState<"allowlist" | "open">("allowlist");
+  const [channelAllowFrom, setChannelAllowFrom] = useState("");
   const [channelCreated, setChannelCreated] = useState(false);
 
   // Step 4: Web Search
@@ -290,6 +292,9 @@ export default function SetupPage() {
       .map((s) => s.trim())
       .filter(Boolean);
     const hasGroup = channelRoutingKinds.includes("group");
+    const allowFromList = channelKind === "telegram" && channelDmPolicy === "allowlist" && channelAllowFrom
+      ? channelAllowFrom.split(",").map(s => s.trim()).filter(Boolean)
+      : undefined;
     try {
       await addConnector.mutateAsync({
         kind: channelKind,
@@ -300,6 +305,8 @@ export default function SetupPage() {
         ...(channelKind === "wecom" ? { botId: channelBotId, secret: channelSecret } : {}),
         ...(channelKind === "discord" && hasGroup && groups.length > 0 ? { groups } : {}),
         ...(hasGroup ? { requireMention: channelRequireMention } : {}),
+        ...(channelKind === "telegram" ? { dmPolicy: channelDmPolicy } : {}),
+        ...(allowFromList && allowFromList.length > 0 ? { allowFrom: allowFromList } : {}),
       });
 
       // Auto-create routing bindings
@@ -491,6 +498,10 @@ export default function SetupPage() {
               onRequireMentionChange={setChannelRequireMention}
               routingKinds={channelRoutingKinds}
               onRoutingKindsChange={setChannelRoutingKinds}
+              dmPolicy={channelDmPolicy}
+              onDmPolicyChange={setChannelDmPolicy}
+              allowFrom={channelAllowFrom}
+              onAllowFromChange={setChannelAllowFrom}
               onSubmit={handleAddChannel}
               isCreating={addConnector.isPending || updateRouting.isPending}
               isCreated={channelCreated}
@@ -1036,6 +1047,10 @@ function StepChannel({
   onRequireMentionChange,
   routingKinds,
   onRoutingKindsChange,
+  dmPolicy,
+  onDmPolicyChange,
+  allowFrom,
+  onAllowFromChange,
   onSubmit,
   isCreating,
   isCreated,
@@ -1059,6 +1074,10 @@ function StepChannel({
   onRequireMentionChange: (v: boolean) => void;
   routingKinds: RoutingKind[];
   onRoutingKindsChange: (v: RoutingKind[]) => void;
+  dmPolicy: "allowlist" | "open";
+  onDmPolicyChange: (v: "allowlist" | "open") => void;
+  allowFrom: string;
+  onAllowFromChange: (v: string) => void;
   onSubmit: () => void;
   isCreating: boolean;
   isCreated: boolean;
@@ -1178,6 +1197,56 @@ function StepChannel({
               </div>
             )}
 
+            {/* DM Access Policy: Telegram only */}
+            {kind === "telegram" && (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  DM Access Policy
+                </label>
+                <div className="mt-1.5 flex gap-2">
+                  {([
+                    { label: "Allowlist (recommended)", value: "allowlist" as const },
+                    { label: "Open", value: "open" as const },
+                  ]).map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => { if (!isCreated) onDmPolicyChange(opt.value); }}
+                      disabled={isCreated}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
+                        dmPolicy === opt.value
+                          ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
+                          : "border-border hover:border-primary/40"
+                      } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {dmPolicy === "open" && (
+                  <p className="text-xs text-amber-600 mt-1">Anyone who finds your bot can chat with it.</p>
+                )}
+              </div>
+            )}
+
+            {/* Allow From: Telegram + allowlist only */}
+            {kind === "telegram" && dmPolicy === "allowlist" && (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Allowed User IDs
+                </label>
+                <Input
+                  placeholder="Your Telegram user ID (comma-separated for multiple)"
+                  value={allowFrom}
+                  onChange={(e) => onAllowFromChange(e.target.value)}
+                  disabled={isCreated}
+                  className="mt-1.5"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Comma-separated Telegram user IDs. Use @userinfobot to find your ID.
+                </p>
+              </div>
+            )}
+
             {/* Message routing kind selector */}
             <div>
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -1269,6 +1338,7 @@ function StepChannel({
                     if (kind === "feishu") return !appId || !appSecret;
                     if (kind === "dingtalk") return !clientId || !clientSecret;
                     if (kind === "wecom") return !botId || !secret;
+                    if (kind === "telegram" && dmPolicy === "allowlist" && !allowFrom.trim()) return true;
                     return !token;
                   })()}
                 >
