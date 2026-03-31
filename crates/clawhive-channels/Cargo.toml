@@ -34,10 +34,10 @@ teloxide = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 serenity = { workspace = true, optional = true }
 slack-morphism = { version = "2.18", default-features = false, features = ["hyper"], optional = true }
-whatsapp-rust = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+whatsapp-rust = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-native", "ureq-client"], optional = true }
 whatsapp-rust-tokio-transport = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
 whatsapp-rust-ureq-http-client = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
-wacore = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
+wacore = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", default-features = false, optional = true }
 whatsapp-rust-sqlite-storage = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
 waproto = { git = "https://github.com/longzhi/whatsapp-rust.git", branch = "main", optional = true }
 base64 = "0.22.1"

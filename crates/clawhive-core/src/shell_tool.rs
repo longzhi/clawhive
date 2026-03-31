@@ -1022,7 +1022,11 @@ impl ToolExecutor for ExecuteCommandTool {
                 }
 
                 if combined.len() > MAX_OUTPUT_BYTES {
-                    combined.truncate(MAX_OUTPUT_BYTES);
+                    let mut truncate_at = MAX_OUTPUT_BYTES;
+                    while truncate_at > 0 && !combined.is_char_boundary(truncate_at) {
+                        truncate_at -= 1;
+                    }
+                    combined.truncate(truncate_at);
                     combined.push_str("\n...(output truncated)");
                 }
 

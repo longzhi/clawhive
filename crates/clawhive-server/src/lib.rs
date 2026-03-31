@@ -282,6 +282,9 @@ mod tests {
                 gateway: None,
                 web_password_hash: Arc::new(std::sync::RwLock::new(web_password_hash)),
                 session_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+                whatsapp_pairing: Arc::new(
+                    std::sync::RwLock::new(std::collections::HashMap::new()),
+                ),
                 pending_openai_oauth: Arc::new(std::sync::RwLock::new(
                     std::collections::HashMap::new(),
                 )),

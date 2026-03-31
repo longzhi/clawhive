@@ -91,7 +91,7 @@ function AddChannelDialog({
   const handleSubmit = async () => {
     if (!selectedKind || !connectorId) return;
     const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(selectedKind);
-    const isQrChannel = selectedKind === "weixin";
+    const isQrChannel = selectedKind === "weixin" || selectedKind === "whatsapp";
     if (!isChineseChannel && !isQrChannel && !token) return;
     setSubmitting(true);
     try {
@@ -109,6 +109,10 @@ function AddChannelDialog({
         ...(selectedKind === "wecom" ? { botId: botIdField, secret: secretField } : {}),
         ...(selectedKind === "telegram" ? { dmPolicy } : {}),
         ...(selectedKind === "telegram" && dmPolicy === "allowlist" && allowFromField
+          ? { allowFrom: allowFromField.split(",").map(s => s.trim()).filter(Boolean) }
+          : {}),
+        ...(selectedKind === "whatsapp" ? { dmPolicy } : {}),
+        ...(selectedKind === "whatsapp" && dmPolicy === "allowlist" && allowFromField
           ? { allowFrom: allowFromField.split(",").map(s => s.trim()).filter(Boolean) }
           : {}),
       });
@@ -215,6 +219,48 @@ function AddChannelDialog({
               <p className="text-sm text-muted-foreground">
                 No credentials needed. After adding, click the QR login button to scan with WeChat.
               </p>
+            ) : selectedKind === "whatsapp" ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  No credentials needed. After adding, use the Pair Device button to scan the QR code with WhatsApp.
+                </p>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">DM Access Policy</label>
+                  <div className="mt-1.5 flex gap-2">
+                    {([
+                      { label: "Allowlist (recommended)", value: "allowlist" as const },
+                      { label: "Open", value: "open" as const },
+                    ]).map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setDmPolicy(opt.value)}
+                        className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
+                          dmPolicy === opt.value
+                            ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
+                            : "border-border hover:border-primary/40"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  {dmPolicy === "open" && (
+                    <p className="text-xs text-amber-600 mt-1">Anyone who messages your number can chat with the bot.</p>
+                  )}
+                </div>
+                {dmPolicy === "allowlist" && (
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Allowed Phone Numbers</label>
+                    <Input
+                      placeholder="+1234567890, +0987654321"
+                      value={allowFromField}
+                      onChange={(e) => setAllowFromField(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">Comma-separated phone numbers with country code.</p>
+                  </div>
+                )}
+              </>
             ) : (
               <div>
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Bot Token</label>
@@ -279,6 +325,7 @@ function AddChannelDialog({
               if (selectedKind === "dingtalk") return !clientId || !clientSecret;
               if (selectedKind === "wecom") return !botIdField || !secretField;
               if (selectedKind === "weixin") return false;
+              if (selectedKind === "whatsapp") return false;
               return !token;
             })()}
           >
@@ -347,11 +394,16 @@ function WeixinQrLogin({ connectorId, status }: { connectorId: string; status: s
     return () => { cancelled = true; };
   }, [polling, qrToken, connectorId]);
 
-  if (status === "connected") {
+  if (status === "connected" && !qrUrl && !polling) {
     return (
-      <Badge variant="outline" className="w-fit text-[10px] text-green-600 border-green-200 bg-green-50">
-        Session active
-      </Badge>
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className="w-fit text-[10px] text-green-600 border-green-200 bg-green-50">
+          Session active
+        </Badge>
+        <Button size="sm" variant="ghost" className="h-6 text-[10px] px-2" onClick={startQrLogin}>
+          Re-login
+        </Button>
+      </div>
     );
   }
 
@@ -371,6 +423,104 @@ function WeixinQrLogin({ connectorId, status }: { connectorId: string; status: s
         <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={startQrLogin}>
           <Key className="h-3.5 w-3.5" />
           QR Login
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp QR Pair Component
+// ---------------------------------------------------------------------------
+function WhatsAppQrPair({ connectorId, status }: { connectorId: string; status: string }) {
+  const [qrData, setQrData] = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
+  const [pairStatus, setPairStatus] = useState<string | null>(null);
+
+  const startPairing = async () => {
+    setPairStatus(null);
+    try {
+      const res = await fetch(`/api/channels/whatsapp/qr-pair?connector_id=${encodeURIComponent(connectorId)}`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setPolling(true);
+    } catch {
+      toast.error("Failed to start WhatsApp pairing");
+    }
+  };
+
+  useEffect(() => {
+    if (!polling) return;
+    let cancelled = false;
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/channels/whatsapp/qr-status?connector_id=${encodeURIComponent(connectorId)}`);
+          if (!res.ok) break;
+          const data = await res.json();
+
+          if (data.status === "qr_ready" && data.qr_data) {
+            setQrData(data.qr_data);
+          }
+          if (data.status === "paired") {
+            setPairStatus("paired");
+            setPolling(false);
+            setQrData(null);
+            toast.success("WhatsApp paired successfully!");
+            return;
+          }
+          if (data.status === "already_paired") {
+            setPairStatus("already_paired");
+            setPolling(false);
+            setQrData(null);
+            toast.success("WhatsApp already paired");
+            return;
+          }
+          if (data.status === "failed" || data.status === "expired") {
+            setPairStatus(data.status);
+            setPolling(false);
+            setQrData(null);
+            toast.error("WhatsApp pairing failed, try again");
+            return;
+          }
+          await new Promise(r => setTimeout(r, 2000));
+        } catch {
+          break;
+        }
+      }
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, [polling, connectorId]);
+
+  if (status === "connected" && !qrData && !polling) {
+    return (
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className="w-fit text-[10px] text-green-600 border-green-200 bg-green-50">
+          Session active
+        </Badge>
+        <Button size="sm" variant="ghost" className="h-6 text-[10px] px-2" onClick={startPairing}>
+          Re-pair
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {qrData ? (
+        <div className="flex flex-col items-center gap-2 py-2">
+          <div className="rounded-lg border p-3 bg-white">
+            <QRCodeSVG value={qrData} size={176} />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {polling ? "Scan with WhatsApp \u2192 Linked Devices \u2192 Link a Device" : pairStatus === "paired" ? "Paired!" : "Waiting..."}
+          </p>
+          {polling && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+        </div>
+      ) : (
+        <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={startPairing} disabled={polling}>
+          <Key className="h-3.5 w-3.5" />
+          {polling ? "Connecting..." : "Pair Device"}
         </Button>
       )}
     </div>
@@ -553,6 +703,8 @@ export default function ChannelsPage() {
                       </div>
                       {key === "weixin" ? (
                         <WeixinQrLogin connectorId={connector.connector_id} status={runtimeStatus} />
+                      ) : key === "whatsapp" ? (
+                        <WhatsAppQrPair connectorId={connector.connector_id} status={runtimeStatus} />
                       ) : (
                       <div className="flex flex-col gap-1">
                         <div className="flex items-center gap-2">

@@ -76,6 +76,10 @@ export function AddConnectorDialog({ kind, label, onAdded }: AddConnectorDialogP
         ...(kind === "telegram" && values.dmPolicy === "allowlist" && values.allowFrom
           ? { allowFrom: values.allowFrom.split(",").map(s => s.trim()).filter(Boolean) }
           : {}),
+        ...(kind === "whatsapp" ? { dmPolicy: values.dmPolicy } : {}),
+        ...(kind === "whatsapp" && values.dmPolicy === "allowlist" && values.allowFrom
+          ? { allowFrom: values.allowFrom.split(",").map(s => s.trim()).filter(Boolean) }
+          : {}),
       });
       toast.success(`${label} connector added`);
       onAdded?.();
@@ -212,6 +216,44 @@ export function AddConnectorDialog({ kind, label, onAdded }: AddConnectorDialogP
               <p className="text-sm text-muted-foreground py-2">
                 No credentials needed. After adding, use the QR Login button to scan with WeChat.
               </p>
+            ) : kind === "whatsapp" ? (
+              <>
+                <p className="text-sm text-muted-foreground py-2">
+                  No credentials needed. After adding, use the Pair Device button to scan the QR code with WhatsApp.
+                </p>
+                <FormField
+                  control={form.control}
+                  name="dmPolicy"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>DM Access Policy</FormLabel>
+                      <FormControl>
+                        <select {...field} className="w-full rounded-md border px-3 py-2 text-sm">
+                          <option value="allowlist">Allowlist (recommended)</option>
+                          <option value="open">Open</option>
+                        </select>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                {form.watch("dmPolicy") === "allowlist" && (
+                  <FormField
+                    control={form.control}
+                    name="allowFrom"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Allowed Phone Numbers</FormLabel>
+                        <FormControl>
+                          <Input placeholder="+1234567890, +0987654321" {...field} />
+                        </FormControl>
+                        <p className="text-xs text-muted-foreground">Comma-separated phone numbers with country code.</p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
+              </>
             ) : (
               <FormField
                 control={form.control}

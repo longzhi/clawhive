@@ -15,8 +15,8 @@ use waproto::whatsapp as wa;
 use waproto::whatsapp::message::{DocumentMessage, ImageMessage};
 use whatsapp_rust::bot::Bot;
 use whatsapp_rust::client::Client;
-use whatsapp_rust::upload::UploadResponse;
-use whatsapp_rust::Jid;
+use whatsapp_rust::upload::{UploadOptions, UploadResponse};
+use whatsapp_rust::{Jid, TokioRuntime};
 use whatsapp_rust_sqlite_storage::SqliteStore;
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
@@ -142,6 +142,7 @@ pub async fn run_pairing(
         .with_backend(backend)
         .with_transport_factory(TokioWebSocketTransportFactory::new())
         .with_http_client(UreqHttpClient::new())
+        .with_runtime(TokioRuntime)
         .skip_history_sync()
         .on_event(move |event, _client| {
             let tx = tx_event.clone();
@@ -191,6 +192,7 @@ pub async fn start_whatsapp(
         .with_backend(backend)
         .with_transport_factory(TokioWebSocketTransportFactory::new())
         .with_http_client(UreqHttpClient::new())
+        .with_runtime(TokioRuntime)
         .skip_history_sync()
         .on_event(move |event, client| {
             let gateway = gateway_for_bot.clone();
@@ -233,12 +235,49 @@ pub async fn start_whatsapp(
                         let sender_jid = info.source.sender.to_string();
                         let is_group = chat_jid.ends_with("@g.us");
 
+                        if !is_group && !is_self_chat {
+                            let sender_user = extract_number_from_jid(&sender_jid);
+                            let chat_user = extract_number_from_jid(&chat_jid);
+                            if sender_user != chat_user {
+                                return;
+                            }
+                        }
+
+                        let policy_jid = if sender_jid.ends_with("@lid") {
+                            let lid_user = extract_number_from_jid(&sender_jid);
+                            if let Some(phone) = client.get_phone_number_from_lid(&lid_user).await {
+                                tracing::info!(
+                                    lid = %lid_user,
+                                    resolved_phone = %phone,
+                                    "LID resolved to phone number"
+                                );
+                                format!("{phone}@s.whatsapp.net")
+                            } else {
+                                tracing::info!(
+                                    lid = %lid_user,
+                                    "LID not found in cache, using raw sender_jid"
+                                );
+                                sender_jid.clone()
+                            }
+                        } else {
+                            sender_jid.clone()
+                        };
+
                         if !is_self_chat {
                             let allowed = if is_group {
-                                policy.is_allowed_group(&sender_jid)
+                                policy.is_allowed_group(&policy_jid)
                             } else {
-                                policy.is_allowed_dm(&sender_jid)
+                                policy.is_allowed_dm(&policy_jid)
                             };
+
+                            tracing::info!(
+                                sender = %sender_jid,
+                                policy_jid = %policy_jid,
+                                allowed,
+                                dm_policy = %policy.dm_policy,
+                                allow_from = ?policy.allow_from,
+                                "access policy check"
+                            );
 
                             if !allowed {
                                 tracing::info!(
@@ -663,7 +702,9 @@ async fn send_attachment(
     let bytes = resolve_attachment_bytes(att).await?;
     let media_type = attachment_media_type(att.kind.clone());
 
-    let upload = client.upload(bytes, media_type).await?;
+    let upload = client
+        .upload(bytes, media_type, UploadOptions::default())
+        .await?;
     let message = build_attachment_message(att, upload, caption);
 
     client.send_message(chat_jid.clone(), message).await?;
@@ -687,6 +728,7 @@ mod tests {
             file_enc_sha256: vec![4, 5, 6],
             file_sha256: vec![7, 8, 9],
             file_length: 42,
+            media_key_timestamp: 0,
         }
     }
 

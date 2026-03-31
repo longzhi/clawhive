@@ -41,7 +41,7 @@ clawhive-runtime = { path = "../clawhive-runtime" }
 clawhive-tui = { path = "../clawhive-tui" }
 clawhive-auth = { path = "../clawhive-auth" }
 clawhive-scheduler = { path = "../clawhive-scheduler" }
-clawhive-server = { path = "../clawhive-server" }
+clawhive-server = { path = "../clawhive-server", features = ["whatsapp"] }
 semver.workspace = true
 sha2.workspace = true
 self-replace.workspace = true

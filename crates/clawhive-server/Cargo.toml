@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+whatsapp = ["clawhive-channels/whatsapp"]
+
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true

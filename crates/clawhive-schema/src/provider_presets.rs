@@ -64,8 +64,11 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.openai.com/v1",
         needs_key: true,
         needs_base_url: false,
-        default_model: "gpt-5.2",
+        default_model: "gpt-5.4",
         models: &[
+            m("gpt-5.4", 200_000, 16384, false, true),
+            m("gpt-5.4-mini", 200_000, 16384, false, true),
+            m("gpt-5.3", 200_000, 16384, false, true),
             m("gpt-5.2", 200_000, 16384, false, true),
             m("gpt-5.2-pro", 200_000, 32768, false, true),
             m("gpt-5", 128_000, 16384, false, true),
@@ -80,8 +83,16 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://chatgpt.com/backend-api/codex",
         needs_key: false,
         needs_base_url: false,
-        default_model: "gpt-5.3-codex",
-        models: &[m("gpt-5.3-codex", 200_000, 16384, false, false)],
+        default_model: "gpt-5.4",
+        models: &[
+            m("gpt-5.4", 200_000, 16384, false, false),
+            m("gpt-5.4-mini", 200_000, 16384, false, false),
+            m("gpt-5.3-codex", 200_000, 16384, false, false),
+            m("gpt-5.2-codex", 200_000, 16384, false, false),
+            m("gpt-5.2", 200_000, 16384, false, false),
+            m("gpt-5.1-codex-max", 200_000, 32768, false, false),
+            m("gpt-5.1-codex-mini", 200_000, 16384, false, false),
+        ],
     },
     ProviderPreset {
         id: "azure-openai",
@@ -89,8 +100,10 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://<your-resource>.openai.azure.com/openai/v1",
         needs_key: true,
         needs_base_url: true,
-        default_model: "gpt-5.3-codex",
+        default_model: "gpt-5.4",
         models: &[
+            m("gpt-5.4", 200_000, 16384, false, true),
+            m("gpt-5.4-mini", 200_000, 16384, false, true),
             m("gpt-5.3-codex", 200_000, 16384, false, false),
             m("gpt-5.2", 200_000, 16384, false, true),
             m("gpt-5.2-codex", 200_000, 16384, false, false),
@@ -156,6 +169,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         needs_base_url: false,
         default_model: "anthropic/claude-sonnet-4-6",
         models: &[
+            m("openai/gpt-5.4", 200_000, 16384, false, true),
             m("openai/gpt-5.3-codex", 200_000, 16384, false, false),
             m("anthropic/claude-opus-4-6", 200_000, 32768, false, true),
             m("google/gemini-2.5-pro", 1_000_000, 65536, false, true),
@@ -351,6 +365,9 @@ mod tests {
         assert_eq!(
             models,
             vec![
+                "openai/gpt-5.4",
+                "openai/gpt-5.4-mini",
+                "openai/gpt-5.3",
                 "openai/gpt-5.2",
                 "openai/gpt-5.2-pro",
                 "openai/gpt-5",
@@ -377,8 +394,19 @@ mod tests {
     }
 
     #[test]
-    fn provider_models_for_openai_chatgpt_returns_codex_model() {
+    fn provider_models_for_openai_chatgpt_returns_codex_models() {
         let models = provider_models_for_id("openai-chatgpt");
-        assert_eq!(models, vec!["openai-chatgpt/gpt-5.3-codex"]);
+        assert_eq!(
+            models,
+            vec![
+                "openai-chatgpt/gpt-5.4",
+                "openai-chatgpt/gpt-5.4-mini",
+                "openai-chatgpt/gpt-5.3-codex",
+                "openai-chatgpt/gpt-5.2-codex",
+                "openai-chatgpt/gpt-5.2",
+                "openai-chatgpt/gpt-5.1-codex-max",
+                "openai-chatgpt/gpt-5.1-codex-mini",
+            ]
+        );
     }
 }

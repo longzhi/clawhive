@@ -8,10 +8,14 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::state::AppState;
+#[cfg(feature = "whatsapp")]
+use crate::state::WhatsAppPairSession;
 use crate::webhook_auth::{generate_api_key, hash_api_key};
+#[cfg(feature = "whatsapp")]
+use std::time::Instant;
 
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/", get(get_channels).put(update_channels))
         .route("/status", get(get_channels_status))
         .route(
@@ -29,7 +33,14 @@ pub fn router() -> Router<AppState> {
         .route("/{kind}/connectors", post(add_connector))
         .route("/{kind}/connectors/{id}", delete(remove_connector))
         .route("/weixin/qr-login", post(weixin_qr_login))
-        .route("/weixin/qr-status", get(weixin_qr_status))
+        .route("/weixin/qr-status", get(weixin_qr_status));
+
+    #[cfg(feature = "whatsapp")]
+    let router = router
+        .route("/whatsapp/qr-pair", post(whatsapp_qr_pair))
+        .route("/whatsapp/qr-status", get(whatsapp_qr_status));
+
+    router
 }
 
 #[derive(Serialize)]
@@ -200,7 +211,24 @@ async fn get_channels_status(
                         && !bot_id.starts_with("${")
                         && !secret.starts_with("${")
                 }
-                "whatsapp" | "imessage" | "weixin" => true,
+                "whatsapp" => {
+                    // Check if session DB exists (paired)
+                    let db_path = state
+                        .root
+                        .join("data")
+                        .join(format!("whatsapp-{connector_id}.db"));
+                    db_path.exists()
+                }
+                "imessage" => true,
+                "weixin" => {
+                    // Check if session file exists (logged in)
+                    let session_path = state
+                        .root
+                        .join("data")
+                        .join(format!("weixin-{connector_id}"))
+                        .join("session.json");
+                    session_path.exists()
+                }
                 "slack" => {
                     let bot_token = connector_map
                         .get(serde_yaml::Value::String("bot_token".to_string()))
@@ -618,9 +646,14 @@ async fn add_connector(
                 serde_yaml::Value::String(secret.to_string()),
             );
         }
-        "imessage" | "whatsapp" | "weixin" => {
-            // No credentials needed — iMessage uses AppleScript, WhatsApp/WeChat pair via QR
+        "whatsapp" => {
+            let db_path = format!("~/.clawhive/data/whatsapp-{}.db", body.connector_id);
+            connector.insert(
+                serde_yaml::Value::String("db_path".to_string()),
+                serde_yaml::Value::String(db_path),
+            );
         }
+        "imessage" | "weixin" => {}
         _ => {
             // Telegram, Discord, Slack, and other token-based channels
             let token = body.token.as_deref().unwrap_or_default();
@@ -674,6 +707,59 @@ async fn add_connector(
     connectors.push(serde_yaml::Value::Mapping(connector));
 
     write_main_config(&state, &main)?;
+
+    // Auto-create routing binding with default agent
+    let routing_path = state.root.join("config/routing.yaml");
+    if let Ok(content) = std::fs::read_to_string(&routing_path) {
+        if let Ok(mut doc) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            let default_agent = doc
+                .get("default_agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("clawhive-main")
+                .to_string();
+
+            let kinds = ["dm"];
+            let new_bindings: Vec<serde_yaml::Value> = kinds
+                .iter()
+                .map(|k| {
+                    let mut match_map = serde_yaml::Mapping::new();
+                    match_map.insert("kind".into(), serde_yaml::Value::String((*k).to_string()));
+                    let mut binding = serde_yaml::Mapping::new();
+                    binding.insert(
+                        "channel_type".into(),
+                        serde_yaml::Value::String(kind.clone()),
+                    );
+                    binding.insert(
+                        "connector_id".into(),
+                        serde_yaml::Value::String(body.connector_id.clone()),
+                    );
+                    binding.insert("match".into(), serde_yaml::Value::Mapping(match_map));
+                    binding.insert(
+                        "agent_id".into(),
+                        serde_yaml::Value::String(default_agent.clone()),
+                    );
+                    serde_yaml::Value::Mapping(binding)
+                })
+                .collect();
+
+            if let Some(seq) = doc
+                .get_mut("bindings")
+                .and_then(|bindings| bindings.as_sequence_mut())
+            {
+                seq.retain(|binding| {
+                    binding.get("connector_id").and_then(|v| v.as_str()) != Some(&body.connector_id)
+                });
+                seq.extend(new_bindings);
+            } else {
+                doc["bindings"] = serde_yaml::Value::Sequence(new_bindings);
+            }
+
+            if let Ok(yaml) = serde_yaml::to_string(&doc) {
+                let _ = std::fs::write(&routing_path, yaml);
+            }
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "kind": kind,
         "connector_id": body.connector_id,
@@ -705,6 +791,153 @@ async fn remove_connector(
         "kind": kind,
         "connector_id": id,
     })))
+}
+
+#[cfg(feature = "whatsapp")]
+#[derive(Deserialize)]
+struct WhatsAppPairQuery {
+    connector_id: String,
+}
+
+#[cfg(feature = "whatsapp")]
+#[derive(Serialize)]
+struct WhatsAppPairResponse {
+    ok: bool,
+    status: String,
+}
+
+#[cfg(feature = "whatsapp")]
+#[derive(Serialize)]
+struct WhatsAppQrStatusResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qr_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qr_timeout: Option<u64>,
+}
+
+#[cfg(feature = "whatsapp")]
+async fn whatsapp_qr_pair(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<WhatsAppPairQuery>,
+) -> Result<Json<WhatsAppPairResponse>, StatusCode> {
+    let connector_id = query.connector_id;
+    let db_path = state
+        .root
+        .join("data")
+        .join(format!("whatsapp-{connector_id}.db"));
+
+    {
+        let mut sessions = state
+            .whatsapp_pairing
+            .write()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        sessions.insert(
+            connector_id.clone(),
+            WhatsAppPairSession {
+                status: "waiting_qr".to_string(),
+                qr_data: None,
+                qr_timeout: None,
+                started_at: Instant::now(),
+            },
+        );
+    }
+
+    let sessions = state.whatsapp_pairing.clone();
+    tokio::spawn(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let pairing_task =
+            tokio::spawn(
+                async move { clawhive_channels::whatsapp::run_pairing(db_path, tx).await },
+            );
+
+        while let Some(event) = rx.recv().await {
+            let mut guard = match sessions.write() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to lock whatsapp_pairing state");
+                    return;
+                }
+            };
+
+            if let Some(session) = guard.get_mut(&connector_id) {
+                match event {
+                    clawhive_channels::whatsapp::PairStatus::QrCode(data, timeout) => {
+                        session.status = "qr_ready".to_string();
+                        session.qr_data = Some(data);
+                        session.qr_timeout = Some(timeout.as_secs());
+                    }
+                    clawhive_channels::whatsapp::PairStatus::Paired => {
+                        session.status = "paired".to_string();
+                    }
+                    clawhive_channels::whatsapp::PairStatus::AlreadyPaired => {
+                        session.status = "already_paired".to_string();
+                    }
+                    clawhive_channels::whatsapp::PairStatus::Failed(error) => {
+                        tracing::error!(
+                            connector_id = %connector_id,
+                            error = %error,
+                            "whatsapp pairing failed"
+                        );
+                        session.status = "failed".to_string();
+                    }
+                }
+            }
+        }
+
+        match pairing_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(
+                    connector_id = %connector_id,
+                    error = %error,
+                    "whatsapp pairing task returned error"
+                );
+                if let Ok(mut guard) = sessions.write() {
+                    if let Some(session) = guard.get_mut(&connector_id) {
+                        session.status = "failed".to_string();
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    connector_id = %connector_id,
+                    error = %error,
+                    "whatsapp pairing task join error"
+                );
+                if let Ok(mut guard) = sessions.write() {
+                    if let Some(session) = guard.get_mut(&connector_id) {
+                        session.status = "failed".to_string();
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(Json(WhatsAppPairResponse {
+        ok: true,
+        status: "waiting_qr".to_string(),
+    }))
+}
+
+#[cfg(feature = "whatsapp")]
+async fn whatsapp_qr_status(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<WhatsAppPairQuery>,
+) -> Result<Json<WhatsAppQrStatusResponse>, StatusCode> {
+    let sessions = state
+        .whatsapp_pairing
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session = sessions
+        .get(&query.connector_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(WhatsAppQrStatusResponse {
+        status: session.status.clone(),
+        qr_data: session.qr_data.clone(),
+        qr_timeout: session.qr_timeout,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +1123,7 @@ mod tests {
             gateway: None,
             web_password_hash: Arc::new(std::sync::RwLock::new(None)),
             session_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            whatsapp_pairing: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             pending_openai_oauth: Arc::new(
                 std::sync::RwLock::new(std::collections::HashMap::new()),
             ),

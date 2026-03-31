@@ -19,6 +19,14 @@ pub struct PendingOpenAiOAuth {
     pub callback_listener_shutdown: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WhatsAppPairSession {
+    pub status: String,
+    pub qr_data: Option<String>,
+    pub qr_timeout: Option<u64>,
+    pub started_at: Instant,
+}
+
 pub fn default_openai_oauth_config() -> OpenAiOAuthConfig {
     OpenAiOAuthConfig::default_with_client(OPENAI_OAUTH_CLIENT_ID)
 }
@@ -34,6 +42,7 @@ pub struct AppState {
     pub gateway: Option<Arc<Gateway>>,
     pub web_password_hash: Arc<RwLock<Option<String>>>,
     pub session_store: Arc<RwLock<HashMap<String, Instant>>>,
+    pub whatsapp_pairing: Arc<RwLock<HashMap<String, WhatsAppPairSession>>>,
     pub pending_openai_oauth: Arc<RwLock<HashMap<String, PendingOpenAiOAuth>>>,
     pub openai_oauth_config: OpenAiOAuthConfig,
     pub enable_openai_oauth_callback_listener: bool,
