@@ -220,6 +220,7 @@ async fn e2e_shell_tool_with_skill_permissions() {
         None,
         None,
         "test-agent".to_string(),
+        None,
     );
     let result = tool
         .execute(serde_json::json!({"command": "cat hello.txt"}), &ctx)
@@ -262,6 +263,7 @@ async fn e2e_shell_tool_runs_with_sandbox_network_deny_mode() {
         None,
         None,
         "test-agent".to_string(),
+        None,
     );
 
     let ctx = ToolContext::builtin();
@@ -302,6 +304,7 @@ async fn e2e_shell_tool_runs_with_sandbox_network_allow_mode() {
         None,
         None,
         "test-agent".to_string(),
+        None,
     );
 
     let ctx = ToolContext::builtin();

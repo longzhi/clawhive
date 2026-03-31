@@ -1230,6 +1230,7 @@ impl Orchestrator {
                     self.approval_registry.clone(),
                     Some(self.bus.clone()),
                     agent_id.to_string(),
+                    None,
                 )
                 .execute(input, ctx)
                 .await
@@ -4453,6 +4454,7 @@ pub fn build_tool_registry(
         approval_registry.clone(),
         Some(bus.clone()),
         "global".to_string(),
+        None,
     )));
     // Access control tools
     registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));

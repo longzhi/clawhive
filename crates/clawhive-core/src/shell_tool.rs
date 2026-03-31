@@ -19,9 +19,74 @@ use super::approval::ApprovalRegistry;
 use super::config::{
     ExecAskMode, ExecSecurityConfig, ExecSecurityMode, SandboxNetworkMode, SandboxPolicyConfig,
 };
+use super::router::LlmRouter;
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
+use clawhive_provider::LlmMessage;
 
 const MAX_OUTPUT_BYTES: usize = 20_000;
+
+/// Lightweight handle for generating approval summaries via LLM.
+#[derive(Clone)]
+pub struct ApprovalSummarizer {
+    router: LlmRouter,
+    model: String,
+    fallbacks: Vec<String>,
+}
+
+impl ApprovalSummarizer {
+    pub fn new(router: LlmRouter, model: String, fallbacks: Vec<String>) -> Self {
+        Self {
+            router,
+            model,
+            fallbacks,
+        }
+    }
+
+    pub async fn summarize(&self, command: &str, network_target: Option<&str>) -> Option<String> {
+        let mut prompt = format!(
+            "Describe what the following command does in one short sentence, in the same language as the command context. \
+             Use plain language a non-technical user can understand. Do not include the command itself. \
+             Output only the summary sentence, nothing else.\n\nCommand: {command}"
+        );
+        if let Some(target) = network_target {
+            prompt.push_str(&format!("\nNetwork target: {target}"));
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.router.chat(
+                &self.model,
+                &self.fallbacks,
+                Some(
+                    "You are a concise command summarizer. Output only one summary sentence, nothing else."
+                        .to_string(),
+                ),
+                vec![LlmMessage::user(&prompt)],
+                128,
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(resp)) => {
+                let text = resp.text.trim().to_string();
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "approval summary LLM call failed");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("approval summary LLM call timed out");
+                None
+            }
+        }
+    }
+}
 
 pub struct ExecuteCommandTool {
     workspace: PathBuf,
@@ -32,6 +97,7 @@ pub struct ExecuteCommandTool {
     approval_registry: Option<Arc<ApprovalRegistry>>,
     bus: Option<BusPublisher>,
     agent_id: String,
+    approval_summarizer: Option<ApprovalSummarizer>,
 }
 
 impl ExecuteCommandTool {
@@ -45,6 +111,7 @@ impl ExecuteCommandTool {
         approval_registry: Option<Arc<ApprovalRegistry>>,
         bus: Option<BusPublisher>,
         agent_id: String,
+        approval_summarizer: Option<ApprovalSummarizer>,
     ) -> Self {
         Self {
             workspace,
@@ -55,6 +122,7 @@ impl ExecuteCommandTool {
             approval_registry,
             bus,
             agent_id,
+            approval_summarizer,
         }
     }
 
@@ -83,6 +151,11 @@ impl ExecuteCommandTool {
 
         if let (Some(bus), Some((ch_type, conn_id, conv_scope))) = (self.bus.as_ref(), source_info)
         {
+            let summary = match &self.approval_summarizer {
+                Some(summarizer) => summarizer.summarize(command, None).await,
+                None => None,
+            };
+
             let _ = bus
                 .publish(BusMessage::NeedHumanApproval {
                     trace_id,
@@ -90,7 +163,7 @@ impl ExecuteCommandTool {
                     agent_id: self.agent_id.clone(),
                     command: command.to_string(),
                     network_target: None,
-                    summary: None,
+                    summary,
                     source_channel_type: Some(ch_type.to_string()),
                     source_connector_id: Some(conn_id.to_string()),
                     source_conversation_scope: Some(conv_scope.to_string()),
@@ -135,6 +208,11 @@ impl ExecuteCommandTool {
 
         if let (Some(bus), Some((ch_type, conn_id, conv_scope))) = (self.bus.as_ref(), source_info)
         {
+            let summary = match &self.approval_summarizer {
+                Some(summarizer) => summarizer.summarize(command, Some(&target)).await,
+                None => None,
+            };
+
             let _ = bus
                 .publish(BusMessage::NeedHumanApproval {
                     trace_id,
@@ -142,7 +220,7 @@ impl ExecuteCommandTool {
                     agent_id: self.agent_id.clone(),
                     command: command.to_string(),
                     network_target: Some(target.clone()),
-                    summary: None,
+                    summary,
                     source_channel_type: Some(ch_type.to_string()),
                     source_connector_id: Some(conn_id.to_string()),
                     source_conversation_scope: Some(conv_scope.to_string()),
@@ -1035,6 +1113,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         )
     }
 
@@ -1052,6 +1131,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         )
     }
 
@@ -1210,6 +1290,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
         let result = tool
@@ -1239,6 +1320,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
         let result = tool
@@ -1268,6 +1350,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
         let result = tool
@@ -1297,6 +1380,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         );
 
         assert!(tool.is_command_allowed("git status"));
@@ -1323,6 +1407,7 @@ mod tests {
             None,
             None,
             "test-agent".to_string(),
+            None,
         );
 
         assert!(tool.is_command_allowed("jq --version"));
@@ -1454,6 +1539,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
 
@@ -1497,6 +1583,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
 
@@ -1539,6 +1626,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
 
@@ -1571,6 +1659,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx2 = ToolContext::builtin();
         let second = tokio::spawn(async move {
@@ -1611,6 +1700,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
 
@@ -1646,6 +1736,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx2 = ToolContext::builtin();
         let second = tokio::spawn(async move {
@@ -1689,6 +1780,7 @@ mod tests {
             Some(approval_registry.clone()),
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
 
@@ -1723,6 +1815,7 @@ mod tests {
             None,
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
         let result = tool
@@ -1756,6 +1849,7 @@ mod tests {
             None,
             None,
             "agent-test".to_string(),
+            None,
         );
         let ctx = ToolContext::builtin();
         let result = tool
