@@ -525,7 +525,13 @@ async fn mock_server_includes_session_history() {
     let agent_ws = tmp.path().join("workspaces").join("clawhive-main");
     let reader = SessionReader::new(&agent_ws);
     let key_str = "telegram:tg_main:chat:1:user:1";
-    let messages = reader.load_recent_messages(key_str, 20).await.unwrap();
+    let session_id = memory
+        .get_session(key_str)
+        .await
+        .unwrap()
+        .expect("session should exist")
+        .session_id;
+    let messages = reader.load_recent_messages(&session_id, 20).await.unwrap();
     assert_eq!(
         messages.len(),
         4,
@@ -557,6 +563,7 @@ async fn expired_session_keeps_jsonl_history() {
         .unwrap();
 
     let mut record = memory.get_session(key_str).await.unwrap().unwrap();
+    let old_session_id = record.session_id.clone();
     record.ttl_seconds = 0;
     memory.upsert_session(record).await.unwrap();
 
@@ -567,7 +574,10 @@ async fn expired_session_keeps_jsonl_history() {
 
     let agent_ws = tmp.path().join("workspaces").join("clawhive-main");
     let reader = SessionReader::new(&agent_ws);
-    let messages = reader.load_recent_messages(key_str, 20).await.unwrap();
+    let messages = reader
+        .load_recent_messages(&old_session_id, 20)
+        .await
+        .unwrap();
     assert_eq!(
         messages.len(),
         4,
