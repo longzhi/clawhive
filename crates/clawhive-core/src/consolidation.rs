@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use clawhive_memory::dirty_sources::{DirtySourceStore, DIRTY_KIND_MEMORY_FILE};
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::fact_store::{self, Fact, FactStore};
 use clawhive_memory::file_store::MemoryFileStore;
+use clawhive_memory::memory_lineage::MemoryLineageStore;
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::session::SessionReader;
 use clawhive_memory::MemoryStore;
 use clawhive_provider::LlmMessage;
 
+use super::memory_document::{MemoryDocument, MEMORY_SECTION_ORDER};
 use super::router::LlmRouter;
 
 const CONSOLIDATION_INCREMENTAL_SYSTEM_PROMPT: &str = r#"You are a memory consolidation system. You maintain a personal knowledge base (MEMORY.md)
@@ -66,6 +69,33 @@ Example output:
 
 If no facts can be extracted, return an empty array: []"#;
 
+const PROMOTION_CANDIDATE_SYSTEM_PROMPT: &str = r#"You classify daily observations for memory promotion.
+
+Return a JSON array only. Each item must contain:
+- "content": concise normalized statement
+- "target_kind": one of "discard", "fact", "memory"
+- "target_section": one of "长期项目主线", "持续性背景脉络", "关键历史决策" when target_kind is "memory", otherwise null
+- "source_date": one of the `### YYYY-MM-DD` dates from the daily observations when known, otherwise null
+- "importance": 0.0 to 1.0
+- "duplicate_key": optional short key for deduplication
+
+Rules:
+- discard greetings, identity chatter, small talk, raw command output, receipts, and bilingual restatements
+- choose "fact" for stable rules, preferences, identities, or durable atomic decisions
+- choose "memory" only for long-lived narrative context that belongs in MEMORY.md
+- prefer under-selection over over-selection
+- return valid JSON only"#;
+
+const SECTION_MERGE_SYSTEM_PROMPT: &str = r#"You update one MEMORY.md section.
+
+Rules:
+- Output ONLY the new section body content, no heading and no explanation
+- Keep the section concise
+- Remove duplicates and transient noise
+- Preserve useful durable context
+- Integrate the candidate items into coherent markdown bullet points or short paragraphs
+- Do not repeat what is already captured in the section unless needed for clarity"#;
+
 #[derive(Debug, serde::Deserialize)]
 struct ExtractedFact {
     content: String,
@@ -77,6 +107,18 @@ struct ExtractedFact {
 
 fn default_importance() -> f64 {
     0.5
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PromotionCandidate {
+    content: String,
+    target_kind: String,
+    target_section: Option<String>,
+    source_date: Option<String>,
+    #[serde(default = "default_importance")]
+    importance: f64,
+    #[serde(default)]
+    duplicate_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,10 +243,33 @@ impl HippocampusConsolidator {
             daily_sections.push_str(&format!("### {}\n{}\n\n", date.format("%Y-%m-%d"), content));
         }
 
+        match self
+            .consolidate_by_section(&current_memory, &daily_sections, recent_daily.len())
+            .await
+        {
+            Ok(report) => return Ok(report),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Section-based consolidation failed, falling back to legacy consolidation"
+                );
+            }
+        }
+
+        self.legacy_consolidate(&current_memory, &daily_sections, recent_daily.len())
+            .await
+    }
+
+    async fn legacy_consolidate(
+        &self,
+        current_memory: &str,
+        daily_sections: &str,
+        daily_files_read: usize,
+    ) -> Result<ConsolidationReport> {
         let response = self
             .request_consolidation(
                 CONSOLIDATION_INCREMENTAL_SYSTEM_PROMPT,
-                build_incremental_user_prompt(&current_memory, &daily_sections),
+                build_incremental_user_prompt(current_memory, daily_sections),
             )
             .await?;
 
@@ -213,9 +278,9 @@ impl HippocampusConsolidator {
             Ok(patch) => {
                 if patch.keep {
                     tracing::info!("Consolidation returned [KEEP]; leaving MEMORY.md unchanged");
-                    let facts_extracted = self.extract_facts(&self.agent_id, &daily_sections).await;
+                    let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
                     return Ok(ConsolidationReport {
-                        daily_files_read: recent_daily.len(),
+                        daily_files_read,
                         memory_updated: false,
                         reindexed: false,
                         facts_extracted,
@@ -223,13 +288,14 @@ impl HippocampusConsolidator {
                     });
                 }
 
-                let updated_memory = apply_patch(&current_memory, &patch);
+                let updated_memory = apply_patch(current_memory, &patch);
                 return self
                     .finalize_updated_memory(
                         updated_memory,
-                        &current_memory,
-                        &daily_sections,
-                        recent_daily.len(),
+                        current_memory,
+                        daily_sections,
+                        daily_files_read,
+                        &[],
                     )
                     .await;
             }
@@ -241,16 +307,16 @@ impl HippocampusConsolidator {
         let response = self
             .request_consolidation(
                 CONSOLIDATION_FULL_OVERWRITE_SYSTEM_PROMPT,
-                build_full_overwrite_user_prompt(&current_memory, &daily_sections),
+                build_full_overwrite_user_prompt(current_memory, daily_sections),
             )
             .await?;
 
         let updated_memory = strip_markdown_fence(&response.text);
         if updated_memory.trim() == "[KEEP]" {
             tracing::info!("Consolidation returned [KEEP]; leaving MEMORY.md unchanged");
-            let facts_extracted = self.extract_facts(&self.agent_id, &daily_sections).await;
+            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
             return Ok(ConsolidationReport {
-                daily_files_read: recent_daily.len(),
+                daily_files_read,
                 memory_updated: false,
                 reindexed: false,
                 facts_extracted,
@@ -260,11 +326,104 @@ impl HippocampusConsolidator {
 
         self.finalize_updated_memory(
             updated_memory,
-            &current_memory,
-            &daily_sections,
-            recent_daily.len(),
+            current_memory,
+            daily_sections,
+            daily_files_read,
+            &[],
         )
         .await
+    }
+
+    async fn consolidate_by_section(
+        &self,
+        current_memory: &str,
+        daily_sections: &str,
+        daily_files_read: usize,
+    ) -> Result<ConsolidationReport> {
+        let candidates = self.extract_promotion_candidates(daily_sections).await?;
+        let memory_candidates = dedup_memory_candidates(candidates);
+
+        if memory_candidates.is_empty() {
+            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
+            return Ok(ConsolidationReport {
+                daily_files_read,
+                memory_updated: false,
+                reindexed: false,
+                facts_extracted,
+                summary: "No long-term memory candidates retained.".to_string(),
+            });
+        }
+
+        let mut doc = MemoryDocument::parse(current_memory);
+        let mut touched_sections = 0;
+
+        for section in MEMORY_SECTION_ORDER {
+            let section_candidates = memory_candidates
+                .iter()
+                .filter(|candidate| candidate.target_section.as_deref() == Some(section))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if section_candidates.is_empty() {
+                continue;
+            }
+
+            let merged = self
+                .merge_memory_section(section, &doc.section_content(section), &section_candidates)
+                .await?;
+            doc.replace_section(section, &merged);
+            touched_sections += 1;
+        }
+
+        if touched_sections == 0 {
+            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
+            return Ok(ConsolidationReport {
+                daily_files_read,
+                memory_updated: false,
+                reindexed: false,
+                facts_extracted,
+                summary: "No MEMORY.md sections were updated.".to_string(),
+            });
+        }
+
+        self.finalize_updated_memory(
+            doc.render(),
+            current_memory,
+            daily_sections,
+            daily_files_read,
+            &memory_candidates,
+        )
+        .await
+    }
+
+    async fn extract_promotion_candidates(
+        &self,
+        daily_sections: &str,
+    ) -> Result<Vec<PromotionCandidate>> {
+        let response = self
+            .request_consolidation(
+                PROMOTION_CANDIDATE_SYSTEM_PROMPT,
+                build_promotion_candidate_prompt(daily_sections),
+            )
+            .await?;
+        let parsed = strip_markdown_fence(&response.text);
+        let candidates: Vec<PromotionCandidate> = serde_json::from_str(parsed.trim())?;
+        Ok(candidates)
+    }
+
+    async fn merge_memory_section(
+        &self,
+        section: &str,
+        current_section: &str,
+        candidates: &[PromotionCandidate],
+    ) -> Result<String> {
+        let response = self
+            .request_consolidation(
+                SECTION_MERGE_SYSTEM_PROMPT,
+                build_section_merge_prompt(section, current_section, candidates),
+            )
+            .await?;
+        Ok(strip_markdown_fence(&response.text).trim().to_string())
     }
 
     async fn request_consolidation(
@@ -289,6 +448,7 @@ impl HippocampusConsolidator {
         current_memory: &str,
         daily_sections: &str,
         daily_files_read: usize,
+        memory_candidates: &[PromotionCandidate],
     ) -> Result<ConsolidationReport> {
         if let Err(error) = validate_consolidation_output(&updated_memory, current_memory) {
             tracing::warn!(error = %error, "Skipping consolidation write due to invalid LLM output");
@@ -303,11 +463,12 @@ impl HippocampusConsolidator {
 
         if updated_memory == current_memory {
             tracing::info!("Consolidation patch produced no effective MEMORY.md changes");
+            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
             return Ok(ConsolidationReport {
                 daily_files_read,
                 memory_updated: false,
                 reindexed: false,
-                facts_extracted: 0,
+                facts_extracted,
                 summary: "Consolidation produced no MEMORY.md changes.".to_string(),
             });
         }
@@ -321,28 +482,52 @@ impl HippocampusConsolidator {
             );
         }
         self.file_store.write_long_term(&deduped_memory).await?;
+        self.record_memory_lineage(current_memory, &deduped_memory, memory_candidates)
+            .await;
 
-        let reindexed = if let (Some(index), Some(provider), Some(fs), Some(reader)) = (
-            &self.search_index,
-            &self.embedding_provider,
-            &self.reindex_file_store,
-            &self.reindex_session_reader,
-        ) {
-            match index.index_all(fs, reader, provider.as_ref()).await {
-                Ok(count) => {
-                    tracing::info!("Post-consolidation reindex: {count} chunks indexed");
-                    true
+        let reindexed =
+            if let (Some(index), Some(provider), Some(fs), Some(reader), Some(memory_store)) = (
+                &self.search_index,
+                &self.embedding_provider,
+                &self.reindex_file_store,
+                &self.reindex_session_reader,
+                &self.memory_store,
+            ) {
+                let dirty = DirtySourceStore::new(memory_store.db());
+                match dirty
+                    .enqueue(
+                        &self.agent_id,
+                        DIRTY_KIND_MEMORY_FILE,
+                        "MEMORY.md",
+                        "consolidation_write",
+                    )
+                    .await
+                {
+                    Ok(()) => match index.index_dirty(fs, reader, provider.as_ref(), 8).await {
+                        Ok(count) => {
+                            self.record_memory_chunk_lineage(&deduped_memory, memory_candidates)
+                                .await;
+                            tracing::info!(
+                                "Post-consolidation incremental reindex: {count} chunks indexed"
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!("Post-consolidation incremental reindex failed: {e}");
+                            false
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to enqueue MEMORY.md dirty source: {e}");
+                        false
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Post-consolidation reindex failed: {e}");
-                    false
-                }
-            }
-        } else {
-            false
-        };
+            } else {
+                false
+            };
 
         let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
+        self.record_fact_memory_alignment(&deduped_memory).await;
 
         if let Some(ref store) = self.memory_store {
             store
@@ -368,6 +553,265 @@ impl HippocampusConsolidator {
             facts_extracted,
             summary: format!("Consolidated {daily_files_read} daily files into MEMORY.md."),
         })
+    }
+
+    async fn record_memory_lineage(
+        &self,
+        previous_memory: &str,
+        updated_memory: &str,
+        memory_candidates: &[PromotionCandidate],
+    ) {
+        let Some(memory_store) = &self.memory_store else {
+            return;
+        };
+
+        let previous_doc = MemoryDocument::parse(previous_memory);
+        let updated_doc = MemoryDocument::parse(updated_memory);
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        for section in MEMORY_SECTION_ORDER {
+            let previous_items = previous_doc.section_items(section);
+            let updated_items = updated_doc.section_items(section);
+            if updated_items.is_empty() {
+                continue;
+            }
+
+            for item in updated_items {
+                let matched_candidate =
+                    best_matching_candidate_for_item(section, &item, memory_candidates);
+                let unchanged = previous_items
+                    .iter()
+                    .any(|old| normalize_lineage_text(old) == normalize_lineage_text(&item));
+                let canonical_key = matched_candidate
+                    .and_then(|candidate| candidate.duplicate_key.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+
+                if matched_candidate.is_none() && unchanged {
+                    continue;
+                }
+
+                let source_date =
+                    matched_candidate.and_then(|candidate| candidate.source_date.as_deref());
+                let canonical_id = match lineage_store
+                    .link_memory_promotion(
+                        &self.agent_id,
+                        &item,
+                        source_date,
+                        section,
+                        canonical_key,
+                    )
+                    .await
+                {
+                    Ok(canonical_id) => canonical_id,
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            section,
+                            content = %item,
+                            error = %error,
+                            "failed to record retained memory lineage"
+                        );
+                        continue;
+                    }
+                };
+
+                if let Some(candidate) = matched_candidate {
+                    if let Err(error) = lineage_store
+                        .link_memory_to_daily_canonical(
+                            &self.agent_id,
+                            &canonical_id,
+                            &candidate.content,
+                            candidate.source_date.as_deref(),
+                            canonical_key,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            section,
+                            canonical_id = %canonical_id,
+                            error = %error,
+                            "failed to bridge memory canonical to daily canonical"
+                        );
+                    }
+                }
+
+                if let Some(source_date) = source_date {
+                    let daily_path = format!("memory/{source_date}.md");
+                    if let Err(error) = lineage_store
+                        .attach_matching_chunks(
+                            &self.agent_id,
+                            &canonical_id,
+                            &daily_path,
+                            &item,
+                            "derived",
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            section,
+                            path = %daily_path,
+                            content = %item,
+                            error = %error,
+                            "failed to record daily chunk lineage"
+                        );
+                    }
+                }
+
+                if canonical_key.is_some() {
+                    continue;
+                }
+
+                for old_item in previous_items
+                    .iter()
+                    .filter(|old| should_link_supersedes(old, &item))
+                {
+                    if let Err(error) = lineage_store
+                        .link_memory_supersedes(&self.agent_id, &item, old_item)
+                        .await
+                    {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            section,
+                            new_item = %item,
+                            old_item = %old_item,
+                            error = %error,
+                            "failed to record memory supersedes lineage"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    async fn record_memory_chunk_lineage(
+        &self,
+        updated_memory: &str,
+        memory_candidates: &[PromotionCandidate],
+    ) {
+        let Some(memory_store) = &self.memory_store else {
+            return;
+        };
+
+        let updated_doc = MemoryDocument::parse(updated_memory);
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        for section in MEMORY_SECTION_ORDER {
+            for item in updated_doc.section_items(section) {
+                let matched_candidate =
+                    best_matching_candidate_for_item(section, &item, memory_candidates);
+                let canonical_key = matched_candidate
+                    .and_then(|candidate| candidate.duplicate_key.as_deref())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let canonical = match lineage_store
+                    .ensure_canonical_with_key(&self.agent_id, "memory", canonical_key, &item)
+                    .await
+                {
+                    Ok(canonical) => canonical,
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            section,
+                            content = %item,
+                            error = %error,
+                            "failed to ensure memory canonical before chunk linkage"
+                        );
+                        continue;
+                    }
+                };
+
+                if let Err(error) = lineage_store
+                    .attach_matching_chunks_in_section(
+                        &self.agent_id,
+                        &canonical.canonical_id,
+                        "MEMORY.md",
+                        section,
+                        &item,
+                        "promoted",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        section,
+                        content = %item,
+                        error = %error,
+                        "failed to record memory chunk lineage"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn record_fact_memory_alignment(&self, memory_text: &str) {
+        let Some(memory_store) = &self.memory_store else {
+            return;
+        };
+
+        let doc = MemoryDocument::parse(memory_text);
+        let memory_items = MEMORY_SECTION_ORDER
+            .iter()
+            .flat_map(|section| doc.section_items(section))
+            .collect::<Vec<_>>();
+        if memory_items.is_empty() {
+            return;
+        }
+
+        let fact_store = FactStore::new(memory_store.db());
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let facts = match fact_store.get_active_facts(&self.agent_id).await {
+            Ok(facts) => facts,
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %self.agent_id,
+                    error = %error,
+                    "failed to load facts for fact-memory alignment"
+                );
+                return;
+            }
+        };
+
+        for fact in facts {
+            let Some(item) = best_matching_memory_item_for_fact(&fact, &memory_items) else {
+                continue;
+            };
+            let canonical = match lineage_store
+                .find_canonical_by_summary(&self.agent_id, "memory", item)
+                .await
+            {
+                Ok(Some(canonical)) => canonical,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        fact_id = %fact.id,
+                        error = %error,
+                        "failed to resolve memory canonical for fact alignment"
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(error) = lineage_store
+                .attach_source(
+                    &self.agent_id,
+                    &canonical.canonical_id,
+                    "fact",
+                    &fact.id,
+                    "equivalent",
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_id = %self.agent_id,
+                    fact_id = %fact.id,
+                    canonical_id = %canonical.canonical_id,
+                    error = %error,
+                    "failed to record fact-memory alignment"
+                );
+            }
+        }
     }
 
     async fn extract_facts(&self, agent_id: &str, daily_sections: &str) -> usize {
@@ -499,6 +943,29 @@ fn build_incremental_user_prompt(current_memory: &str, daily_sections: &str) -> 
     format!(
         "## Current MEMORY.md\n{}\n\n## Recent Daily Observations\n{}\nReturn ONLY incremental patch instructions in [ADD]/[UPDATE]/[KEEP] format. Do not rewrite the full MEMORY.md.",
         current_memory, daily_sections
+    )
+}
+
+fn build_promotion_candidate_prompt(daily_sections: &str) -> String {
+    format!(
+        "## Recent Daily Observations\n{}\n\nReturn ONLY a JSON array of promotion candidates.",
+        daily_sections
+    )
+}
+
+fn build_section_merge_prompt(
+    section: &str,
+    current_section: &str,
+    candidates: &[PromotionCandidate],
+) -> String {
+    let candidate_lines = candidates
+        .iter()
+        .map(|candidate| format!("- {}", candidate.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "## Target Section\n{}\n\n## Current Section Content\n{}\n\n## Candidate Updates\n{}\n",
+        section, current_section, candidate_lines
     )
 }
 
@@ -749,6 +1216,147 @@ fn strip_markdown_fence(text: &str) -> String {
         .to_string()
 }
 
+fn dedup_memory_candidates(candidates: Vec<PromotionCandidate>) -> Vec<PromotionCandidate> {
+    let mut kept = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for candidate in candidates {
+        if candidate.target_kind != "memory" || candidate.importance < 0.3 {
+            continue;
+        }
+
+        let Some(section) = candidate.target_section.as_deref() else {
+            continue;
+        };
+        if !MEMORY_SECTION_ORDER.contains(&section) {
+            continue;
+        }
+
+        let content = candidate.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+
+        let key = candidate
+            .duplicate_key
+            .as_deref()
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| content.to_lowercase());
+
+        if !seen.insert((section.to_string(), key)) {
+            continue;
+        }
+
+        kept.push(PromotionCandidate {
+            content: content.to_string(),
+            ..candidate
+        });
+    }
+
+    kept
+}
+
+fn best_matching_candidate_for_item<'a>(
+    section: &str,
+    item: &str,
+    candidates: &'a [PromotionCandidate],
+) -> Option<&'a PromotionCandidate> {
+    let item_normalized = normalize_lineage_text(item);
+    let item_words = tokenize_lineage_text(item);
+    let section_candidates = candidates
+        .iter()
+        .filter(|candidate| candidate.target_section.as_deref() == Some(section))
+        .collect::<Vec<_>>();
+
+    if let Some((candidate, _)) = section_candidates
+        .iter()
+        .filter_map(|candidate| {
+            let candidate_normalized = normalize_lineage_text(&candidate.content);
+            let candidate_words = tokenize_lineage_text(&candidate.content);
+            let similarity = if item_normalized.contains(&candidate_normalized)
+                || candidate_normalized.contains(&item_normalized)
+            {
+                1.0
+            } else {
+                jaccard_similarity(&item_words, &candidate_words)
+            };
+            (similarity >= 0.55).then_some((candidate, similarity))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+    {
+        return Some(*candidate);
+    }
+
+    let keyed_candidates = section_candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .duplicate_key
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+        })
+        .collect::<Vec<_>>();
+
+    if keyed_candidates.len() == 1 {
+        return keyed_candidates.into_iter().next();
+    }
+
+    None
+}
+
+fn should_link_supersedes(old_item: &str, new_item: &str) -> bool {
+    let old_normalized = normalize_lineage_text(old_item);
+    let new_normalized = normalize_lineage_text(new_item);
+    if old_normalized.is_empty() || new_normalized.is_empty() || old_normalized == new_normalized {
+        return false;
+    }
+    let old_words = tokenize_lineage_text(old_item);
+    let new_words = tokenize_lineage_text(new_item);
+    jaccard_similarity(&old_words, &new_words) >= 0.5
+}
+
+fn best_matching_memory_item_for_fact<'a>(
+    fact: &Fact,
+    memory_items: &'a [String],
+) -> Option<&'a str> {
+    let fact_normalized = normalize_lineage_text(&fact.content);
+    let fact_words = tokenize_lineage_text(&fact.content);
+    memory_items
+        .iter()
+        .filter_map(|item| {
+            let item_normalized = normalize_lineage_text(item);
+            let item_words = tokenize_lineage_text(item);
+            let similarity = if item_normalized.contains(&fact_normalized)
+                || fact_normalized.contains(&item_normalized)
+            {
+                1.0
+            } else {
+                jaccard_similarity(&fact_words, &item_words)
+            };
+            (similarity >= 0.6).then_some((item.as_str(), similarity))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(item, _)| item)
+}
+
+fn tokenize_lineage_text(input: &str) -> std::collections::HashSet<String> {
+    input
+        .split(|c: char| !c.is_alphanumeric() && !('\u{4E00}'..='\u{9FFF}').contains(&c))
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_lowercase())
+        .collect()
+}
+
+fn normalize_lineage_text(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 0.0;
@@ -857,6 +1465,17 @@ impl ConsolidationScheduler {
                             agent_id = %consolidator.agent_id(),
                             "Archived session cleanup failed: {e}"
                         );
+                    }
+                    if let Some(store) = &consolidator.memory_store {
+                        if let Err(e) = store
+                            .cleanup_session_memory_state(self.archive_retention_days)
+                            .await
+                        {
+                            tracing::warn!(
+                                agent_id = %consolidator.agent_id(),
+                                "Session memory state cleanup failed: {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -977,6 +1596,7 @@ mod tests {
     use clawhive_memory::embedding::EmbeddingProvider;
     use clawhive_memory::fact_store::{generate_fact_id, Fact, FactStore};
     use clawhive_memory::file_store::MemoryFileStore;
+    use clawhive_memory::memory_lineage::MemoryLineageStore;
     use clawhive_memory::session::SessionReader;
     use clawhive_memory::store::MemoryStore;
     use clawhive_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderRegistry, StubProvider};
@@ -1391,7 +2011,7 @@ Working on Clawhive memory safety.
             .await?;
 
         // Create in-memory MemoryStore and SearchIndex
-        let memory_store = MemoryStore::open_in_memory()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
         let search_index = SearchIndex::new(memory_store.db(), "agent-1");
 
         // Create a stub embedding provider
@@ -1407,6 +2027,7 @@ Working on Clawhive memory safety.
         )
         .with_search_index(search_index.clone())
         .with_embedding_provider(embedding_provider)
+        .with_memory_store(Arc::clone(&memory_store))
         .with_file_store_for_reindex(file_store)
         .with_session_reader_for_reindex(session_reader);
 
@@ -1460,7 +2081,7 @@ Working on Clawhive memory safety.
         fact_store.record_add(&old_fact).await?;
 
         let router = build_router_with_provider(SequenceProvider::new(vec![
-            "[KEEP]".to_string(),
+            "[]".to_string(),
             r#"[{"content":"User lives in Tokyo","fact_type":"event","importance":0.9,"occurred_at":null}]"#.to_string(),
         ]));
 
@@ -1481,8 +2102,611 @@ Working on Clawhive memory safety.
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].content, "User lives in Tokyo");
 
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let links = lineage_store
+            .get_links_for_source("agent-1", "fact", &facts[0].id)
+            .await?;
+        assert_eq!(links.len(), 1);
+
         let history = fact_store.get_history(&old_fact.id).await?;
         assert_eq!(history[0].event, "SUPERSEDE");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_updates_only_target_section() -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Existing project note\n\n## 持续性背景脉络\n\n- Keep context\n\n## 关键历史决策\n\n- Keep decision\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- User decided to use section-based consolidation.",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            r#"[{"content":"Adopt section-based consolidation for memory refactor","target_kind":"memory","target_section":"长期项目主线","source_date":"2026-03-29","importance":0.9,"duplicate_key":"memory-refactor"}]"#.to_string(),
+            "- Existing project note\n- Adopt section-based consolidation for memory refactor".to_string(),
+            "[]".to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store.clone(),
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        let updated = file_store.read_long_term().await?;
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+
+        assert!(report.memory_updated);
+        assert!(updated.contains("## 长期项目主线"));
+        assert!(updated.contains("Adopt section-based consolidation for memory refactor"));
+        assert!(updated.contains("## 持续性背景脉络\n\n- Keep context"));
+        assert!(updated.contains("## 关键历史决策\n\n- Keep decision"));
+        let canonical_id = clawhive_memory::memory_lineage::generate_canonical_id_with_key(
+            "agent-1",
+            "memory",
+            Some("memory-refactor"),
+            "Adopt section-based consolidation for memory refactor",
+        );
+        let daily_links = lineage_store
+            .get_links_for_source(
+                "agent-1",
+                "daily_section",
+                &format!("memory/2026-03-29.md#{canonical_id}"),
+            )
+            .await?;
+        let memory_links = lineage_store
+            .get_links_for_source(
+                "agent-1",
+                "memory_section",
+                &format!("MEMORY.md#长期项目主线#{canonical_id}"),
+            )
+            .await?;
+        assert_eq!(daily_links.len(), 1);
+        assert_eq!(memory_links.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_records_memory_chunk_lineage_after_reindex() -> Result<()>
+    {
+        use chrono::Local;
+        use clawhive_memory::search_index::SearchIndex;
+
+        let (dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Existing project note\n\n## 持续性背景脉络\n\n- Keep context\n\n## 关键历史决策\n\n- Keep decision\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- User decided to use section-based consolidation.",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            r#"[{"content":"Adopt section-based consolidation for memory refactor","target_kind":"memory","target_section":"长期项目主线","source_date":"2026-03-29","importance":0.9,"duplicate_key":"memory-refactor"}]"#.to_string(),
+            "- Existing project note\n- Adopt section-based consolidation for memory refactor".to_string(),
+            "[]".to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let search_index = SearchIndex::new(memory_store.db(), "agent-1");
+        let session_reader = SessionReader::new(dir.path());
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store.clone(),
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store))
+        .with_search_index(search_index.clone())
+        .with_embedding_provider(Arc::new(StubEmbeddingProvider))
+        .with_file_store_for_reindex(file_store.clone())
+        .with_session_reader_for_reindex(session_reader);
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+        assert!(report.reindexed);
+
+        let canonical_id = clawhive_memory::memory_lineage::generate_canonical_id_with_key(
+            "agent-1",
+            "memory",
+            Some("memory-refactor"),
+            "Adopt section-based consolidation for memory refactor",
+        );
+        let db = memory_store.db();
+        let chunk_id: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM chunks WHERE agent_id = 'agent-1' AND path = 'MEMORY.md' AND text LIKE '%Adopt section-based consolidation for memory refactor%' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?
+        };
+
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let chunk_links = lineage_store
+            .get_links_for_source("agent-1", "chunk", &chunk_id)
+            .await?;
+        assert!(!chunk_links.is_empty());
+        assert!(chunk_links
+            .iter()
+            .any(|link| link.canonical_id == canonical_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_records_supersedes_for_unkeyed_retained_item_rewrite(
+    ) -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Use incremental patch consolidation for memory\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- Consolidation moved to section-based merge.",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Use section-based consolidation for memory","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Use section-based consolidation for memory".to_string(),
+            "[]".to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let old_id = clawhive_memory::memory_lineage::generate_canonical_id(
+            "agent-1",
+            "memory",
+            "Use incremental patch consolidation for memory",
+        );
+        let new_id = clawhive_memory::memory_lineage::generate_canonical_id(
+            "agent-1",
+            "memory",
+            "Use section-based consolidation for memory",
+        );
+        let supersedes_links = lineage_store
+            .get_links_for_source("agent-1", "canonical", &old_id)
+            .await?;
+
+        assert_eq!(supersedes_links.len(), 1);
+        assert_eq!(supersedes_links[0].canonical_id, new_id);
+        assert_eq!(supersedes_links[0].relation, "supersedes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_reuses_canonical_for_keyed_retained_item_rewrite(
+    ) -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Use incremental patch consolidation for memory\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- Consolidation moved to section-based merge.",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Use section-based consolidation for memory","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9,"duplicate_key":"memory-consolidation"}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Use section-based consolidation for memory".to_string(),
+            "[]".to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let keyed_id = clawhive_memory::memory_lineage::generate_canonical_id_with_key(
+            "agent-1",
+            "memory",
+            Some("memory-consolidation"),
+            "Use section-based consolidation for memory",
+        );
+        let old_text_id = clawhive_memory::memory_lineage::generate_canonical_id(
+            "agent-1",
+            "memory",
+            "Use incremental patch consolidation for memory",
+        );
+        let memory_links = lineage_store
+            .get_links_for_source(
+                "agent-1",
+                "memory_section",
+                &format!("MEMORY.md#长期项目主线#{keyed_id}"),
+            )
+            .await?;
+        let supersedes_links = lineage_store
+            .get_links_for_source("agent-1", "canonical", &old_text_id)
+            .await?;
+
+        assert_eq!(memory_links.len(), 1);
+        assert!(supersedes_links.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_bridges_daily_canonical_to_memory_canonical() -> Result<()>
+    {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Use incremental patch consolidation for memory\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- Use section-based consolidation for memory",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Use section-based consolidation for memory","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9,"duplicate_key":"memory-consolidation"}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Use section-based consolidation for memory".to_string(),
+            "[]".to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let daily_canonical = lineage_store
+            .ensure_canonical_with_key(
+                "agent-1",
+                "daily",
+                Some("memory-consolidation"),
+                "Use section-based consolidation for memory",
+            )
+            .await?;
+
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+
+        let memory_canonical = clawhive_memory::memory_lineage::generate_canonical_id_with_key(
+            "agent-1",
+            "memory",
+            Some("memory-consolidation"),
+            "Use section-based consolidation for memory",
+        );
+        let supersedes_links = lineage_store
+            .get_links_for_source("agent-1", "canonical", &daily_canonical.canonical_id)
+            .await?;
+
+        assert_eq!(supersedes_links.len(), 1);
+        assert_eq!(supersedes_links[0].canonical_id, memory_canonical);
+        assert_eq!(supersedes_links[0].relation, "supersedes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_bridges_keyed_daily_canonical_across_rewrite() -> Result<()>
+    {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Use incremental patch consolidation for memory\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- Use incremental patch consolidation for memory",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Use incremental patch consolidation for memory","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9,"duplicate_key":"memory-consolidation"}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Use section-based consolidation for memory".to_string(),
+            "[]".to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let daily_canonical = lineage_store
+            .ensure_canonical_with_key(
+                "agent-1",
+                "daily",
+                Some("memory-consolidation"),
+                "Use incremental patch consolidation for memory",
+            )
+            .await?;
+
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+
+        let memory_canonical = clawhive_memory::memory_lineage::generate_canonical_id_with_key(
+            "agent-1",
+            "memory",
+            Some("memory-consolidation"),
+            "Use section-based consolidation for memory",
+        );
+        let supersedes_links = lineage_store
+            .get_links_for_source("agent-1", "canonical", &daily_canonical.canonical_id)
+            .await?;
+
+        assert_eq!(supersedes_links.len(), 1);
+        assert_eq!(supersedes_links[0].canonical_id, memory_canonical);
+        assert_eq!(supersedes_links[0].relation, "supersedes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_aligns_fact_to_memory_canonical() -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term("# MEMORY.md\n\n## 长期项目主线\n\n- Existing project note\n")
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- Use section-based consolidation for memory",
+            )
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Use section-based consolidation for memory","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9,"duplicate_key":"memory-consolidation"}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Existing project note\n- Use section-based consolidation for memory".to_string(),
+            r#"[{"content":"Use section-based consolidation for memory","fact_type":"decision","importance":0.9,"occurred_at":null}]"#.to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+        assert_eq!(report.facts_extracted, 1);
+
+        let fact_store = FactStore::new(memory_store.db());
+        let fact = fact_store
+            .find_by_content("agent-1", "Use section-based consolidation for memory")
+            .await?
+            .expect("fact should exist");
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let links = lineage_store
+            .get_links_for_source("agent-1", "fact", &fact.id)
+            .await?;
+
+        let mut has_memory_canonical = false;
+        for link in links {
+            if lineage_store
+                .get_canonical(&link.canonical_id)
+                .await?
+                .is_some_and(|canonical| canonical.canonical_kind == "memory")
+            {
+                has_memory_canonical = true;
+                break;
+            }
+        }
+
+        assert!(has_memory_canonical);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn section_based_consolidation_can_skip_memory_update_but_extract_facts() -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# MEMORY.md\n").await?;
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Context\n\n- User prefers Rust over Go.")
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            "[]".to_string(),
+            r#"[{"content":"User prefers Rust over Go","fact_type":"preference","importance":0.8,"occurred_at":null}]"#.to_string(),
+        ]));
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(memory_store);
+
+        let report = consolidator.consolidate().await?;
+
+        assert!(!report.memory_updated);
+        assert_eq!(report.facts_extracted, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn daily_entries_do_not_promote_until_consolidation_runs() -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# MEMORY.md\n").await?;
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(
+                today,
+                "## Memory\n\n- Use section-based consolidation for memory",
+            )
+            .await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let fact_store = FactStore::new(memory_store.db());
+
+        let before_memory = file_store.read_long_term().await?;
+        let before_facts = fact_store.get_active_facts("agent-1").await?;
+        assert_eq!(before_memory.trim(), "# MEMORY.md");
+        assert!(before_facts.is_empty());
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Use section-based consolidation for memory","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9,"duplicate_key":"memory-consolidation"}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Use section-based consolidation for memory".to_string(),
+            r#"[{"content":"Use section-based consolidation for memory","fact_type":"decision","importance":0.9,"occurred_at":null}]"#.to_string(),
+        ]));
+
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store.clone(),
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+        assert_eq!(report.facts_extracted, 1);
+
+        let after_memory = file_store.read_long_term().await?;
+        let after_facts = fact_store.get_active_facts("agent-1").await?;
+        assert!(after_memory.contains("Use section-based consolidation for memory"));
+        assert_eq!(after_facts.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_scheduler_does_not_run_immediately_on_start() -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# MEMORY.md\n").await?;
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Context\n\n- Stable observation.")
+            .await?;
+
+        let provider =
+            SequenceProvider::new(vec!["[]".to_string(), "[]".to_string(), "[]".to_string()]);
+        let router = build_router_with_provider(provider.clone());
+        let consolidator = Arc::new(HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        ));
+
+        let scheduler = ConsolidationScheduler::new(vec![consolidator], 1, 30);
+        let handle = scheduler.start();
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        handle.abort();
+
+        assert_eq!(
+            provider.call_count.load(Ordering::SeqCst),
+            0,
+            "scheduler should wait one full interval before first automatic consolidation"
+        );
         Ok(())
     }
 

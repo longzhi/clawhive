@@ -6,8 +6,21 @@ use sha2::{Digest, Sha256};
 use tokio::task;
 
 use crate::chunker::{chunk_markdown, ChunkerConfig};
+use crate::dirty_sources::{
+    DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_EMBEDDING_MODEL, DIRTY_KIND_FACT,
+    DIRTY_KIND_MEMORY_FILE, DIRTY_KIND_SCHEMA, DIRTY_KIND_SESSION,
+};
 use crate::embedding::EmbeddingProvider;
 use crate::session::{SessionEntry, SessionReader};
+
+#[derive(Debug, Clone)]
+struct SessionIndexUnit {
+    path: String,
+    content: String,
+    change_hash: String,
+    turn_start: usize,
+    turn_end: usize,
+}
 
 #[derive(Clone)]
 pub struct SearchIndex {
@@ -97,6 +110,7 @@ impl SearchIndex {
 
         let db = Arc::clone(&self.db);
         let path_owned = path.to_owned();
+        let agent_id_for_check = self.agent_id.clone();
         let file_hash_for_check = change_hash.to_owned();
         let unchanged = task::spawn_blocking(move || {
             let conn = db
@@ -104,8 +118,8 @@ impl SearchIndex {
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let existing: Option<String> = conn
                 .query_row(
-                    "SELECT hash FROM files WHERE path = ?1",
-                    params![path_owned],
+                    "SELECT hash FROM files WHERE agent_id = ?1 AND path = ?2",
+                    params![agent_id_for_check, path_owned],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -146,15 +160,15 @@ impl SearchIndex {
                 )?;
                 tx.execute(
                     r#"
-                    INSERT INTO files(path, source, hash, mtime, size)
-                    VALUES (?1, ?2, ?3, ?4, ?5)
-                    ON CONFLICT(path) DO UPDATE SET
+                    INSERT INTO files(agent_id, path, source, hash, mtime, size)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(agent_id, path) DO UPDATE SET
                         source = excluded.source,
                         hash = excluded.hash,
                         mtime = excluded.mtime,
                         size = excluded.size
                     "#,
-                    params![path_owned, source_owned, file_hash_for_write, now_ts, size],
+                    params![agent_id, path_owned, source_owned, file_hash_for_write, now_ts, size],
                 )?;
                 tx.execute(
                     r#"
@@ -240,6 +254,7 @@ impl SearchIndex {
         }
 
         let now_ts = chrono::Utc::now().timestamp();
+        let now_rfc = chrono::Utc::now().to_rfc3339();
         let size = content.len() as i64;
         let mut rows = Vec::with_capacity(text_chunks.len());
         for (idx, chunk) in text_chunks.iter().enumerate() {
@@ -315,7 +330,7 @@ impl SearchIndex {
                         model,
                         text,
                         embedding,
-                        now_ts,
+                        now_rfc,
                         agent_id
                     ],
                 )?;
@@ -342,15 +357,15 @@ impl SearchIndex {
 
             tx.execute(
                 r#"
-                INSERT INTO files(path, source, hash, mtime, size)
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                ON CONFLICT(path) DO UPDATE SET
+                INSERT INTO files(agent_id, path, source, hash, mtime, size)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(agent_id, path) DO UPDATE SET
                     source = excluded.source,
                     hash = excluded.hash,
                     mtime = excluded.mtime,
                     size = excluded.size
                 "#,
-                params![path_owned, source_owned, file_hash_for_write, now_ts, size],
+                params![agent_id, path_owned, source_owned, file_hash_for_write, now_ts, size],
             )?;
             tx.execute(
                 r#"
@@ -381,48 +396,10 @@ impl SearchIndex {
         reader: &SessionReader,
         provider: &dyn EmbeddingProvider,
     ) -> Result<usize> {
-        let entries = reader.load_all_entries(session_id).await?;
-        let mut last_timestamp = None;
-        let mut messages = Vec::new();
-
-        for entry in entries {
-            match entry {
-                SessionEntry::Session { timestamp, .. } => {
-                    last_timestamp = Some(timestamp);
-                }
-                SessionEntry::Message {
-                    timestamp, message, ..
-                } => {
-                    last_timestamp = Some(timestamp);
-                    if matches!(message.role.as_str(), "user" | "assistant") {
-                        messages.push(format!("{}: {}", message.role, message.content));
-                    }
-                }
-                SessionEntry::ToolCall { timestamp, .. }
-                | SessionEntry::ToolResult { timestamp, .. }
-                | SessionEntry::Compaction { timestamp, .. }
-                | SessionEntry::ModelChange { timestamp, .. } => {
-                    last_timestamp = Some(timestamp);
-                }
-            }
-        }
-
-        if messages.is_empty() {
-            return Ok(0);
-        }
-
-        let content = messages.join("\n");
-        let content_len = content.len();
-        let change_hash = format!(
-            "session:{}:{}:{}",
-            messages.len(),
-            content_len,
-            last_timestamp.map_or(0, |timestamp| timestamp.timestamp_millis())
-        );
-        let path = format!("sessions/{session_id}");
-
-        self.index_content(&path, &content, "session", &change_hash, provider)
+        let units = self.load_session_index_units(session_id, reader).await?;
+        self.index_session_units(session_id, units, provider)
             .await
+            .map(|(count, _)| count)
     }
 
     pub async fn index_sessions(
@@ -432,20 +409,27 @@ impl SearchIndex {
     ) -> Result<usize> {
         let sessions = reader.list_sessions().await?;
         let mut total = 0;
+        let mut active_paths = std::collections::HashSet::new();
 
         for session_id in &sessions {
-            match self.index_session(session_id, reader, provider).await {
-                Ok(count) => total += count,
+            let units = match self.load_session_index_units(session_id, reader).await {
+                Ok(units) => units,
+                Err(error) => {
+                    tracing::warn!(session_id = %session_id, %error, "failed to read session for indexing");
+                    continue;
+                }
+            };
+
+            match self.index_session_units(session_id, units, provider).await {
+                Ok((count, session_paths)) => {
+                    total += count;
+                    active_paths.extend(session_paths);
+                }
                 Err(error) => {
                     tracing::warn!(session_id = %session_id, %error, "failed to index session");
                 }
             }
         }
-
-        // Remove stale session entries that no longer have backing JSONL files.
-        // This handles /new (reset) and manual session deletions.
-        let active_paths: std::collections::HashSet<String> =
-            sessions.iter().map(|id| format!("sessions/{id}")).collect();
 
         let db = Arc::clone(&self.db);
         let agent_id = self.agent_id.clone();
@@ -455,9 +439,9 @@ impl SearchIndex {
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
 
             let mut stmt =
-                conn.prepare("SELECT path FROM files WHERE source = 'session'")?;
+                conn.prepare("SELECT path FROM files WHERE source = 'session' AND agent_id = ?1")?;
             let indexed_paths: Vec<String> = stmt
-                .query_map([], |row| row.get(0))?
+                .query_map(params![agent_id.clone()], |row| row.get(0))?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -477,7 +461,10 @@ impl SearchIndex {
                         "DELETE FROM chunks WHERE path = ?1 AND agent_id = ?2",
                         params![&path, &agent_id],
                     )?;
-                    tx.execute("DELETE FROM files WHERE path = ?1", params![&path])?;
+                    tx.execute(
+                        "DELETE FROM files WHERE path = ?1 AND agent_id = ?2",
+                        params![&path, &agent_id],
+                    )?;
                     tx.commit()?;
                 }
             }
@@ -487,6 +474,130 @@ impl SearchIndex {
         .await??;
 
         Ok(total)
+    }
+
+    async fn load_session_index_units(
+        &self,
+        session_id: &str,
+        reader: &SessionReader,
+    ) -> Result<Vec<SessionIndexUnit>> {
+        let entries = reader.load_all_entries(session_id).await?;
+        Ok(build_session_index_units(session_id, entries))
+    }
+
+    async fn index_session_units(
+        &self,
+        session_id: &str,
+        units: Vec<SessionIndexUnit>,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<(usize, Vec<String>)> {
+        let active_paths = units
+            .iter()
+            .map(|unit| unit.path.clone())
+            .collect::<Vec<_>>();
+        let mut total = 0;
+
+        for unit in &units {
+            total += self
+                .index_content(
+                    &unit.path,
+                    &unit.content,
+                    "session",
+                    &unit.change_hash,
+                    provider,
+                )
+                .await?;
+        }
+
+        self.cleanup_stale_session_paths(session_id, &active_paths)
+            .await?;
+
+        Ok((total, active_paths))
+    }
+
+    async fn cleanup_stale_session_paths(
+        &self,
+        session_id: &str,
+        active_paths: &[String],
+    ) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let agent_id = self.agent_id.clone();
+        let base_path = format!("sessions/{session_id}");
+        let prefix_path = format!("{base_path}#%");
+        let active_paths = active_paths.to_vec();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt = conn.prepare(
+                "SELECT path FROM files WHERE agent_id = ?1 AND source = 'session' AND (path = ?2 OR path LIKE ?3)",
+            )?;
+            let indexed_paths: Vec<String> = stmt
+                .query_map(params![&agent_id, &base_path, &prefix_path], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for path in indexed_paths {
+                if active_paths.contains(&path) {
+                    continue;
+                }
+                let tx = conn.unchecked_transaction()?;
+                tx.execute(
+                    "DELETE FROM chunks_fts WHERE id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = ?2)",
+                    params![&path, &agent_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = ?2)",
+                    params![&path, &agent_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM chunks WHERE path = ?1 AND agent_id = ?2",
+                    params![&path, &agent_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM files WHERE path = ?1 AND agent_id = ?2",
+                    params![&path, &agent_id],
+                )?;
+                tx.commit()?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        Ok(())
+    }
+
+    async fn delete_indexed_path(&self, path: &str) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let path = path.to_owned();
+        let agent_id = self.agent_id.clone();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = ?2)",
+                params![&path, &agent_id],
+            )?;
+            tx.execute(
+                "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = ?2)",
+                params![&path, &agent_id],
+            )?;
+            tx.execute(
+                "DELETE FROM chunks WHERE path = ?1 AND agent_id = ?2",
+                params![&path, &agent_id],
+            )?;
+            tx.execute(
+                "DELETE FROM files WHERE path = ?1 AND agent_id = ?2",
+                params![&path, &agent_id],
+            )?;
+            tx.commit()?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
     }
 
     pub async fn index_all(
@@ -511,6 +622,76 @@ impl SearchIndex {
         }
 
         total += self.index_sessions(reader, provider).await?;
+
+        Ok(total)
+    }
+
+    pub async fn index_dirty(
+        &self,
+        file_store: &crate::file_store::MemoryFileStore,
+        reader: &SessionReader,
+        provider: &dyn EmbeddingProvider,
+        limit: usize,
+    ) -> Result<usize> {
+        let dirty_store = DirtySourceStore::new(Arc::clone(&self.db));
+        let pending = dirty_store
+            .list_pending(&self.agent_id, limit.max(1))
+            .await?;
+        let mut total = 0;
+
+        for item in pending {
+            let result: Result<usize> = match item.source_kind.as_str() {
+                DIRTY_KIND_MEMORY_FILE => {
+                    let content = file_store.read_long_term().await?;
+                    self.index_file("MEMORY.md", &content, "long_term", provider)
+                        .await
+                }
+                DIRTY_KIND_DAILY_FILE => {
+                    let path = file_store.workspace_dir().join(&item.source_ref);
+                    match tokio::fs::read_to_string(&path).await {
+                        Ok(content) => {
+                            self.index_file(&item.source_ref, &content, "daily", provider)
+                                .await
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            self.delete_indexed_path(&item.source_ref).await?;
+                            Ok(0)
+                        }
+                        Err(error) => Err(error.into()),
+                    }
+                }
+                DIRTY_KIND_SESSION => {
+                    if reader.session_exists(&item.source_ref).await {
+                        self.index_session(&item.source_ref, reader, provider).await
+                    } else {
+                        self.cleanup_stale_session_paths(&item.source_ref, &[])
+                            .await?;
+                        Ok(0)
+                    }
+                }
+                DIRTY_KIND_FACT => Ok(0),
+                DIRTY_KIND_SCHEMA | DIRTY_KIND_EMBEDDING_MODEL => {
+                    self.index_all(file_store, reader, provider).await
+                }
+                other => Err(anyhow!("unsupported dirty source kind: {other}")),
+            };
+
+            match result {
+                Ok(count) => {
+                    total += count;
+                    dirty_store.mark_processed(&item.id).await?;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        source_kind = %item.source_kind,
+                        source_ref = %item.source_ref,
+                        %error,
+                        "failed to index dirty source"
+                    );
+                }
+            }
+        }
 
         Ok(total)
     }
@@ -893,6 +1074,155 @@ impl SearchIndex {
 
         Ok(mmr_results)
     }
+}
+
+fn build_session_index_units(
+    session_id: &str,
+    entries: Vec<SessionEntry>,
+) -> Vec<SessionIndexUnit> {
+    let mut turns = Vec::new();
+    let mut current_lines = Vec::new();
+    let mut turn_index: usize = 0;
+    let mut last_timestamp_millis = 0_i64;
+
+    let finalize_turn = |units: &mut Vec<SessionIndexUnit>,
+                         current_lines: &mut Vec<String>,
+                         turn_index: usize,
+                         last_timestamp_millis: i64| {
+        if current_lines.is_empty() {
+            return;
+        }
+        let content = current_lines.join("\n");
+        let change_hash = format!(
+            "session_turn:{}:{}:{}:{}",
+            turn_index,
+            current_lines.len(),
+            content.len(),
+            last_timestamp_millis
+        );
+        units.push(SessionIndexUnit {
+            path: format!("sessions/{session_id}#turn:{turn_index}"),
+            content,
+            change_hash,
+            turn_start: turn_index,
+            turn_end: turn_index,
+        });
+        current_lines.clear();
+    };
+
+    for entry in entries {
+        match entry {
+            SessionEntry::Session { timestamp, .. } => {
+                last_timestamp_millis = timestamp.timestamp_millis();
+            }
+            SessionEntry::Message {
+                timestamp, message, ..
+            } if matches!(message.role.as_str(), "user" | "assistant") => {
+                last_timestamp_millis = timestamp.timestamp_millis();
+                if message.role == "user" {
+                    finalize_turn(
+                        &mut turns,
+                        &mut current_lines,
+                        turn_index,
+                        last_timestamp_millis,
+                    );
+                    turn_index += 1;
+                } else if current_lines.is_empty() {
+                    turn_index += 1;
+                }
+                current_lines.push(format!("{}: {}", message.role, message.content));
+            }
+            SessionEntry::Message { timestamp, .. }
+            | SessionEntry::ToolCall { timestamp, .. }
+            | SessionEntry::ToolResult { timestamp, .. }
+            | SessionEntry::Compaction { timestamp, .. }
+            | SessionEntry::ModelChange { timestamp, .. } => {
+                last_timestamp_millis = timestamp.timestamp_millis();
+            }
+        }
+    }
+
+    finalize_turn(
+        &mut turns,
+        &mut current_lines,
+        turn_index,
+        last_timestamp_millis,
+    );
+
+    merge_session_turn_units(session_id, turns)
+}
+
+fn merge_session_turn_units(
+    session_id: &str,
+    turns: Vec<SessionIndexUnit>,
+) -> Vec<SessionIndexUnit> {
+    if turns.len() <= 1 {
+        return turns;
+    }
+
+    const MAX_TOPIC_WINDOW_TURNS: usize = 3;
+    const MAX_TOPIC_WINDOW_CHARS: usize = 1600;
+
+    let mut merged = Vec::new();
+    let mut current = turns[0].clone();
+    let mut current_tokens = session_topic_tokens(&current.content);
+
+    for next in turns.into_iter().skip(1) {
+        let next_tokens = session_topic_tokens(&next.content);
+        let can_merge = current.turn_end + 1 == next.turn_start
+            && current.turn_end.saturating_sub(current.turn_start) + 1 < MAX_TOPIC_WINDOW_TURNS
+            && current.content.len() + next.content.len() + 2 <= MAX_TOPIC_WINDOW_CHARS
+            && topics_are_related(&current_tokens, &next_tokens);
+
+        if can_merge {
+            current.content = format!("{}\n{}", current.content, next.content);
+            current.turn_end = next.turn_end;
+            current.path = format!(
+                "sessions/{session_id}#turn:{}-{}",
+                current.turn_start, current.turn_end
+            );
+            current.change_hash = format!(
+                "session_turn:{}-{}:{}:{}",
+                current.turn_start,
+                current.turn_end,
+                current.content.lines().count(),
+                current.content.len()
+            );
+            current_tokens.extend(next_tokens);
+        } else {
+            merged.push(current);
+            current = next;
+            current_tokens = next_tokens;
+        }
+    }
+
+    merged.push(current);
+    merged
+}
+
+fn session_topic_tokens(content: &str) -> std::collections::HashSet<String> {
+    content
+        .lines()
+        .filter_map(|line| line.strip_prefix("user: "))
+        .flat_map(|line| {
+            line.split(|ch: char| !ch.is_alphanumeric())
+                .map(str::trim)
+                .filter(|token| token.len() >= 3)
+                .map(|token| token.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn topics_are_related(
+    current: &std::collections::HashSet<String>,
+    next: &std::collections::HashSet<String>,
+) -> bool {
+    if current.is_empty() || next.is_empty() {
+        return false;
+    }
+
+    current.intersection(next).count() >= 2
 }
 
 /// Extract a date from a path like "memory/2026-02-25.md"
@@ -1509,11 +1839,125 @@ mod tests {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
         assert!(count > 0);
         let session_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE source = 'session' AND path = 'sessions/s1'",
+            "SELECT COUNT(*) FROM chunks WHERE source = 'session' AND path LIKE 'sessions/s1#turn:%'",
             [],
             |r| r.get(0),
         )?;
         assert!(session_count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_dirty_indexes_memory_file() -> Result<()> {
+        let dir = TempDir::new()?;
+        let file_store = MemoryFileStore::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
+        file_store.write_long_term("# Long\n\ndirty memory").await?;
+
+        let db = test_db()?;
+        let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_MEMORY_FILE,
+                "MEMORY.md",
+                "memory_written",
+            )
+            .await?;
+
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let total = index
+            .index_dirty(&file_store, &session_reader, &provider, 10)
+            .await?;
+
+        assert!(total > 0);
+        let conn = db.lock().expect("lock");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE agent_id = 'test-agent' AND path = 'MEMORY.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_dirty_indexes_session() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer.append_message("s1", "user", "dirty session").await?;
+
+        let db = test_db()?;
+        let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_SESSION,
+                "s1",
+                "session_appended",
+            )
+            .await?;
+
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let total = index
+            .index_dirty(&MemoryFileStore::new(dir.path()), &reader, &provider, 10)
+            .await?;
+
+        assert!(total > 0);
+        let conn = db.lock().expect("lock");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE agent_id = 'test-agent' AND path LIKE 'sessions/s1#turn:%'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_dirty_removes_missing_daily_file() -> Result<()> {
+        let dir = TempDir::new()?;
+        let file_store = MemoryFileStore::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        index
+            .index_file(
+                "memory/2026-03-29.md",
+                "# Daily\n\nobsolete",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_DAILY_FILE,
+                "memory/2026-03-29.md",
+                "daily_deleted",
+            )
+            .await?;
+
+        let total = index
+            .index_dirty(&file_store, &session_reader, &provider, 10)
+            .await?;
+        assert_eq!(total, 0);
+
+        let conn = db.lock().expect("lock");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE agent_id = 'test-agent' AND path = 'memory/2026-03-29.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 0);
         Ok(())
     }
 
@@ -1546,11 +1990,11 @@ mod tests {
         assert!(count > 0);
         let conn = db.lock().expect("lock");
         let row: (String, String, String) = conn.query_row(
-            "SELECT path, source, text FROM chunks WHERE path = 'sessions/s1' LIMIT 1",
+            "SELECT path, source, text FROM chunks WHERE path LIKE 'sessions/s1#turn:%' ORDER BY path LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        assert_eq!(row.0, "sessions/s1");
+        assert_eq!(row.0, "sessions/s1#turn:1");
         assert_eq!(row.1, "session");
         assert!(row.2.contains("user: hello"));
         assert!(row.2.contains("assistant: hi"));
@@ -1617,7 +2061,7 @@ mod tests {
 
         let conn = db.lock().expect("lock");
         let text: String = conn.query_row(
-            "SELECT GROUP_CONCAT(text, ' ') FROM chunks WHERE path = 'sessions/s1'",
+            "SELECT GROUP_CONCAT(text, ' ') FROM chunks WHERE path LIKE 'sessions/s1#turn:%'",
             [],
             |r| r.get(0),
         )?;
@@ -1695,12 +2139,160 @@ mod tests {
             assert_eq!(remaining, 1);
 
             let stale_files: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM files WHERE path = 'sessions/s2'",
+                "SELECT COUNT(*) FROM files WHERE agent_id = 'test-agent' AND path LIKE 'sessions/s2%'",
                 [],
                 |r| r.get(0),
             )?;
             assert_eq!(stale_files, 0);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_session_splits_turns() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer
+            .append_message("s1", "user", "first question")
+            .await?;
+        writer
+            .append_message("s1", "assistant", "first answer")
+            .await?;
+        writer
+            .append_message("s1", "user", "second question")
+            .await?;
+        writer
+            .append_message("s1", "assistant", "second answer")
+            .await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        let count = index.index_session("s1", &reader, &provider).await?;
+
+        assert_eq!(count, 2);
+        let conn = db.lock().expect("lock");
+        let paths: Vec<String> = conn
+            .prepare("SELECT path FROM chunks WHERE source = 'session' ORDER BY path")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        assert_eq!(paths, vec!["sessions/s1#turn:1", "sessions/s1#turn:2"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_session_merges_related_turns_into_topic_window() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer
+            .append_message("s1", "user", "How do I use Rust Vec push?")
+            .await?;
+        writer
+            .append_message("s1", "assistant", "Use Vec push to append items in Rust.")
+            .await?;
+        writer
+            .append_message("s1", "user", "What about Vec insert in Rust collections?")
+            .await?;
+        writer
+            .append_message(
+                "s1",
+                "assistant",
+                "Vec insert adds an item at an index in Rust.",
+            )
+            .await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        let count = index.index_session("s1", &reader, &provider).await?;
+
+        assert_eq!(count, 1);
+        let conn = db.lock().expect("lock");
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT path, text FROM chunks WHERE source = 'session' ORDER BY path")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<(String, String)>, _>>()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "sessions/s1#turn:1-2");
+        assert!(rows[0].1.contains("user: How do I use Rust Vec push?"));
+        assert!(rows[0]
+            .1
+            .contains("user: What about Vec insert in Rust collections?"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_index_session_keeps_unrelated_turns_separate() -> Result<()> {
+        let dir = TempDir::new()?;
+        let writer = SessionWriter::new(dir.path());
+        let reader = SessionReader::new(dir.path());
+        writer.start_session("s1", "main").await?;
+        writer
+            .append_message("s1", "user", "How do I use Rust Vec push?")
+            .await?;
+        writer
+            .append_message("s1", "assistant", "Use Vec push to append items in Rust.")
+            .await?;
+        writer
+            .append_message("s1", "user", "What is the weather in Singapore today?")
+            .await?;
+        writer
+            .append_message(
+                "s1",
+                "assistant",
+                "I cannot fetch weather without a tool call.",
+            )
+            .await?;
+
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        let count = index.index_session("s1", &reader, &provider).await?;
+
+        assert_eq!(count, 2);
+        let conn = db.lock().expect("lock");
+        let paths: Vec<String> = conn
+            .prepare("SELECT path FROM chunks WHERE source = 'session' ORDER BY path")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        assert_eq!(paths, vec!["sessions/s1#turn:1", "sessions/s1#turn:2"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_file_tracks_files_per_agent_scope() -> Result<()> {
+        let db = test_db()?;
+        let provider = StubEmbeddingProvider::new(8);
+        let index_a = SearchIndex::new(Arc::clone(&db), "agent-a");
+        let index_b = SearchIndex::new(Arc::clone(&db), "agent-b");
+
+        index_a
+            .index_file("MEMORY.md", "# A\n\nalpha", "long_term", &provider)
+            .await?;
+        index_b
+            .index_file("MEMORY.md", "# B\n\nbeta", "long_term", &provider)
+            .await?;
+
+        let conn = db.lock().expect("lock");
+        let file_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE path = 'MEMORY.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        let chunk_rows: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT agent_id) FROM chunks WHERE path = 'MEMORY.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(file_rows, 2);
+        assert_eq!(chunk_rows, 2);
         Ok(())
     }
 

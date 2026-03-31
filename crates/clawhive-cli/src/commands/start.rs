@@ -620,8 +620,8 @@ async fn start_bot(
                 agent_config.agent_id.clone(),
                 file_store.clone(),
                 Arc::clone(&router_for_consolidation),
-                "sonnet".to_string(),
-                vec!["haiku".to_string()],
+                agent_config.model_policy.primary.clone(),
+                agent_config.model_policy.fallbacks.clone(),
             )
             .with_search_index(search_index)
             .with_embedding_provider(consolidation_embedding_provider.clone())

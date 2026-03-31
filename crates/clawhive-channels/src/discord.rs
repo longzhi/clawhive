@@ -368,8 +368,8 @@ impl EventHandler for DiscordHandler {
         let http_typing = ctx.http.clone();
         let user_msg_id = msg.id.get().to_string();
         tokio::spawn(async move {
-            // Spawn a task to keep typing indicator alive
-            let typing_handle = tokio::spawn({
+            // Spawn typing indicator with drop guard — ensures cleanup on panic or timeout
+            let _typing_guard = AbortOnDrop(tokio::spawn({
                 let http = http_typing.clone();
                 async move {
                     loop {
@@ -379,15 +379,19 @@ impl EventHandler for DiscordHandler {
                         }
                     }
                 }
-            });
+            }));
 
-            let result = gateway.handle_inbound(inbound).await;
+            // 5-minute timeout to prevent typing indicator from running forever
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                gateway.handle_inbound(inbound),
+            )
+            .await;
 
-            // Stop typing indicator
-            typing_handle.abort();
+            // _typing_guard dropped here (or on panic), aborting the typing loop
 
             match result {
-                Ok(Some(outbound)) => {
+                Ok(Ok(Some(outbound))) => {
                     let has_attachments = !outbound.attachments.is_empty();
                     let has_text = !outbound.text.trim().is_empty();
 
@@ -428,12 +432,19 @@ impl EventHandler for DiscordHandler {
                         }
                     }
                 }
-                Ok(None) => {}
-                Err(err) => {
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => {
                     tracing::error!("discord gateway error: {err}");
                     let user_msg = format!("Error: {err}");
                     if let Err(send_err) = channel_id.say(&http, &user_msg).await {
                         tracing::error!("failed to send discord error message: {send_err}");
+                    }
+                }
+                Err(_timeout) => {
+                    tracing::error!("discord handle_inbound timed out after 300s");
+                    let user_msg = "⏱️ Sorry, the request timed out. Please try again.";
+                    if let Err(send_err) = channel_id.say(&http, user_msg).await {
+                        tracing::error!("failed to send discord timeout message: {send_err}");
                     }
                 }
             }
@@ -641,6 +652,16 @@ fn split_message(text: &str) -> Vec<&str> {
         rest = &rest[split_at..];
     }
     chunks
+}
+
+/// Drop guard that aborts a spawned task when dropped.
+/// Ensures typing indicator loops are cleaned up on panic, timeout, or normal exit.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Send a potentially long message as multiple chunks.

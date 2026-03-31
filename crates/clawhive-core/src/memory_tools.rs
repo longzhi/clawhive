@@ -6,20 +6,35 @@ use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::fact_store::{self, Fact, FactStore};
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::{MemoryStore, RecentExplicitMemoryWrite, SessionMemoryStateRecord};
 use clawhive_provider::ToolDef;
 
+use crate::memory_document::MemoryDocument;
+
+use super::memory_retrieval::{
+    classify_chunk_source, find_matching_fact, search_memory, source_label, MemoryHit,
+};
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
 pub struct MemorySearchTool {
+    fact_store: FactStore,
     search_index: SearchIndex,
     embedding_provider: Arc<dyn EmbeddingProvider>,
+    agent_id: String,
 }
 
 impl MemorySearchTool {
-    pub fn new(search_index: SearchIndex, embedding_provider: Arc<dyn EmbeddingProvider>) -> Self {
+    pub fn new(
+        fact_store: FactStore,
+        search_index: SearchIndex,
+        embedding_provider: Arc<dyn EmbeddingProvider>,
+        agent_id: String,
+    ) -> Self {
         Self {
+            fact_store,
             search_index,
             embedding_provider,
+            agent_id,
         }
     }
 }
@@ -29,7 +44,7 @@ impl ToolExecutor for MemorySearchTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: "memory_search".into(),
-            description: "Search through long-term memory. Returns snippets ranked by relevance. Use memory_get to read full content of interesting results.".into(),
+            description: "Search through remembered facts and indexed memory. Returns results with source labels. Use memory_get to read full content of interesting files.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -54,10 +69,16 @@ impl ToolExecutor for MemorySearchTool {
             .ok_or_else(|| anyhow::anyhow!("missing 'query' field"))?;
         let max_results = input["max_results"].as_u64().unwrap_or(6) as usize;
 
-        match self
-            .search_index
-            .search(query, self.embedding_provider.as_ref(), max_results, 0.35)
-            .await
+        match search_memory(
+            &self.fact_store,
+            &self.search_index,
+            self.embedding_provider.as_ref(),
+            &self.agent_id,
+            query,
+            max_results,
+            0.35,
+        )
+        .await
         {
             Ok(results) if results.is_empty() => Ok(ToolOutput {
                 content: "No relevant memories found.".into(),
@@ -66,19 +87,7 @@ impl ToolExecutor for MemorySearchTool {
             Ok(results) => {
                 let mut output = String::new();
                 for r in &results {
-                    let snippet: String = r.text.chars().take(200).collect();
-                    let truncated = if r.text.chars().count() > 200 {
-                        "..."
-                    } else {
-                        ""
-                    };
-                    output.push_str(&format!(
-                        "- [{path}:{start}-{end}] (score: {score:.2}) {snippet}{truncated}\n",
-                        path = r.path,
-                        start = r.start_line,
-                        end = r.end_line,
-                        score = r.score,
-                    ));
+                    output.push_str(&format_memory_hit(r));
                 }
                 Ok(ToolOutput {
                     content: output,
@@ -89,6 +98,41 @@ impl ToolExecutor for MemorySearchTool {
                 content: format!("Search failed: {e}"),
                 is_error: true,
             }),
+        }
+    }
+}
+
+fn format_memory_hit(hit: &MemoryHit) -> String {
+    match hit {
+        MemoryHit::Fact(hit) => {
+            let snippet: String = hit.fact.content.chars().take(200).collect();
+            let truncated = if hit.fact.content.chars().count() > 200 {
+                "..."
+            } else {
+                ""
+            };
+            format!(
+                "- [fact:{fact_type}] [{source}] (score: {score:.2}) {snippet}{truncated}\n",
+                fact_type = hit.fact.fact_type,
+                source = source_label(super::memory_retrieval::MemorySourceKind::Fact),
+                score = hit.score,
+            )
+        }
+        MemoryHit::Chunk(hit) => {
+            let snippet: String = hit.text.chars().take(200).collect();
+            let truncated = if hit.text.chars().count() > 200 {
+                "..."
+            } else {
+                ""
+            };
+            format!(
+                "- [{path}:{start}-{end}] [{source}] (score: {score:.2}) {snippet}{truncated}\n",
+                path = hit.path,
+                start = hit.start_line,
+                end = hit.end_line,
+                source = source_label(classify_chunk_source(&hit.source, &hit.path)),
+                score = hit.score,
+            )
         }
     }
 }
@@ -164,15 +208,84 @@ impl ToolExecutor for MemoryGetTool {
 
 pub struct MemoryWriteTool {
     fact_store: FactStore,
+    file_store: MemoryFileStore,
+    memory: Arc<MemoryStore>,
     agent_id: String,
 }
 
 impl MemoryWriteTool {
-    pub fn new(fact_store: FactStore, agent_id: String) -> Self {
+    pub fn new(
+        fact_store: FactStore,
+        file_store: MemoryFileStore,
+        memory: Arc<MemoryStore>,
+        agent_id: String,
+    ) -> Self {
         Self {
             fact_store,
+            file_store,
+            memory,
             agent_id,
         }
+    }
+
+    async fn record_explicit_write_marker(&self, ctx: &ToolContext, fact: &Fact) -> Result<()> {
+        if ctx.session_key().is_empty() {
+            return Ok(());
+        }
+
+        let Some(session) = self.memory.get_session(ctx.session_key()).await? else {
+            return Ok(());
+        };
+
+        let mut state = self
+            .memory
+            .get_session_memory_state(&self.agent_id, &session.session_id)
+            .await?
+            .unwrap_or(SessionMemoryStateRecord {
+                agent_id: self.agent_id.clone(),
+                session_id: session.session_id.clone(),
+                session_key: session.session_key.clone(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: false,
+                recent_explicit_writes: Vec::new(),
+                open_episodes: Vec::new(),
+            });
+
+        let normalized_content = super::memory_retrieval::normalize_text(&fact.content);
+        if normalized_content.is_empty() {
+            return Ok(());
+        }
+
+        state.recent_explicit_writes.retain(|marker| {
+            let normalized_marker = super::memory_retrieval::normalize_text(&marker.summary);
+            !normalized_marker.is_empty()
+        });
+        if state.recent_explicit_writes.iter().any(|marker| {
+            let normalized_marker = super::memory_retrieval::normalize_text(&marker.summary);
+            !normalized_marker.is_empty()
+                && super::memory_retrieval::are_near_duplicates(
+                    &normalized_marker,
+                    &normalized_content,
+                )
+        }) {
+            return Ok(());
+        }
+
+        state
+            .recent_explicit_writes
+            .push(RecentExplicitMemoryWrite {
+                turn_index: session.interaction_count.saturating_add(1),
+                memory_ref: fact.id.clone(),
+                canonical_id: None,
+                summary: fact.content.clone(),
+                recorded_at: chrono::Utc::now(),
+            });
+        if state.recent_explicit_writes.len() > 16 {
+            let overflow = state.recent_explicit_writes.len() - 16;
+            state.recent_explicit_writes.drain(0..overflow);
+        }
+        self.memory.upsert_session_memory_state(state).await
     }
 }
 
@@ -200,13 +313,36 @@ impl ToolExecutor for MemoryWriteTool {
         }
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let content = input["content"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'content' field"))?;
         let fact_type = input["fact_type"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'fact_type' field"))?;
+
+        let active_facts = self.fact_store.get_active_facts(&self.agent_id).await?;
+        if let Some(existing) = find_matching_fact(&active_facts, content) {
+            return Ok(ToolOutput {
+                content: format!("Already remembered: {}", existing.content),
+                is_error: false,
+            });
+        }
+
+        let long_term = self.file_store.read_long_term().await?;
+        if !long_term.trim().is_empty() {
+            let doc = MemoryDocument::parse(&long_term);
+            let existing_memory_item = crate::memory_document::MEMORY_SECTION_ORDER
+                .iter()
+                .flat_map(|heading| doc.section_items(heading))
+                .find(|item| super::memory_retrieval::is_matching_memory_content(item, content));
+            if let Some(existing) = existing_memory_item {
+                return Ok(ToolOutput {
+                    content: format!("Already remembered: {}", existing),
+                    is_error: false,
+                });
+            }
+        }
 
         let now = chrono::Utc::now().to_rfc3339();
         let fact = Fact {
@@ -219,8 +355,12 @@ impl ToolExecutor for MemoryWriteTool {
             status: "active".to_owned(),
             occurred_at: None,
             recorded_at: now.clone(),
-            source_type: "agent_write".to_owned(),
-            source_session: None,
+            source_type: "explicit_user_memory".to_owned(),
+            source_session: self
+                .memory
+                .get_session(ctx.session_key())
+                .await?
+                .map(|session| session.session_id),
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
@@ -231,6 +371,14 @@ impl ToolExecutor for MemoryWriteTool {
         match self.fact_store.insert_fact(&fact).await {
             Ok(()) => {
                 let _ = self.fact_store.record_add(&fact).await;
+                if let Err(error) = self.record_explicit_write_marker(ctx, &fact).await {
+                    tracing::warn!(
+                        %error,
+                        agent_id = %self.agent_id,
+                        session_key = %ctx.session_key(),
+                        "Failed to persist explicit memory write marker"
+                    );
+                }
                 Ok(ToolOutput {
                     content: format!("Remembered: {content}"),
                     is_error: false,
@@ -327,6 +475,7 @@ mod tests {
     use super::*;
     use clawhive_memory::embedding::StubEmbeddingProvider;
     use clawhive_memory::fact_store::FactStore;
+    use clawhive_memory::memory_lineage::MemoryLineageStore;
     use clawhive_memory::search_index::SearchIndex;
     use clawhive_memory::{file_store::MemoryFileStore, MemoryStore};
     use std::sync::Arc;
@@ -335,11 +484,17 @@ mod tests {
     fn setup() -> (TempDir, Arc<MemoryStore>, MemorySearchTool, MemoryGetTool) {
         let tmp = TempDir::new().unwrap();
         let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let fact_store = FactStore::new(memory.db());
         let search_index = SearchIndex::new(memory.db(), "test-agent");
         let embedding: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(8));
         let file_store = MemoryFileStore::new(tmp.path());
 
-        let search_tool = MemorySearchTool::new(search_index, embedding);
+        let search_tool = MemorySearchTool::new(
+            fact_store,
+            search_index,
+            embedding,
+            "test-agent".to_string(),
+        );
         let get_tool = MemoryGetTool::new(file_store);
         (tmp, memory, search_tool, get_tool)
     }
@@ -362,8 +517,13 @@ mod tests {
 
     #[test]
     fn memory_write_tool_definition() {
-        let (_tmp, memory, _, _) = setup();
-        let tool = MemoryWriteTool::new(FactStore::new(memory.db()), "agent-1".to_string());
+        let (tmp, memory, _, _) = setup();
+        let tool = MemoryWriteTool::new(
+            FactStore::new(memory.db()),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
 
         let def = tool.definition();
 
@@ -397,6 +557,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_search_includes_matching_facts() {
+        let (tmp, memory, tool, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let write_tool = MemoryWriteTool::new(
+            fact_store,
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "test-agent".to_string(),
+        );
+
+        write_tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers Chinese replies",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let result = tool
+            .execute(serde_json::json!({"query": "Chinese replies"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("[fact:preference]"));
+        assert!(result.content.contains("[fact]"));
+        assert!(result.content.contains("Chinese replies"));
+    }
+
+    #[tokio::test]
     async fn memory_get_long_term() {
         let (tmp, _memory, _, tool) = setup();
         let ctx = ToolContext::builtin();
@@ -416,10 +610,16 @@ mod tests {
 
     #[tokio::test]
     async fn memory_write_stores_active_fact() {
-        let (_tmp, memory, _, _) = setup();
+        let (tmp, memory, _, _) = setup();
         let ctx = ToolContext::builtin();
         let fact_store = FactStore::new(memory.db());
-        let tool = MemoryWriteTool::new(fact_store.clone(), "agent-1".to_string());
+        let lineage_store = MemoryLineageStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
 
         let result = tool
             .execute(
@@ -442,14 +642,190 @@ mod tests {
             .expect("fact should be stored");
         assert_eq!(fact.status, "active");
         assert_eq!(fact.fact_type, "preference");
+
+        let links = lineage_store
+            .get_links_for_source("agent-1", "fact", &fact.id)
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(fact.source_type, "explicit_user_memory");
+    }
+
+    #[tokio::test]
+    async fn memory_write_is_idempotent_for_exact_duplicate() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+
+        let first = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers dark mode",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.content, "Remembered: User prefers dark mode");
+
+        let second = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers dark mode",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.content, "Already remembered: User prefers dark mode");
+
+        let facts = fact_store.get_active_facts("agent-1").await.unwrap();
+        assert_eq!(facts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_write_suppresses_near_duplicate_fact() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+
+        tool.execute(
+            serde_json::json!({
+                "content": "User prefers Chinese replies",
+                "fact_type": "preference"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let second = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers Chinese replies for future answers",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second.content,
+            "Already remembered: User prefers Chinese replies"
+        );
+
+        let facts = fact_store.get_active_facts("agent-1").await.unwrap();
+        assert_eq!(facts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_write_suppresses_content_already_in_long_term_memory() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let file_store = MemoryFileStore::new(tmp.path());
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Memory refactor is now section-based\n\n## 持续性背景脉络\n\n## 关键历史决策\n",
+            )
+            .await
+            .unwrap();
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            file_store,
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "Memory refactor is now section-based",
+                    "fact_type": "decision"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.content,
+            "Already remembered: Memory refactor is now section-based"
+        );
+        let facts = fact_store.get_active_facts("agent-1").await.unwrap();
+        assert!(facts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_write_records_recent_explicit_marker_for_current_session() {
+        let (tmp, memory, _, _) = setup();
+        let fact_store = FactStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+        memory
+            .upsert_session(clawhive_memory::SessionRecord {
+                session_key: "chat:1".to_string(),
+                session_id: "session-123".to_string(),
+                agent_id: "agent-1".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active: chrono::Utc::now(),
+                ttl_seconds: 1800,
+                interaction_count: 4,
+            })
+            .await
+            .unwrap();
+        let ctx = ToolContext::builtin().with_session_key("chat:1");
+
+        tool.execute(
+            serde_json::json!({
+                "content": "User prefers concise replies",
+                "fact_type": "preference"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let state = memory
+            .get_session_memory_state("agent-1", "session-123")
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.recent_explicit_writes.len(), 1);
+        let marker = &state.recent_explicit_writes[0];
+        assert_eq!(marker.turn_index, 5);
+        assert_eq!(marker.summary, "User prefers concise replies");
     }
 
     #[tokio::test]
     async fn memory_forget_retracts_existing_fact() {
-        let (_tmp, memory, _, _) = setup();
+        let (tmp, memory, _, _) = setup();
         let ctx = ToolContext::builtin();
         let fact_store = FactStore::new(memory.db());
-        let write_tool = MemoryWriteTool::new(fact_store.clone(), "agent-1".to_string());
+        let write_tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
         let forget_tool = MemoryForgetTool::new(fact_store.clone(), "agent-1".to_string());
 
         write_tool

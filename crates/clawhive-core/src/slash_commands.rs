@@ -14,6 +14,8 @@ pub enum SlashCommand {
     New {
         model_hint: Option<String>,
     },
+    /// /reset - Start a fresh session without model hint
+    Reset,
     /// /model - Show current model info or change model
     /// /model provider/model - Change to specified model (persisted)
     Model {
@@ -66,6 +68,7 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
             let model_hint = rest.first().map(|s| s.to_string());
             Some(SlashCommand::New { model_hint })
         }
+        "/reset" => Some(SlashCommand::Reset),
         "/model" => {
             let new_model = rest.first().map(|s| s.to_string());
             Some(SlashCommand::Model { new_model })
@@ -187,6 +190,7 @@ mod tests {
                 model_hint: Some("sonnet".to_string())
             })
         );
+        assert_eq!(parse_command("/reset"), Some(SlashCommand::Reset));
     }
 
     #[test]
@@ -278,7 +282,7 @@ mod tests {
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("not a /command"), None);
         assert_eq!(parse_command("/unknown"), None);
-        assert_eq!(parse_command("/reset"), None); // /reset not supported
+        assert_eq!(parse_command("/reset"), Some(SlashCommand::Reset));
     }
 
     #[test]

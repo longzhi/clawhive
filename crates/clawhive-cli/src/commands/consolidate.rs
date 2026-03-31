@@ -7,17 +7,23 @@ use clawhive_core::*;
 
 use crate::runtime::bootstrap::{bootstrap, build_embedding_provider, build_router_from_config};
 
-pub(crate) async fn run(root: &Path) -> Result<()> {
+pub(crate) async fn run(root: &Path, agent_id_override: Option<&str>) -> Result<()> {
     let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager, _approval_registry) =
         bootstrap(root, None).await?;
 
-    let consolidation_agent_id = config.routing.default_agent_id.clone();
-    let consolidation_workspace = config
+    let consolidation_agent_id = agent_id_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| config.routing.default_agent_id.clone());
+    let agent_config = config
         .agents
         .iter()
         .find(|agent| agent.agent_id == consolidation_agent_id)
-        .map(|agent| Workspace::resolve(root, &agent.agent_id, agent.workspace.as_deref()))
-        .unwrap_or_else(|| Workspace::resolve(root, &consolidation_agent_id, None));
+        .ok_or_else(|| anyhow::anyhow!("agent '{}' not found in config", consolidation_agent_id))?;
+    let consolidation_workspace = Workspace::resolve(
+        root,
+        &agent_config.agent_id,
+        agent_config.workspace.as_deref(),
+    );
     let workspace_dir = consolidation_workspace.root().to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
@@ -29,8 +35,8 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
             consolidation_agent_id,
             file_store.clone(),
             Arc::new(build_router_from_config(&config).await),
-            "sonnet".to_string(),
-            vec!["haiku".to_string()],
+            agent_config.model_policy.primary.clone(),
+            agent_config.model_policy.fallbacks.clone(),
         )
         .with_search_index(consolidation_search_index)
         .with_embedding_provider(consolidation_embedding_provider)

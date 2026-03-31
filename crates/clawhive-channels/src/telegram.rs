@@ -371,8 +371,8 @@ impl TelegramBot {
 
                 let bot_typing = bot.clone();
                 tokio::spawn(async move {
-                    // Spawn a task to keep typing indicator alive
-                    let typing_handle = tokio::spawn({
+                    // Spawn typing indicator with drop guard — ensures cleanup on panic or timeout
+                    let _typing_guard = AbortOnDrop(tokio::spawn({
                         let bot = bot_typing.clone();
                         async move {
                             loop {
@@ -386,15 +386,19 @@ impl TelegramBot {
                                 }
                             }
                         }
-                    });
+                    }));
 
-                    let result = gateway.handle_inbound(inbound).await;
+                    // 5-minute timeout to prevent typing indicator from running forever
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(300),
+                        gateway.handle_inbound(inbound),
+                    )
+                    .await;
 
-                    // Stop typing indicator
-                    typing_handle.abort();
+                    // _typing_guard dropped here (or on panic), aborting the typing loop
 
                     match result {
-                        Ok(Some(outbound)) => {
+                        Ok(Ok(Some(outbound))) => {
                             match attachment_text_mode(
                                 &outbound.text,
                                 !outbound.attachments.is_empty(),
@@ -476,8 +480,8 @@ impl TelegramBot {
                                 }
                             }
                         }
-                        Ok(None) => {}
-                        Err(err) => {
+                        Ok(Ok(None)) => {}
+                        Ok(Err(err)) => {
                             tracing::error!(
                                 trace_id = %trace_id,
                                 chat_id = chat_id.0,
@@ -495,6 +499,26 @@ impl TelegramBot {
                                     message_id,
                                     error = %send_err,
                                     "failed to send telegram error message"
+                                );
+                            }
+                        }
+                        Err(_timeout) => {
+                            tracing::error!(
+                                trace_id = %trace_id,
+                                chat_id = chat_id.0,
+                                user_id,
+                                message_id,
+                                "telegram handle_inbound timed out after 300s"
+                            );
+                            let user_msg = "⏱️ Sorry, the request timed out. Please try again.";
+                            if let Err(send_err) = bot.send_message(chat_id, user_msg).await {
+                                tracing::error!(
+                                    trace_id = %trace_id,
+                                    chat_id = chat_id.0,
+                                    user_id,
+                                    message_id,
+                                    error = %send_err,
+                                    "failed to send telegram timeout message"
                                 );
                             }
                         }
@@ -706,6 +730,16 @@ pub fn detect_mention(msg: &Message) -> (bool, Option<String>) {
     }
 
     (false, None)
+}
+
+/// Drop guard that aborts a spawned task when dropped.
+/// Ensures typing indicator loops are cleaned up on panic, timeout, or normal exit.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Spawn a listener for DeliverAnnounce messages (for scheduled task delivery)

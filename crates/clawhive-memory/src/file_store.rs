@@ -1,5 +1,8 @@
 use anyhow::Result;
 use chrono::NaiveDate;
+use fs2::FileExt;
+use std::fs as stdfs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -128,6 +131,51 @@ impl MemoryFileStore {
         Ok(())
     }
 
+    /// Atomically read-modify-write a daily file under an exclusive file lock.
+    pub async fn update_daily<F>(&self, date: NaiveDate, update: F) -> Result<Option<String>>
+    where
+        F: FnOnce(Option<String>) -> Result<Option<String>> + Send + 'static,
+    {
+        self.ensure_daily_dir().await?;
+        let path = self.daily_path(date);
+
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let mut file = stdfs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+
+            file.lock_exclusive()?;
+
+            let result = (|| -> Result<Option<String>> {
+                let mut existing = String::new();
+                file.read_to_string(&mut existing)?;
+                let existing = if existing.is_empty() {
+                    None
+                } else {
+                    Some(existing)
+                };
+
+                let updated = update(existing)?;
+                if let Some(content) = updated.as_ref() {
+                    file.set_len(0)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.write_all(content.as_bytes())?;
+                    file.flush()?;
+                }
+
+                Ok(updated)
+            })();
+
+            let unlock_result = file.unlock();
+            unlock_result?;
+            result
+        })
+        .await?
+    }
+
     /// List all daily files sorted by date (newest first), returns (date, path) tuples
     pub async fn list_daily_files(&self) -> Result<Vec<(NaiveDate, PathBuf)>> {
         let mut out = Vec::new();
@@ -217,8 +265,10 @@ mod tests {
     use super::{smart_truncate, MemoryFileStore};
     use anyhow::Result;
     use chrono::NaiveDate;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::fs;
+    use tokio::task::JoinSet;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
@@ -401,6 +451,38 @@ mod tests {
         assert!(ctx.contains("From memory/2026-02-13.md:\n"));
         assert!(ctx.contains("From memory/2026-02-12.md:\n"));
         assert!(!ctx.contains("From memory/2026-02-11.md:\n"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_update_daily_serializes_concurrent_updates() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = Arc::new(MemoryFileStore::new(dir.path()));
+        let d = date(2026, 3, 29);
+        let mut tasks = JoinSet::new();
+
+        for item in ["A", "B"] {
+            let store = Arc::clone(&store);
+            let item = item.to_string();
+            tasks.spawn(async move {
+                store
+                    .update_daily(d, move |existing| {
+                        let mut content = existing
+                            .unwrap_or_else(|| "# 2026-03-29\n\n## General\n\n".to_string());
+                        content.push_str(&format!("- {item}\n"));
+                        Ok(Some(content))
+                    })
+                    .await
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            result??;
+        }
+
+        let content = store.read_daily(d).await?.expect("daily should exist");
+        assert!(content.contains("- A"));
+        assert!(content.contains("- B"));
         Ok(())
     }
 

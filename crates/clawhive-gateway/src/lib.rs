@@ -517,8 +517,15 @@ async fn handle_scheduled_task(
             };
             let session_key = SessionKey::from_inbound(&inbound).0;
 
-            match gateway.handle_inbound_for_agent(inbound, &agent_id).await {
-                Ok(outbound) => {
+            // SystemEvent gets a 10-minute timeout (same default as AgentTurn)
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(600),
+                gateway.handle_inbound_for_agent(inbound, &agent_id),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(outbound)) => {
                     let ended_at = chrono::Utc::now();
                     let delivery_outcome = deliver_if_needed(
                         &bus,
@@ -564,7 +571,7 @@ async fn handle_scheduled_task(
                         })
                         .await;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let ended_at = chrono::Utc::now();
                     let exec_error = e.to_string();
                     let delivery_outcome = deliver_if_needed(
@@ -586,6 +593,37 @@ async fn handle_scheduled_task(
                             schedule_id,
                             status: ScheduledRunStatus::Error,
                             error: Some(exec_error),
+                            started_at: triggered_at,
+                            ended_at,
+                            delivery_status: delivery_outcome.status,
+                            delivery_error: delivery_outcome.error,
+                            response: None,
+                            session_key: Some(session_key),
+                        })
+                        .await;
+                }
+                Err(_timeout) => {
+                    let ended_at = chrono::Utc::now();
+                    let timeout_error = "SystemEvent execution timed out after 600s".to_string();
+                    let delivery_outcome = deliver_if_needed(
+                        &bus,
+                        &delivery,
+                        &DeliveryAttempt {
+                            schedule_id: &schedule_id,
+                            status: ScheduledRunStatus::Error,
+                            response: None,
+                            error: Some(timeout_error.clone()),
+                            started_at: triggered_at,
+                            ended_at,
+                        },
+                    )
+                    .await;
+
+                    let _ = bus
+                        .publish(BusMessage::ScheduledTaskCompleted {
+                            schedule_id,
+                            status: ScheduledRunStatus::Error,
+                            error: Some(timeout_error),
                             started_at: triggered_at,
                             ended_at,
                             delivery_status: delivery_outcome.status,

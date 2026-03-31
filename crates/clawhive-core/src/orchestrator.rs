@@ -1,14 +1,22 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _, Result};
 use arc_swap::ArcSwap;
+use chrono::Utc;
 use clawhive_bus::BusPublisher;
+use clawhive_memory::dirty_sources::{DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_SESSION};
 use clawhive_memory::embedding::EmbeddingProvider;
+use clawhive_memory::fact_store::FactStore;
 use clawhive_memory::file_store::MemoryFileStore;
+use clawhive_memory::memory_lineage::generate_canonical_id_with_key;
+use clawhive_memory::memory_lineage::MemoryLineageStore;
 use clawhive_memory::search_index::SearchIndex;
-use clawhive_memory::{MemoryStore, SessionMessage};
+use clawhive_memory::{
+    EpisodeStateRecord, EpisodeStatusRecord, EpisodeTaskStateRecord, MemoryStore,
+    RecentExplicitMemoryWrite, SessionEntry, SessionMemoryStateRecord, SessionMessage,
+};
 use clawhive_memory::{SessionReader, SessionWriter};
 use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use clawhive_runtime::TaskExecutor;
@@ -21,18 +29,26 @@ use super::language_prefs::{
     apply_language_policy_prompt, detect_response_language, is_language_guard_exempt,
     log_language_guard, LanguagePrefs,
 };
+use super::memory_document::MemoryDocument;
+use super::memory_summary::{
+    build_summary_prompt, group_daily_candidates, merge_daily_blocks, parse_candidates,
+    retain_summary_candidates, SummaryClass,
+};
 
 use super::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
 use super::approval::ApprovalRegistry;
 use super::config::{ExecSecurityConfig, FullAgentConfig, SandboxPolicyConfig, SecurityMode};
-use super::context::ContextCheckResult;
 use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
+use super::memory_retrieval::{
+    filter_duplicate_chunks_against_facts, infer_memory_routing_bias, is_matching_memory_content,
+    search_memory, MemoryHit, MemoryRoutingBias, MemorySourceKind,
+};
 use super::memory_tools::{MemoryForgetTool, MemoryGetTool, MemorySearchTool, MemoryWriteTool};
 use super::persona::Persona;
 use super::router::LlmRouter;
 use super::schedule_tool::ScheduleTool;
-use super::session::SessionManager;
+use super::session::{Session, SessionManager, SessionResetReason};
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
 use super::skill_install_state::SkillInstallState;
@@ -43,6 +59,411 @@ use super::workspace::Workspace;
 use super::workspace_manager::{AgentWorkspaceManager, AgentWorkspaceState};
 
 const SKILL_INSTALL_USAGE_HINT: &str = "请提供 skill 来源路径或 URL。用法: /skill install <source>";
+const EPISODE_FLUSH_PENDING_GRACE_SECS: i64 = 30;
+const MAX_OPEN_EPISODE_TURNS: u64 = 4;
+
+#[derive(Debug, Clone)]
+struct BoundaryFlushEpisode {
+    start_turn: u64,
+    end_turn: u64,
+    messages: Vec<SessionMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundaryFlushSnapshot {
+    episodes: Vec<BoundaryFlushEpisode>,
+    turn_count: u64,
+    recent_explicit_writes: Vec<RecentExplicitMemoryWrite>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolLoopMeta {
+    successful_tool_calls: usize,
+    final_stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpisodeBoundaryDecision {
+    ContinueCurrent,
+    CloseCurrentAndOpenNext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EpisodeTurnDecision {
+    task_state: EpisodeTaskStateRecord,
+    boundary: EpisodeBoundaryDecision,
+}
+
+struct EpisodeTurnInput<'a> {
+    turn_index: u64,
+    user_text: &'a str,
+    assistant_text: &'a str,
+    successful_tool_calls: usize,
+    final_stop_reason: Option<&'a str>,
+}
+
+struct SummaryGenerationRequest<'a> {
+    router: &'a LlmRouter,
+    file_store: &'a clawhive_memory::file_store::MemoryFileStore,
+    memory: &'a Arc<MemoryStore>,
+    embedding_provider: &'a Arc<dyn EmbeddingProvider>,
+    agent_id: &'a str,
+    session: &'a Session,
+    agent: &'a FullAgentConfig,
+    source: &'a str,
+    messages: Vec<SessionMessage>,
+    recent_explicit_writes: Vec<RecentExplicitMemoryWrite>,
+}
+
+fn normalized_duplicate_key(candidate: &super::memory_summary::SummaryCandidate) -> Option<String> {
+    candidate
+        .duplicate_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalized_candidate_fact_type(
+    candidate: &super::memory_summary::SummaryCandidate,
+) -> &'static str {
+    match candidate.fact_type.as_deref().map(str::trim) {
+        Some("preference") => "preference",
+        Some("decision") => "decision",
+        Some("event") => "event",
+        Some("person") => "person",
+        Some("rule") => "rule",
+        _ => "decision",
+    }
+}
+
+fn boundary_flush_topic_tokens(messages: &[SessionMessage]) -> std::collections::HashSet<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .flat_map(|message| {
+            message
+                .content
+                .split(|ch: char| !ch.is_alphanumeric())
+                .map(str::trim)
+                .filter(|token| token.len() >= 3)
+                .map(|token| token.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn boundary_flush_topic_tokens_from_text(text: &str) -> std::collections::HashSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn build_episode_topic_sketch(text: &str) -> String {
+    let mut tokens = boundary_flush_topic_tokens_from_text(text)
+        .into_iter()
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens.truncate(8);
+
+    if tokens.is_empty() {
+        text.trim()
+            .chars()
+            .take(96)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    } else {
+        tokens.join(" ")
+    }
+}
+
+fn boundary_flush_topics_are_related(
+    current: &std::collections::HashSet<String>,
+    next: &std::collections::HashSet<String>,
+) -> bool {
+    if current.is_empty() || next.is_empty() {
+        return false;
+    }
+
+    current.intersection(next).count() >= 2
+}
+
+fn infer_episode_task_state(
+    assistant_text: &str,
+    successful_tool_calls: usize,
+    final_stop_reason: Option<&str>,
+) -> EpisodeTaskStateRecord {
+    if final_stop_reason == Some("length") {
+        return EpisodeTaskStateRecord::Executing;
+    }
+
+    match detect_empty_promise_structural(0, 0, assistant_text) {
+        EmptyPromiseVerdict::Structural => EpisodeTaskStateRecord::Executing,
+        EmptyPromiseVerdict::Inconclusive => {
+            if successful_tool_calls > 0 {
+                EpisodeTaskStateRecord::Delivered
+            } else {
+                EpisodeTaskStateRecord::Exploring
+            }
+        }
+        EmptyPromiseVerdict::No => EpisodeTaskStateRecord::Delivered,
+    }
+}
+
+fn decide_episode_turn(
+    current_tokens: &std::collections::HashSet<String>,
+    next_tokens: &std::collections::HashSet<String>,
+    assistant_text: &str,
+    successful_tool_calls: usize,
+    final_stop_reason: Option<&str>,
+    current_task_state: EpisodeTaskStateRecord,
+    current_turn_count: u64,
+) -> EpisodeTurnDecision {
+    let task_state =
+        infer_episode_task_state(assistant_text, successful_tool_calls, final_stop_reason);
+    let boundary = if current_turn_count >= MAX_OPEN_EPISODE_TURNS {
+        EpisodeBoundaryDecision::CloseCurrentAndOpenNext
+    } else if boundary_flush_topics_are_related(current_tokens, next_tokens) {
+        EpisodeBoundaryDecision::ContinueCurrent
+    } else {
+        match current_task_state {
+            EpisodeTaskStateRecord::Delivered
+            | EpisodeTaskStateRecord::Executing
+            | EpisodeTaskStateRecord::Exploring => EpisodeBoundaryDecision::CloseCurrentAndOpenNext,
+        }
+    };
+
+    EpisodeTurnDecision {
+        task_state,
+        boundary,
+    }
+}
+
+fn episode_status_ready_for_boundary_flush(
+    episode: &EpisodeStateRecord,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    match episode.status {
+        EpisodeStatusRecord::Open | EpisodeStatusRecord::Closed => true,
+        EpisodeStatusRecord::Flushed => false,
+        EpisodeStatusRecord::FlushPending => {
+            now.signed_duration_since(episode.last_activity_at)
+                .num_seconds()
+                >= EPISODE_FLUSH_PENDING_GRACE_SECS
+        }
+    }
+}
+
+fn collect_unflushed_boundary_turns(
+    entries: Vec<SessionEntry>,
+    last_flushed_turn: u64,
+    history_limit: usize,
+) -> Option<(Vec<BoundaryFlushEpisode>, u64)> {
+    let mut turn_count = 0_u64;
+    let mut include_current_turn = false;
+    let mut turns = Vec::new();
+    let mut current_turn_messages = Vec::new();
+
+    for entry in entries {
+        let SessionEntry::Message {
+            message, timestamp, ..
+        } = entry
+        else {
+            continue;
+        };
+
+        if message.role == "user" {
+            if include_current_turn && !current_turn_messages.is_empty() {
+                turns.push(BoundaryFlushEpisode {
+                    start_turn: turn_count,
+                    end_turn: turn_count,
+                    messages: std::mem::take(&mut current_turn_messages),
+                });
+            }
+            turn_count = turn_count.saturating_add(1);
+            include_current_turn = turn_count > last_flushed_turn;
+        }
+
+        if include_current_turn {
+            current_turn_messages.push(SessionMessage {
+                timestamp: Some(timestamp),
+                ..message
+            });
+        }
+    }
+
+    if include_current_turn && !current_turn_messages.is_empty() {
+        turns.push(BoundaryFlushEpisode {
+            start_turn: turn_count,
+            end_turn: turn_count,
+            messages: current_turn_messages,
+        });
+    }
+
+    if turns.is_empty() {
+        return None;
+    }
+
+    if turns.len() > history_limit {
+        let start = turns.len() - history_limit;
+        turns = turns.split_off(start);
+    }
+
+    Some((turns, turn_count))
+}
+
+fn collect_unflushed_boundary_episodes(
+    entries: Vec<SessionEntry>,
+    last_flushed_turn: u64,
+    history_limit: usize,
+) -> Option<(Vec<BoundaryFlushEpisode>, u64)> {
+    let (turns, turn_count) =
+        collect_unflushed_boundary_turns(entries, last_flushed_turn, history_limit)?;
+
+    const MAX_EPISODE_TURNS: usize = 3;
+    const MAX_EPISODE_CHARS: usize = 1600;
+
+    let mut episodes = Vec::new();
+    let mut current = BoundaryFlushEpisode {
+        start_turn: turns[0].start_turn,
+        end_turn: turns[0].end_turn,
+        messages: turns[0].messages.clone(),
+    };
+    let mut current_tokens = boundary_flush_topic_tokens(&current.messages);
+
+    for next in turns.into_iter().skip(1) {
+        let next_tokens = boundary_flush_topic_tokens(&next.messages);
+        let current_turns = current.end_turn.saturating_sub(current.start_turn) + 1;
+        let current_chars = current
+            .messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum::<usize>();
+        let next_chars = next
+            .messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum::<usize>();
+        let can_merge = current.end_turn + 1 == next.start_turn
+            && current_turns < MAX_EPISODE_TURNS as u64
+            && current_chars + next_chars <= MAX_EPISODE_CHARS
+            && boundary_flush_topics_are_related(&current_tokens, &next_tokens);
+
+        if can_merge {
+            current.end_turn = next.end_turn;
+            current.messages.extend(next.messages);
+            current_tokens.extend(next_tokens);
+        } else {
+            episodes.push(current);
+            current = BoundaryFlushEpisode {
+                start_turn: next.start_turn,
+                end_turn: next.end_turn,
+                messages: next.messages,
+            };
+            current_tokens = next_tokens;
+        }
+    }
+
+    episodes.push(current);
+
+    Some((episodes, turn_count))
+}
+
+fn build_boundary_episodes_from_state(
+    turns: &[BoundaryFlushEpisode],
+    open_episodes: &[EpisodeStateRecord],
+) -> Vec<BoundaryFlushEpisode> {
+    let mut episodes = Vec::new();
+    let now = Utc::now();
+
+    let mut ranges = open_episodes
+        .iter()
+        .filter(|episode| episode_status_ready_for_boundary_flush(episode, now))
+        .cloned()
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|episode| (episode.start_turn, episode.end_turn));
+
+    for episode in ranges {
+        let mut messages = Vec::new();
+        for turn in turns.iter().filter(|turn| {
+            turn.start_turn >= episode.start_turn && turn.end_turn <= episode.end_turn
+        }) {
+            messages.extend(turn.messages.clone());
+        }
+
+        if !messages.is_empty() {
+            episodes.push(BoundaryFlushEpisode {
+                start_turn: episode.start_turn,
+                end_turn: episode.end_turn,
+                messages,
+            });
+        }
+    }
+
+    episodes
+}
+
+fn collect_boundary_episode_for_range(
+    entries: Vec<SessionEntry>,
+    start_turn: u64,
+    end_turn: u64,
+) -> Option<BoundaryFlushEpisode> {
+    let mut turn_count = 0_u64;
+    let mut current_turn_messages = Vec::new();
+    let mut current_turn_start = None;
+    let mut matched_turns = Vec::new();
+
+    for entry in entries {
+        let SessionEntry::Message { message, .. } = entry else {
+            continue;
+        };
+
+        if message.role == "user" {
+            if let Some(turn_start) = current_turn_start.take() {
+                matched_turns.push(BoundaryFlushEpisode {
+                    start_turn: turn_start,
+                    end_turn: turn_start,
+                    messages: std::mem::take(&mut current_turn_messages),
+                });
+            }
+            turn_count = turn_count.saturating_add(1);
+            current_turn_start = Some(turn_count);
+        }
+
+        if current_turn_start.is_some() {
+            current_turn_messages.push(message);
+        }
+    }
+
+    if let Some(turn_start) = current_turn_start.take() {
+        matched_turns.push(BoundaryFlushEpisode {
+            start_turn: turn_start,
+            end_turn: turn_start,
+            messages: current_turn_messages,
+        });
+    }
+
+    let mut messages = Vec::new();
+    for turn in matched_turns
+        .into_iter()
+        .filter(|turn| turn.start_turn >= start_turn && turn.end_turn <= end_turn)
+    {
+        messages.extend(turn.messages);
+    }
+
+    if messages.is_empty() {
+        None
+    } else {
+        Some(BoundaryFlushEpisode {
+            start_turn,
+            end_turn,
+            messages,
+        })
+    }
+}
 
 pub struct Orchestrator {
     config_view: ArcSwap<ConfigView>,
@@ -60,6 +481,7 @@ pub struct Orchestrator {
     workspace_root: std::path::PathBuf,
     skill_install_state: Arc<SkillInstallState>,
     language_prefs: LanguagePrefs,
+    pending_boundary_recoveries: Arc<tokio::sync::Mutex<HashSet<String>>>,
 }
 
 /// Builder for [`Orchestrator`]. Use [`OrchestratorBuilder::new`] to start,
@@ -265,6 +687,7 @@ impl Orchestrator {
             workspace_root,
             skill_install_state: Arc::new(SkillInstallState::new(900)),
             language_prefs: LanguagePrefs::new(),
+            pending_boundary_recoveries: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -760,6 +1183,39 @@ impl Orchestrator {
         }
 
         match name {
+            "memory_search" => {
+                let fact_store = clawhive_memory::fact_store::FactStore::new(self.memory.db());
+                MemorySearchTool::new(
+                    fact_store,
+                    self.search_index_for(agent_id),
+                    view.embedding_provider.clone(),
+                    agent_id.to_string(),
+                )
+                .execute(input, ctx)
+                .await
+            }
+            "memory_get" => {
+                MemoryGetTool::new(self.file_store_for(agent_id))
+                    .execute(input, ctx)
+                    .await
+            }
+            "memory_write" => {
+                let fact_store = clawhive_memory::fact_store::FactStore::new(self.memory.db());
+                MemoryWriteTool::new(
+                    fact_store,
+                    self.file_store_for(agent_id),
+                    Arc::clone(&self.memory),
+                    agent_id.to_string(),
+                )
+                .execute(input, ctx)
+                .await
+            }
+            "memory_forget" => {
+                let fact_store = clawhive_memory::fact_store::FactStore::new(self.memory.db());
+                MemoryForgetTool::new(fact_store, agent_id.to_string())
+                    .execute(input, ctx)
+                    .await
+            }
             "read" | "read_file" => ReadFileTool::new(ws, gate).execute(input, ctx).await,
             "write" | "write_file" => WriteFileTool::new(ws, gate).execute(input, ctx).await,
             "edit" | "edit_file" => EditFileTool::new(ws, gate).execute(input, ctx).await,
@@ -862,6 +1318,44 @@ impl Orchestrator {
         self.workspaces.search_index(agent_id)
     }
 
+    async fn enqueue_dirty_source(
+        &self,
+        agent_id: &str,
+        source_kind: &str,
+        source_ref: &str,
+        reason: &str,
+    ) {
+        let dirty = DirtySourceStore::new(self.memory.db());
+        if let Err(error) = dirty
+            .enqueue(agent_id, source_kind, source_ref, reason)
+            .await
+        {
+            tracing::warn!(
+                agent_id = %agent_id,
+                source_kind = %source_kind,
+                source_ref = %source_ref,
+                %error,
+                "failed to enqueue dirty source"
+            );
+        }
+    }
+
+    async fn drain_dirty_sources(&self, view: &ConfigView, agent_id: &str, limit: usize) {
+        let workspace = self.workspace_state_for(agent_id);
+        if let Err(error) = workspace
+            .search_index
+            .index_dirty(
+                &workspace.file_store,
+                &workspace.session_reader,
+                view.embedding_provider.as_ref(),
+                limit,
+            )
+            .await
+        {
+            tracing::warn!(agent_id = %agent_id, %error, "failed to index dirty sources");
+        }
+    }
+
     pub async fn ensure_workspaces(&self) -> Result<()> {
         self.workspaces.ensure_all().await
     }
@@ -926,6 +1420,14 @@ impl Orchestrator {
 
         // Acquire per-session lock to prevent concurrent modifications
         let _session_guard = self.session_locks.acquire(&session_key.0).await;
+
+        self.recover_pending_boundary_flushes_for_session_key(
+            view.clone(),
+            agent_id,
+            &session_key,
+            agent,
+        )
+        .await;
 
         // Handle slash commands before LLM
         if let Some(cmd) = super::slash_commands::parse_command(&inbound.text) {
@@ -1006,29 +1508,26 @@ impl Orchestrator {
                     });
                 }
                 super::slash_commands::SlashCommand::New { model_hint } => {
-                    // Reset the session: clear history and start fresh
-                    let _ = self.session_mgr.reset(&session_key).await;
-                    let workspace = self.workspace_state_for(agent_id);
-                    let _ = workspace.session_writer.clear_session(&session_key.0).await;
-
-                    // Build post-reset prompt
-                    let post_reset_prompt =
-                        super::slash_commands::build_post_reset_prompt(agent_id);
-
-                    // Log the model hint if provided (for future model switching)
-                    if let Some(ref hint) = model_hint {
-                        tracing::info!("Session reset with model hint: {hint}");
-                    }
-
-                    // Continue with normal flow but inject the post-reset prompt
                     return self
-                        .handle_post_reset_flow(
+                        .handle_explicit_session_reset(
                             view.as_ref(),
                             inbound,
                             agent_id,
                             agent,
                             &session_key,
-                            &post_reset_prompt,
+                            model_hint.as_deref(),
+                        )
+                        .await;
+                }
+                super::slash_commands::SlashCommand::Reset => {
+                    return self
+                        .handle_explicit_session_reset(
+                            view.as_ref(),
+                            inbound,
+                            agent_id,
+                            agent,
+                            &session_key,
+                            None,
                         )
                         .await;
                 }
@@ -1056,12 +1555,38 @@ impl Orchestrator {
 
         let session_result = self
             .session_mgr
-            .get_or_create(&session_key, agent_id)
+            .get_or_create_with_policy(
+                &session_key,
+                agent_id,
+                Some(session_reset_policy_for(agent)),
+            )
             .await?;
 
-        if session_result.expired_previous {
-            self.try_fallback_summary(view.as_ref(), agent_id, &session_key, agent)
-                .await;
+        if let (Some(reason), Some(previous_session)) = (
+            session_result.ended_previous,
+            session_result.previous_session.as_ref(),
+        ) {
+            match reason {
+                SessionResetReason::Idle | SessionResetReason::Daily => {
+                    self.schedule_stale_boundary_flush(
+                        view.clone(),
+                        agent_id,
+                        previous_session,
+                        agent,
+                    )
+                    .await;
+                }
+                SessionResetReason::Explicit => {
+                    self.try_fallback_summary(
+                        view.as_ref(),
+                        agent_id,
+                        previous_session,
+                        agent,
+                        reason,
+                    )
+                    .await;
+                }
+            }
         }
 
         let session_text = build_session_text(&inbound.text, &inbound.attachments);
@@ -1141,7 +1666,7 @@ impl Orchestrator {
         let history_limit = history_message_limit(agent);
         let history_messages = match workspace
             .session_reader
-            .load_recent_messages(&session_key.0, history_limit)
+            .load_recent_messages(&session_result.session.session_id, history_limit)
             .await
         {
             Ok(msgs) => msgs,
@@ -1218,7 +1743,7 @@ impl Orchestrator {
             agent
                 .max_response_tokens
                 .unwrap_or(if is_scheduled_task { 8192 } else { 4096 });
-        let (resp, _messages, tool_attachments) = self
+        let (resp, _messages, tool_attachments, tool_meta) = self
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
@@ -1309,19 +1834,65 @@ impl Orchestrator {
 
         // Record session messages (JSONL)
         let workspace = self.workspace_state_for(agent_id);
+        let mut session_changed = false;
         if let Err(e) = workspace
             .session_writer
-            .append_message(&session_key.0, "user", &session_text)
+            .append_message(&session_result.session.session_id, "user", &session_text)
             .await
         {
             tracing::warn!("Failed to write user session entry: {e}");
+        } else {
+            session_changed = true;
         }
         if let Err(e) = workspace
             .session_writer
-            .append_message(&session_key.0, "assistant", &outbound.text)
+            .append_message(
+                &session_result.session.session_id,
+                "assistant",
+                &outbound.text,
+            )
             .await
         {
             tracing::warn!("Failed to write assistant session entry: {e}");
+        } else {
+            session_changed = true;
+        }
+        if session_changed {
+            self.enqueue_dirty_source(
+                agent_id,
+                DIRTY_KIND_SESSION,
+                &session_result.session.session_id,
+                "session_appended",
+            )
+            .await;
+            self.drain_dirty_sources(view.as_ref(), agent_id, 8).await;
+        }
+
+        let next_turn_index = session_result.session.interaction_count.saturating_add(1);
+        let closed_episode = self
+            .record_session_turn_episode(
+                agent_id,
+                &session_result.session,
+                EpisodeTurnInput {
+                    turn_index: next_turn_index,
+                    user_text: &session_text,
+                    assistant_text: &outbound.text,
+                    successful_tool_calls: tool_meta.successful_tool_calls,
+                    final_stop_reason: tool_meta.final_stop_reason.as_deref(),
+                },
+            )
+            .await;
+        if let Some(closed_episode) =
+            closed_episode.filter(|episode| episode.task_state == EpisodeTaskStateRecord::Delivered)
+        {
+            self.spawn_closed_episode_flush(
+                view.as_ref(),
+                agent_id,
+                &session_result.session,
+                agent,
+                closed_episode,
+            )
+            .await;
         }
 
         {
@@ -1329,39 +1900,6 @@ impl Orchestrator {
             session.increment_interaction();
             if let Err(e) = self.session_mgr.persist_session(&session).await {
                 tracing::warn!("Failed to persist session interaction count: {e}");
-            }
-
-            let interval = agent
-                .memory_policy
-                .as_ref()
-                .map(|mp| mp.daily_summary_interval)
-                .unwrap_or(10);
-
-            if interval > 0 && session.interaction_count % interval == 0 {
-                let agent_id_owned = agent_id.to_string();
-                let session_key_clone = session_key.clone();
-                let agent_clone = agent.clone();
-                let interaction_count = session.interaction_count;
-                let file_store = self.file_store_for(agent_id).clone();
-                let memory = Arc::clone(&self.memory);
-                let router = view.router.clone();
-                tokio::spawn(async move {
-                    tracing::debug!(
-                        agent_id = %agent_id_owned,
-                        interaction_count,
-                        "Triggering periodic daily summary"
-                    );
-                    Self::generate_session_summary_static(
-                        &router,
-                        &file_store,
-                        &memory,
-                        &agent_id_owned,
-                        &session_key_clone,
-                        &agent_clone,
-                        "periodic_summary",
-                    )
-                    .await;
-                });
             }
         }
 
@@ -1403,14 +1941,48 @@ impl Orchestrator {
         // Acquire per-session lock to prevent concurrent modifications
         let _session_guard = self.session_locks.acquire(&session_key.0).await;
 
+        self.recover_pending_boundary_flushes_for_session_key(
+            view.clone(),
+            agent_id,
+            &session_key,
+            agent,
+        )
+        .await;
+
         let session_result = self
             .session_mgr
-            .get_or_create(&session_key, agent_id)
+            .get_or_create_with_policy(
+                &session_key,
+                agent_id,
+                Some(session_reset_policy_for(agent)),
+            )
             .await?;
 
-        if session_result.expired_previous {
-            self.try_fallback_summary(view.as_ref(), agent_id, &session_key, agent)
-                .await;
+        if let (Some(reason), Some(previous_session)) = (
+            session_result.ended_previous,
+            session_result.previous_session.as_ref(),
+        ) {
+            match reason {
+                SessionResetReason::Idle | SessionResetReason::Daily => {
+                    self.schedule_stale_boundary_flush(
+                        view.clone(),
+                        agent_id,
+                        previous_session,
+                        agent,
+                    )
+                    .await;
+                }
+                SessionResetReason::Explicit => {
+                    self.try_fallback_summary(
+                        view.as_ref(),
+                        agent_id,
+                        previous_session,
+                        agent,
+                        reason,
+                    )
+                    .await;
+                }
+            }
         }
 
         let system_prompt = view
@@ -1488,7 +2060,7 @@ impl Orchestrator {
         let history_limit = history_message_limit(agent);
         let history_messages = match workspace
             .session_reader
-            .load_recent_messages(&session_key.0, history_limit)
+            .load_recent_messages(&session_result.session.session_id, history_limit)
             .await
         {
             Ok(msgs) => msgs,
@@ -1550,7 +2122,7 @@ impl Orchestrator {
             .as_ref()
             .map(|s| s.dangerous_allow_private.clone())
             .unwrap_or_default();
-        let (_resp, final_messages, _tool_attachments) = self
+        let (_resp, final_messages, _tool_attachments, _tool_meta) = self
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
@@ -1573,22 +2145,11 @@ impl Orchestrator {
         let trace_id = inbound.trace_id;
         let bus = self.bus.clone();
         let session_mgr = self.session_mgr.clone();
-        let view_for_summary = view.clone();
-        let file_store_for_summary = self.file_store_for(agent_id).clone();
-        let memory_for_summary = Arc::clone(&self.memory);
-        let session_key_for_summary = session_key.clone();
-        let agent_for_summary = agent.clone();
-        let interval = agent
-            .memory_policy
-            .as_ref()
-            .map(|mp| mp.daily_summary_interval)
-            .unwrap_or(10);
         let mut session = session_result.session.clone();
         session.increment_interaction();
         if let Err(e) = session_mgr.persist_session(&session).await {
             tracing::warn!("Failed to persist session interaction count: {e}");
         }
-        let periodic_summary_interaction_count = session.interaction_count;
         let agent_id_owned = agent_id.to_string();
         let channel_type = inbound.channel_type.clone();
         let connector_id = inbound.connector_id.clone();
@@ -1614,36 +2175,6 @@ impl Orchestrator {
             if let Ok(ref chunk) = chunk_result {
                 if !chunk.delta.is_empty() {
                     stream_accumulator.push_str(&chunk.delta);
-                }
-
-                if chunk.is_final
-                    && interval > 0
-                    && periodic_summary_interaction_count % interval == 0
-                {
-                    let agent_id_for_summary = agent_id_owned.clone();
-                    let session_key_clone = session_key_for_summary.clone();
-                    let agent_clone = agent_for_summary.clone();
-                    let interaction_count = periodic_summary_interaction_count;
-                    let fs = file_store_for_summary.clone();
-                    let mem = Arc::clone(&memory_for_summary);
-                    let router = view_for_summary.router.clone();
-                    tokio::spawn(async move {
-                        tracing::debug!(
-                            agent_id = %agent_id_for_summary,
-                            interaction_count,
-                            "Triggering periodic daily summary"
-                        );
-                        Orchestrator::generate_session_summary_static(
-                            &router,
-                            &fs,
-                            &mem,
-                            &agent_id_for_summary,
-                            &session_key_clone,
-                            &agent_clone,
-                            "periodic_summary",
-                        )
-                        .await;
-                    });
                 }
 
                 if chunk.is_final && !is_language_guard_exempt(&inbound_text_for_guard) {
@@ -1713,6 +2244,7 @@ impl Orchestrator {
         clawhive_provider::LlmResponse,
         Vec<LlmMessage>,
         Vec<Attachment>,
+        ToolLoopMeta,
     )> {
         let mut messages = initial_messages;
         let tool_defs: Vec<_> = match allowed_tools {
@@ -1731,11 +2263,11 @@ impl Orchestrator {
             .unwrap_or(50) as usize;
         let mut web_search_reminder_injected = false;
         let mut web_search_called = false;
-        let mut memory_flush_triggered = false;
         let loop_started = std::time::Instant::now();
         let mut scheduled_task_retries: u32 = 0;
         let mut empty_promise_retries: u32 = 0;
         let mut total_tool_calls: usize = 0;
+        let mut successful_tool_calls_total: usize = 0;
         let attachment_collector: Arc<tokio::sync::Mutex<Vec<Attachment>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
@@ -1769,25 +2301,7 @@ impl Orchestrator {
                 }
             };
 
-            let check_result = ctx_mgr.check_context(&messages);
-            if let ContextCheckResult::NeedsMemoryFlush {
-                system_prompt: flush_system,
-                prompt: flush_prompt,
-            } = check_result
-            {
-                if !memory_flush_triggered {
-                    memory_flush_triggered = true;
-                    tracing::info!(
-                        agent_id = %agent_id,
-                        iteration = iteration_no,
-                        "tool_use_loop: triggering memory flush before compaction"
-                    );
-                    messages.push(LlmMessage::user(format!(
-                        "[SYSTEM: {flush_system}]\n{flush_prompt}"
-                    )));
-                    continue;
-                }
-            }
+            let _ = ctx_mgr.check_context(&messages);
 
             let (compacted_messages, compaction_result) =
                 ctx_mgr.ensure_within_limits(primary, messages).await?;
@@ -2066,7 +2580,15 @@ impl Orchestrator {
                     "tool_use_loop: returning final response"
                 );
                 let tool_attachments = attachment_collector.lock().await.drain(..).collect();
-                return Ok((resp, messages, tool_attachments));
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                    },
+                ));
             }
 
             total_tool_calls += tool_uses.len();
@@ -2187,6 +2709,18 @@ impl Orchestrator {
 
             let tools_started = std::time::Instant::now();
             let tool_results = futures::future::join_all(tool_futures).await;
+            let successful_tool_calls = tool_results
+                .iter()
+                .filter(|result| {
+                    matches!(
+                        result,
+                        ContentBlock::ToolResult {
+                            is_error: false,
+                            ..
+                        }
+                    )
+                })
+                .count();
             let tools_round_ms = tools_started.elapsed().as_millis() as u64;
 
             if is_slow_latency_ms(tools_round_ms, SLOW_LLM_ROUND_WARN_MS) {
@@ -2209,6 +2743,9 @@ impl Orchestrator {
                 role: "user".into(),
                 content: tool_results,
             });
+            successful_tool_calls_total += successful_tool_calls;
+
+            let _ = successful_tool_calls;
 
             let remaining = max_iterations - iteration_no;
             let threshold = max_iterations / 5; // warn at 80%
@@ -2271,7 +2808,15 @@ impl Orchestrator {
         }
 
         let tool_attachments = attachment_collector.lock().await.drain(..).collect();
-        Ok((resp, messages, tool_attachments))
+        Ok((
+            resp.clone(),
+            messages,
+            tool_attachments,
+            ToolLoopMeta {
+                successful_tool_calls: successful_tool_calls_total,
+                final_stop_reason: resp.stop_reason.clone(),
+            },
+        ))
     }
 
     /// Handle the flow after a /reset or /new command.
@@ -2286,10 +2831,11 @@ impl Orchestrator {
         post_reset_prompt: &str,
     ) -> Result<OutboundMessage> {
         // Create a fresh session
-        let _ = self
+        let fresh_session = self
             .session_mgr
-            .get_or_create(session_key, agent_id)
-            .await?;
+            .get_or_create_with_policy(session_key, agent_id, Some(session_reset_policy_for(agent)))
+            .await?
+            .session;
 
         // Build system prompt with post-reset context
         let system_prompt = view
@@ -2316,7 +2862,7 @@ impl Orchestrator {
             inbound.user_scope.clone(),
         ));
 
-        let (resp, _messages, _tool_attachments) = self
+        let (resp, _messages, _tool_attachments, _tool_meta) = self
             .tool_use_loop(
                 view,
                 agent_id,
@@ -2349,19 +2895,34 @@ impl Orchestrator {
 
         // Record the assistant's response in the fresh session
         let workspace = self.workspace_state_for(agent_id);
+        let mut session_changed = false;
         if let Err(e) = workspace
             .session_writer
-            .append_message(&session_key.0, "system", post_reset_prompt)
+            .append_message(&fresh_session.session_id, "system", post_reset_prompt)
             .await
         {
             tracing::warn!("Failed to write post-reset prompt to session: {e}");
+        } else {
+            session_changed = true;
         }
         if let Err(e) = workspace
             .session_writer
-            .append_message(&session_key.0, "assistant", &reply_text)
+            .append_message(&fresh_session.session_id, "assistant", &reply_text)
             .await
         {
             tracing::warn!("Failed to write assistant session entry: {e}");
+        } else {
+            session_changed = true;
+        }
+        if session_changed {
+            self.enqueue_dirty_source(
+                agent_id,
+                DIRTY_KIND_SESSION,
+                &fresh_session.session_id,
+                "session_reset",
+            )
+            .await;
+            self.drain_dirty_sources(view, agent_id, 8).await;
         }
 
         let outbound = OutboundMessage {
@@ -2395,26 +2956,852 @@ impl Orchestrator {
         Ok(outbound)
     }
 
-    /// Generate a summary and append it to daily memory. Can be called from
-    /// both instance methods and spawned background tasks (via the static variant).
-    async fn generate_session_summary_static(
-        router: &LlmRouter,
-        file_store: &clawhive_memory::file_store::MemoryFileStore,
+    async fn capture_boundary_flush_snapshot(
+        &self,
+        agent_id: &str,
+        session: &Session,
+        agent: &FullAgentConfig,
+    ) -> Option<BoundaryFlushSnapshot> {
+        let workspace = self.workspace_state_for(agent_id);
+        let state = self
+            .memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .ok()
+            .flatten();
+        let entries = workspace
+            .session_reader
+            .load_all_entries(&session.session_id)
+            .await
+            .ok()?;
+        if entries.is_empty() {
+            return None;
+        }
+
+        let history_limit = history_message_limit(agent).max(20);
+        let last_flushed_turn = state
+            .as_ref()
+            .map(|state| state.last_flushed_turn)
+            .unwrap_or(0);
+        let (turns, turn_count) =
+            collect_unflushed_boundary_turns(entries.clone(), last_flushed_turn, history_limit)?;
+        let state_episodes = state
+            .as_ref()
+            .map(|state| {
+                let now = Utc::now();
+                state
+                    .open_episodes
+                    .iter()
+                    .filter(|episode| {
+                        episode.end_turn > last_flushed_turn
+                            && episode_status_ready_for_boundary_flush(episode, now)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let episodes = if state_episodes.is_empty() {
+            collect_unflushed_boundary_episodes(entries, last_flushed_turn, history_limit)
+                .map(|(episodes, _)| episodes)?
+        } else {
+            let episodes = build_boundary_episodes_from_state(&turns, &state_episodes);
+            if episodes.is_empty() {
+                collect_unflushed_boundary_episodes(entries, last_flushed_turn, history_limit)
+                    .map(|(episodes, _)| episodes)?
+            } else {
+                episodes
+            }
+        };
+        Some(BoundaryFlushSnapshot {
+            episodes,
+            turn_count,
+            recent_explicit_writes: state
+                .map(|state| state.recent_explicit_writes)
+                .unwrap_or_default(),
+        })
+    }
+
+    async fn close_open_episodes_for_session_end(
         memory: &Arc<MemoryStore>,
+        agent_id: &str,
+        session: &Session,
+    ) {
+        let current = memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .unwrap_or(None);
+        let Some(mut state) = current else {
+            return;
+        };
+
+        let mut changed = false;
+        let now = Utc::now();
+        for episode in &mut state.open_episodes {
+            if episode.status == EpisodeStatusRecord::Open {
+                episode.status = EpisodeStatusRecord::Closed;
+                episode.last_activity_at = now;
+                changed = true;
+            }
+        }
+
+        if changed {
+            if let Err(error) = memory.upsert_session_memory_state(state).await {
+                tracing::warn!(
+                    %error,
+                    %agent_id,
+                    session_key = %session.session_key.0,
+                    session_id = %session.session_id,
+                    "Failed to close open episodes for session-end boundary flush"
+                );
+            }
+        }
+    }
+
+    async fn update_boundary_flush_state(
+        &self,
+        agent_id: &str,
+        session: &Session,
+        turn_count: Option<u64>,
+        success: bool,
+    ) {
+        Self::persist_boundary_flush_state(&self.memory, agent_id, session, turn_count, success)
+            .await;
+    }
+
+    async fn persist_boundary_flush_state(
+        memory: &Arc<MemoryStore>,
+        agent_id: &str,
+        session: &Session,
+        turn_count: Option<u64>,
+        success: bool,
+    ) {
+        let current = memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .unwrap_or(None);
+        let mut state = current.unwrap_or(SessionMemoryStateRecord {
+            agent_id: agent_id.to_string(),
+            session_id: session.session_id.clone(),
+            session_key: session.session_key.0.clone(),
+            last_flushed_turn: 0,
+            last_boundary_flush_at: None,
+            pending_flush: false,
+            recent_explicit_writes: Vec::new(),
+            open_episodes: Vec::new(),
+        });
+
+        if success {
+            if let Some(turn_count) = turn_count {
+                state.last_flushed_turn = turn_count;
+                state
+                    .recent_explicit_writes
+                    .retain(|marker| marker.turn_index > turn_count);
+                state
+                    .open_episodes
+                    .retain(|episode| episode.end_turn > turn_count);
+            }
+            state.last_boundary_flush_at = Some(Utc::now());
+            state.pending_flush = false;
+        } else {
+            state.pending_flush = true;
+        }
+
+        if let Err(error) = memory.upsert_session_memory_state(state).await {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_key = %session.session_key.0,
+                session_id = %session.session_id,
+                "Failed to persist session memory state"
+            );
+        }
+    }
+
+    async fn record_session_turn_episode(
+        &self,
+        agent_id: &str,
+        session: &Session,
+        turn: EpisodeTurnInput<'_>,
+    ) -> Option<EpisodeStateRecord> {
+        let current = match self
+            .memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %agent_id,
+                    session_id = %session.session_id,
+                    "Failed to load session memory state for episode tracking"
+                );
+                return None;
+            }
+        };
+
+        let mut state = current.unwrap_or(SessionMemoryStateRecord {
+            agent_id: agent_id.to_string(),
+            session_id: session.session_id.clone(),
+            session_key: session.session_key.0.clone(),
+            last_flushed_turn: 0,
+            last_boundary_flush_at: None,
+            pending_flush: false,
+            recent_explicit_writes: Vec::new(),
+            open_episodes: Vec::new(),
+        });
+
+        let sketch = build_episode_topic_sketch(turn.user_text);
+        let current_tokens = boundary_flush_topic_tokens_from_text(&sketch);
+        let now = Utc::now();
+        let mut closed_episode = None;
+
+        if let Some(last) = state
+            .open_episodes
+            .iter_mut()
+            .rev()
+            .find(|episode| episode.status == EpisodeStatusRecord::Open)
+        {
+            let last_tokens = boundary_flush_topic_tokens_from_text(&last.topic_sketch);
+            let decision = decide_episode_turn(
+                &last_tokens,
+                &current_tokens,
+                turn.assistant_text,
+                turn.successful_tool_calls,
+                turn.final_stop_reason,
+                last.task_state.clone(),
+                last.end_turn.saturating_sub(last.start_turn) + 1,
+            );
+            match decision.boundary {
+                EpisodeBoundaryDecision::ContinueCurrent => {
+                    last.end_turn = turn.turn_index;
+                    if !sketch.is_empty() {
+                        last.topic_sketch = sketch;
+                    }
+                    last.task_state = decision.task_state.clone();
+                    last.last_activity_at = now;
+                }
+                EpisodeBoundaryDecision::CloseCurrentAndOpenNext => {
+                    last.status = EpisodeStatusRecord::Closed;
+                    last.last_activity_at = now;
+                    closed_episode = Some(last.clone());
+                    state.open_episodes.push(EpisodeStateRecord {
+                        episode_id: format!("{}:{}", session.session_id, turn.turn_index),
+                        start_turn: turn.turn_index,
+                        end_turn: turn.turn_index,
+                        status: EpisodeStatusRecord::Open,
+                        task_state: decision.task_state.clone(),
+                        topic_sketch: sketch,
+                        last_activity_at: now,
+                    });
+                }
+            }
+        } else {
+            let task_state = infer_episode_task_state(
+                turn.assistant_text,
+                turn.successful_tool_calls,
+                turn.final_stop_reason,
+            );
+            state.open_episodes.push(EpisodeStateRecord {
+                episode_id: format!("{}:{}", session.session_id, turn.turn_index),
+                start_turn: turn.turn_index,
+                end_turn: turn.turn_index,
+                status: EpisodeStatusRecord::Open,
+                task_state,
+                topic_sketch: sketch,
+                last_activity_at: now,
+            });
+        }
+
+        if let Err(error) = self.memory.upsert_session_memory_state(state).await {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_id = %session.session_id,
+                assistant_len = turn.assistant_text.len(),
+                "Failed to persist open episode state"
+            );
+        }
+
+        closed_episode
+    }
+
+    async fn capture_closed_episode_snapshot(
+        &self,
+        agent_id: &str,
+        session: &Session,
+        episode: &EpisodeStateRecord,
+    ) -> Option<(BoundaryFlushEpisode, Vec<RecentExplicitMemoryWrite>)> {
+        let workspace = self.workspace_state_for(agent_id);
+        let entries = workspace
+            .session_reader
+            .load_all_entries(&session.session_id)
+            .await
+            .ok()?;
+        let state = self
+            .memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .ok()
+            .flatten();
+        let boundary_episode =
+            collect_boundary_episode_for_range(entries, episode.start_turn, episode.end_turn)?;
+        Some((
+            boundary_episode,
+            state
+                .map(|state| state.recent_explicit_writes)
+                .unwrap_or_default(),
+        ))
+    }
+
+    async fn update_closed_episode_flush_state(
+        memory: &Arc<MemoryStore>,
+        agent_id: &str,
+        session: &Session,
+        episode_id: &str,
+        success: bool,
+    ) {
+        let current = memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .unwrap_or(None);
+        let Some(mut state) = current else {
+            return;
+        };
+
+        if let Some(episode) = state
+            .open_episodes
+            .iter_mut()
+            .find(|episode| episode.episode_id == episode_id)
+        {
+            if success {
+                episode.status = EpisodeStatusRecord::Flushed;
+            } else if episode.status == EpisodeStatusRecord::FlushPending {
+                episode.status = EpisodeStatusRecord::Closed;
+                episode.last_activity_at = Utc::now();
+            }
+        }
+
+        if success {
+            let mut checkpoint = state.last_flushed_turn;
+            loop {
+                let next = state
+                    .open_episodes
+                    .iter()
+                    .filter(|episode| {
+                        episode.status == EpisodeStatusRecord::Flushed
+                            && episode.start_turn == checkpoint.saturating_add(1)
+                    })
+                    .min_by_key(|episode| episode.start_turn)
+                    .cloned();
+
+                let Some(next) = next else {
+                    break;
+                };
+                checkpoint = checkpoint.max(next.end_turn);
+            }
+
+            if checkpoint > state.last_flushed_turn {
+                state.last_flushed_turn = checkpoint;
+                state
+                    .recent_explicit_writes
+                    .retain(|marker| marker.turn_index > checkpoint);
+                state.open_episodes.retain(|episode| {
+                    !(episode.status == EpisodeStatusRecord::Flushed
+                        && episode.end_turn <= checkpoint)
+                });
+            }
+            state.last_boundary_flush_at = Some(Utc::now());
+        }
+
+        if let Err(error) = memory.upsert_session_memory_state(state).await {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_id = %session.session_id,
+                episode_id,
+                "Failed to persist closed episode flush state"
+            );
+        }
+    }
+
+    async fn spawn_closed_episode_flush(
+        &self,
+        view: &ConfigView,
+        agent_id: &str,
+        session: &Session,
+        agent: &FullAgentConfig,
+        episode: EpisodeStateRecord,
+    ) {
+        let Some((boundary_episode, recent_explicit_writes)) = self
+            .capture_closed_episode_snapshot(agent_id, session, &episode)
+            .await
+        else {
+            return;
+        };
+
+        let current = self
+            .memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .unwrap_or(None);
+        let Some(mut state) = current else {
+            return;
+        };
+        if let Some(current_episode) = state
+            .open_episodes
+            .iter_mut()
+            .find(|current_episode| current_episode.episode_id == episode.episode_id)
+        {
+            current_episode.status = EpisodeStatusRecord::FlushPending;
+            current_episode.last_activity_at = Utc::now();
+        }
+        if let Err(error) = self.memory.upsert_session_memory_state(state).await {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_id = %session.session_id,
+                episode_id = %episode.episode_id,
+                "Failed to persist flush-pending episode state"
+            );
+            return;
+        }
+
+        let router = view.router.clone();
+        let file_store = self.file_store_for(agent_id);
+        let memory = Arc::clone(&self.memory);
+        let embedding_provider = Arc::clone(&view.embedding_provider);
+        let agent_id = agent_id.to_string();
+        let session = session.clone();
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            let source = format!("episode_closure:{}", episode.episode_id);
+            let success =
+                Orchestrator::generate_summary_from_messages_static(SummaryGenerationRequest {
+                    router: &router,
+                    file_store: &file_store,
+                    memory: &memory,
+                    embedding_provider: &embedding_provider,
+                    agent_id: &agent_id,
+                    session: &session,
+                    agent: &agent,
+                    source: &source,
+                    messages: boundary_episode.messages,
+                    recent_explicit_writes,
+                })
+                .await;
+
+            Orchestrator::update_closed_episode_flush_state(
+                &memory,
+                &agent_id,
+                &session,
+                &episode.episode_id,
+                success,
+            )
+            .await;
+        });
+    }
+
+    async fn schedule_delivered_episode_flushes_for_session_end(
+        &self,
+        view: &ConfigView,
+        agent_id: &str,
+        session: &Session,
+        agent: &FullAgentConfig,
+    ) {
+        let current = self
+            .memory
+            .get_session_memory_state(agent_id, &session.session_id)
+            .await
+            .unwrap_or(None);
+        let Some(state) = current else {
+            return;
+        };
+
+        let mut delivered_closed = state
+            .open_episodes
+            .into_iter()
+            .filter(|episode| {
+                episode.status == EpisodeStatusRecord::Closed
+                    && episode.task_state == EpisodeTaskStateRecord::Delivered
+            })
+            .collect::<Vec<_>>();
+        delivered_closed.sort_by_key(|episode| (episode.start_turn, episode.end_turn));
+
+        for episode in delivered_closed {
+            self.spawn_closed_episode_flush(view, agent_id, session, agent, episode)
+                .await;
+        }
+    }
+
+    async fn finalize_stale_boundary_flush(
+        memory: &Arc<MemoryStore>,
+        agent_id: &str,
+        session: &Session,
+        file_store: &MemoryFileStore,
+        embedding_provider: &Arc<dyn EmbeddingProvider>,
+    ) {
+        let session_writer = SessionWriter::new(file_store.workspace_dir());
+        if let Err(error) = session_writer.archive_session(&session.session_id).await {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_key = %session.session_key.0,
+                session_id = %session.session_id,
+                "Failed to archive stale session transcript after boundary flush"
+            );
+            return;
+        }
+
+        let _ = memory
+            .delete_session_memory_state(agent_id, &session.session_id)
+            .await;
+
+        let dirty = DirtySourceStore::new(memory.db());
+        if let Err(error) = dirty
+            .enqueue(
+                agent_id,
+                DIRTY_KIND_SESSION,
+                &session.session_id,
+                "session_archived_after_reset",
+            )
+            .await
+        {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_id = %session.session_id,
+                "Failed to enqueue archived stale session for reindex"
+            );
+            return;
+        }
+
+        let session_reader = SessionReader::new(file_store.workspace_dir());
+        let search_index = SearchIndex::new(memory.db(), agent_id);
+        if let Err(error) = search_index
+            .index_dirty(file_store, &session_reader, embedding_provider.as_ref(), 8)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                %agent_id,
+                session_id = %session.session_id,
+                "Failed to drain archived stale session dirty source"
+            );
+        }
+    }
+
+    async fn recover_pending_boundary_flushes_for_session_key(
+        &self,
+        view: Arc<ConfigView>,
         agent_id: &str,
         session_key: &SessionKey,
         agent: &FullAgentConfig,
-        source: &str,
     ) {
-        let reader = clawhive_memory::session::SessionReader::new(file_store.workspace_dir());
-        let history_limit = history_message_limit(agent).max(20);
-        let messages = match reader
-            .load_recent_messages(&session_key.0, history_limit)
+        let pending = match self
+            .memory
+            .list_pending_session_memory_states_for_session_key(agent_id, &session_key.0, 8)
             .await
         {
-            Ok(msgs) if !msgs.is_empty() => msgs,
-            _ => return,
+            Ok(states) => states,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %agent_id,
+                    session_key = %session_key.0,
+                    "Failed to load pending boundary flush state"
+                );
+                return;
+            }
         };
+        if pending.is_empty() {
+            return;
+        }
+
+        let workspace = self.workspace_state_for(agent_id);
+        for state in pending {
+            if !workspace
+                .session_reader
+                .session_exists(&state.session_id)
+                .await
+            {
+                tracing::warn!(
+                    %agent_id,
+                    session_key = %state.session_key,
+                    session_id = %state.session_id,
+                    "Pending boundary flush transcript is missing; keeping state for manual repair"
+                );
+                continue;
+            }
+
+            let mut in_flight = self.pending_boundary_recoveries.lock().await;
+            if !in_flight.insert(state.session_id.clone()) {
+                continue;
+            }
+            drop(in_flight);
+
+            let recovery_session = Session {
+                session_key: SessionKey(state.session_key.clone()),
+                session_id: state.session_id.clone(),
+                agent_id: agent_id.to_string(),
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+                ttl_seconds: 0,
+                interaction_count: 0,
+            };
+
+            tracing::info!(
+                %agent_id,
+                session_key = %recovery_session.session_key.0,
+                session_id = %recovery_session.session_id,
+                "Recovering pending boundary flush after restart"
+            );
+
+            self.schedule_stale_boundary_flush_with_guard(
+                view.clone(),
+                agent_id,
+                &recovery_session,
+                agent,
+                Some(Arc::clone(&self.pending_boundary_recoveries)),
+            )
+            .await;
+        }
+    }
+
+    async fn schedule_stale_boundary_flush(
+        &self,
+        view: Arc<ConfigView>,
+        agent_id: &str,
+        session: &Session,
+        agent: &FullAgentConfig,
+    ) {
+        self.schedule_stale_boundary_flush_with_guard(view, agent_id, session, agent, None)
+            .await;
+    }
+
+    async fn schedule_stale_boundary_flush_with_guard(
+        &self,
+        view: Arc<ConfigView>,
+        agent_id: &str,
+        session: &Session,
+        agent: &FullAgentConfig,
+        recovery_guard: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
+    ) {
+        Self::close_open_episodes_for_session_end(&self.memory, agent_id, session).await;
+        self.schedule_delivered_episode_flushes_for_session_end(&view, agent_id, session, agent)
+            .await;
+        let Some(snapshot) = self
+            .capture_boundary_flush_snapshot(agent_id, session, agent)
+            .await
+        else {
+            self.update_boundary_flush_state(agent_id, session, None, true)
+                .await;
+            if let Some(guard) = recovery_guard {
+                let mut in_flight = guard.lock().await;
+                in_flight.remove(&session.session_id);
+            }
+            return;
+        };
+
+        Self::persist_boundary_flush_state(&self.memory, agent_id, session, None, false).await;
+
+        let agent_id = agent_id.to_string();
+        let session = session.clone();
+        let agent = agent.clone();
+        let router = view.router.clone();
+        let embedding_provider = Arc::clone(&view.embedding_provider);
+        let file_store = self.file_store_for(&agent_id);
+        let memory = Arc::clone(&self.memory);
+        let recovery_session_id = session.session_id.clone();
+        tokio::spawn(async move {
+            let mut success = true;
+            for (idx, episode) in snapshot.episodes.iter().enumerate() {
+                let episode_source = format!("fallback_summary:episode:{}", idx + 1);
+                let episode_success =
+                    Orchestrator::generate_summary_from_messages_static(SummaryGenerationRequest {
+                        router: &router,
+                        file_store: &file_store,
+                        memory: &memory,
+                        embedding_provider: &embedding_provider,
+                        agent_id: &agent_id,
+                        session: &session,
+                        agent: &agent,
+                        source: &episode_source,
+                        messages: episode.messages.clone(),
+                        recent_explicit_writes: snapshot.recent_explicit_writes.clone(),
+                    })
+                    .await;
+                success &= episode_success;
+            }
+            Orchestrator::persist_boundary_flush_state(
+                &memory,
+                &agent_id,
+                &session,
+                Some(snapshot.turn_count),
+                success,
+            )
+            .await;
+
+            if success {
+                Orchestrator::finalize_stale_boundary_flush(
+                    &memory,
+                    &agent_id,
+                    &session,
+                    &file_store,
+                    &embedding_provider,
+                )
+                .await;
+            } else {
+                tracing::warn!(
+                    %agent_id,
+                    session_key = %session.session_key.0,
+                    session_id = %session.session_id,
+                    "Asynchronous boundary flush failed for stale session; keeping transcript in place for retry"
+                );
+            }
+
+            if let Some(guard) = recovery_guard {
+                let mut in_flight = guard.lock().await;
+                in_flight.remove(&recovery_session_id);
+            }
+        });
+    }
+
+    async fn run_boundary_flush_snapshot(
+        &self,
+        view: &ConfigView,
+        agent_id: &str,
+        session: &Session,
+        agent: &FullAgentConfig,
+        source: &str,
+        snapshot: BoundaryFlushSnapshot,
+    ) -> bool {
+        let mut handles = Vec::with_capacity(snapshot.episodes.len());
+        for (idx, episode) in snapshot.episodes.iter().enumerate() {
+            let episode_source = format!("{source}:episode:{}", idx + 1);
+            let router = view.router.clone();
+            let file_store = self.file_store_for(agent_id);
+            let memory = Arc::clone(&self.memory);
+            let embedding_provider = Arc::clone(&view.embedding_provider);
+            let agent_id_owned = agent_id.to_string();
+            let session_clone = session.clone();
+            let agent_clone = agent.clone();
+            let messages = episode.messages.clone();
+            let recent_writes = snapshot.recent_explicit_writes.clone();
+            handles.push(tokio::spawn(async move {
+                Self::generate_summary_from_messages_static(SummaryGenerationRequest {
+                    router: &router,
+                    file_store: &file_store,
+                    memory: &memory,
+                    embedding_provider: &embedding_provider,
+                    agent_id: &agent_id_owned,
+                    session: &session_clone,
+                    agent: &agent_clone,
+                    source: &episode_source,
+                    messages,
+                    recent_explicit_writes: recent_writes,
+                })
+                .await
+            }));
+        }
+        let mut success = true;
+        for handle in handles {
+            match handle.await {
+                Ok(result) => success &= result,
+                Err(error) => {
+                    tracing::warn!(%error, "boundary flush episode task panicked");
+                    success = false;
+                }
+            }
+        }
+        self.update_boundary_flush_state(agent_id, session, Some(snapshot.turn_count), success)
+            .await;
+        success
+    }
+
+    async fn handle_explicit_session_reset(
+        &self,
+        view: &ConfigView,
+        inbound: InboundMessage,
+        agent_id: &str,
+        agent: &FullAgentConfig,
+        session_key: &SessionKey,
+        model_hint: Option<&str>,
+    ) -> Result<OutboundMessage> {
+        let previous_session = self.session_mgr.get(session_key).await?;
+        if let Some(previous_session) = previous_session.as_ref() {
+            Self::close_open_episodes_for_session_end(&self.memory, agent_id, previous_session)
+                .await;
+            self.schedule_delivered_episode_flushes_for_session_end(
+                view,
+                agent_id,
+                previous_session,
+                agent,
+            )
+            .await;
+            if let Some(snapshot) = self
+                .capture_boundary_flush_snapshot(agent_id, previous_session, agent)
+                .await
+            {
+                let _ = self
+                    .run_boundary_flush_snapshot(
+                        view,
+                        agent_id,
+                        previous_session,
+                        agent,
+                        "explicit_reset",
+                        snapshot,
+                    )
+                    .await;
+            }
+        }
+
+        let _ = self.session_mgr.reset(session_key).await;
+        if let Some(previous_session) = previous_session.as_ref() {
+            let workspace = self.workspace_state_for(agent_id);
+            let _ = workspace
+                .session_writer
+                .clear_session(&previous_session.session_id)
+                .await;
+            let _ = self
+                .memory
+                .delete_session_memory_state(agent_id, &previous_session.session_id)
+                .await;
+        }
+
+        let post_reset_prompt = super::slash_commands::build_post_reset_prompt(agent_id);
+        if let Some(hint) = model_hint {
+            tracing::info!("Session reset with model hint: {hint}");
+        }
+
+        self.handle_post_reset_flow(
+            view,
+            inbound,
+            agent_id,
+            agent,
+            session_key,
+            &post_reset_prompt,
+        )
+        .await
+    }
+
+    async fn generate_summary_from_messages_static(request: SummaryGenerationRequest<'_>) -> bool {
+        let SummaryGenerationRequest {
+            router,
+            file_store,
+            memory,
+            embedding_provider,
+            agent_id,
+            session,
+            agent,
+            source,
+            messages,
+            recent_explicit_writes,
+        } = request;
+        if messages.is_empty() {
+            return false;
+        }
+        let reader = clawhive_memory::session::SessionReader::new(file_store.workspace_dir());
 
         let today = chrono::Utc::now().date_naive();
 
@@ -2424,10 +3811,7 @@ impl Orchestrator {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let system = "Summarize this conversation in 2-4 bullet points. \
-            Focus on key facts, decisions, and user preferences. \
-            Output Markdown bullet points only, no preamble."
-            .to_string();
+        let system = build_summary_prompt();
 
         let llm_messages = vec![LlmMessage::user(conversation)];
 
@@ -2442,10 +3826,326 @@ impl Orchestrator {
             .await
         {
             Ok(resp) => {
-                if let Err(e) = file_store.append_daily(today, &resp.text).await {
-                    tracing::warn!("Failed to write {source}: {e}");
-                } else {
-                    tracing::info!(source, "Wrote session summary");
+                let Some(candidates) = parse_candidates(&resp.text) else {
+                    tracing::warn!(
+                        source,
+                        raw_len = resp.text.len(),
+                        raw_preview = %resp.text.chars().take(300).collect::<String>(),
+                        "Failed to parse structured session summary JSON"
+                    );
+                    return false;
+                };
+                let retained = retain_summary_candidates(candidates);
+                let fact_store = FactStore::new(memory.db());
+                let lineage_store = MemoryLineageStore::new(memory.db());
+                let mut active_facts = match fact_store.get_active_facts(agent_id).await {
+                    Ok(facts) => facts,
+                    Err(error) => {
+                        tracing::warn!(source, %error, "Failed to load active facts for summary precheck");
+                        Vec::new()
+                    }
+                };
+                let existing_memory_items = match file_store.read_long_term().await {
+                    Ok(long_term) if !long_term.trim().is_empty() => {
+                        let doc = MemoryDocument::parse(&long_term);
+                        crate::memory_document::MEMORY_SECTION_ORDER
+                            .iter()
+                            .flat_map(|heading| doc.section_items(heading))
+                            .collect::<Vec<_>>()
+                    }
+                    Ok(_) => Vec::new(),
+                    Err(error) => {
+                        tracing::warn!(
+                            source,
+                            %error,
+                            "Failed to load long-term memory items for summary precheck"
+                        );
+                        Vec::new()
+                    }
+                };
+
+                for candidate in &retained.facts {
+                    let duplicate_key = normalized_duplicate_key(candidate);
+                    let already_recorded = super::memory_retrieval::find_matching_fact(
+                        &active_facts,
+                        &candidate.content,
+                    )
+                    .is_some()
+                        || recent_explicit_writes.iter().any(|marker| {
+                            is_matching_memory_content(&marker.summary, &candidate.content)
+                        })
+                        || existing_memory_items
+                            .iter()
+                            .any(|item| is_matching_memory_content(item, &candidate.content))
+                        || if let Some(duplicate_key) = duplicate_key.as_deref() {
+                            let canonical_id = generate_canonical_id_with_key(
+                                agent_id,
+                                "fact",
+                                Some(duplicate_key),
+                                &candidate.content,
+                            );
+                            lineage_store
+                                .get_canonical(&canonical_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        } else {
+                            false
+                        };
+                    if already_recorded {
+                        continue;
+                    }
+
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let fact = clawhive_memory::fact_store::Fact {
+                        id: clawhive_memory::fact_store::generate_fact_id(
+                            agent_id,
+                            &candidate.content,
+                        ),
+                        agent_id: agent_id.to_string(),
+                        content: candidate.content.clone(),
+                        fact_type: normalized_candidate_fact_type(candidate).to_string(),
+                        importance: f64::from(candidate.importance.clamp(0.0, 1.0)),
+                        confidence: 0.9,
+                        status: "active".to_string(),
+                        occurred_at: None,
+                        recorded_at: now.clone(),
+                        source_type: "boundary_flush".to_string(),
+                        source_session: Some(session.session_id.clone()),
+                        access_count: 0,
+                        last_accessed: None,
+                        superseded_by: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    };
+                    match fact_store
+                        .insert_fact_with_canonical_key(&fact, duplicate_key.as_deref())
+                        .await
+                    {
+                        Ok(()) => {
+                            let _ = fact_store.record_add(&fact).await;
+                            active_facts.push(fact);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                source,
+                                content = %candidate.content,
+                                error = %error,
+                                "Failed to persist boundary fact candidate"
+                            );
+                        }
+                    }
+                }
+
+                let mut retained_for_daily = Vec::new();
+                for mut candidate in retained.daily.iter().chain(retained.memory.iter()).cloned() {
+                    if super::memory_retrieval::find_matching_fact(
+                        &active_facts,
+                        &candidate.content,
+                    )
+                    .is_some()
+                    {
+                        continue;
+                    }
+                    if recent_explicit_writes.iter().any(|marker| {
+                        is_matching_memory_content(&marker.summary, &candidate.content)
+                    }) {
+                        continue;
+                    }
+                    if existing_memory_items
+                        .iter()
+                        .any(|item| is_matching_memory_content(item, &candidate.content))
+                    {
+                        continue;
+                    }
+
+                    let duplicate_hit =
+                        if let Some(duplicate_key) = normalized_duplicate_key(&candidate) {
+                            let daily_canonical_id = generate_canonical_id_with_key(
+                                agent_id,
+                                "daily",
+                                Some(duplicate_key.as_str()),
+                                &candidate.content,
+                            );
+                            let daily_exists = lineage_store
+                                .get_canonical(&daily_canonical_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+
+                            if daily_exists {
+                                true
+                            } else if candidate.classification == SummaryClass::Memory {
+                                let memory_canonical_id = generate_canonical_id_with_key(
+                                    agent_id,
+                                    "memory",
+                                    Some(duplicate_key.as_str()),
+                                    &candidate.content,
+                                );
+                                lineage_store
+                                    .get_canonical(&memory_canonical_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                    if duplicate_hit {
+                        continue;
+                    }
+
+                    candidate.classification = SummaryClass::Daily;
+                    retained_for_daily.push(candidate);
+                }
+                if retained_for_daily.is_empty() {
+                    tracing::info!(source, "No daily-worthy summary candidates retained");
+                    return true;
+                }
+                let grouped = group_daily_candidates(&retained_for_daily);
+                let grouped_for_write = grouped.clone();
+                let rendered = match file_store
+                    .update_daily(today, move |existing| {
+                        Ok(merge_daily_blocks(
+                            today,
+                            existing.as_deref(),
+                            &grouped_for_write,
+                        ))
+                    })
+                    .await
+                {
+                    Ok(rendered) => rendered,
+                    Err(error) => {
+                        tracing::warn!(source, %error, "Failed to update daily file");
+                        return false;
+                    }
+                };
+                let Some(_rendered) = rendered else {
+                    tracing::info!(
+                        source,
+                        "Structured session summary produced no daily changes"
+                    );
+                    return true;
+                };
+                {
+                    let relative_path = format!("memory/{}.md", today.format("%Y-%m-%d"));
+                    let dirty = DirtySourceStore::new(memory.db());
+                    let mut daily_reindexed = false;
+                    if let Err(error) = dirty
+                        .enqueue(agent_id, DIRTY_KIND_DAILY_FILE, &relative_path, source)
+                        .await
+                    {
+                        tracing::warn!(source, %error, "Failed to enqueue daily dirty source");
+                    } else {
+                        let search_index = SearchIndex::new(memory.db(), agent_id);
+                        if let Err(error) = search_index
+                            .index_dirty(file_store, &reader, embedding_provider.as_ref(), 4)
+                            .await
+                        {
+                            tracing::warn!(source, %error, "Failed to drain daily dirty source");
+                        } else {
+                            daily_reindexed = true;
+                        }
+                    }
+
+                    let session_path_prefix = format!("sessions/{}#", session.session_id);
+                    for candidate in &retained_for_daily {
+                        let canonical_key = candidate
+                            .duplicate_key
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty());
+                        let canonical = match lineage_store
+                            .ensure_canonical_with_key(
+                                agent_id,
+                                "daily",
+                                canonical_key,
+                                &candidate.content,
+                            )
+                            .await
+                        {
+                            Ok(canonical) => canonical,
+                            Err(error) => {
+                                tracing::warn!(
+                                    source,
+                                    content = %candidate.content,
+                                    error = %error,
+                                    "Failed to ensure daily canonical"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if let Err(error) = lineage_store
+                            .attach_source(
+                                agent_id,
+                                &canonical.canonical_id,
+                                "daily_section",
+                                &format!("{relative_path}#{}", canonical.canonical_id),
+                                "summary",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                source,
+                                canonical_id = %canonical.canonical_id,
+                                error = %error,
+                                "Failed to record daily section lineage"
+                            );
+                        }
+
+                        if let Err(error) = lineage_store
+                            .attach_matching_chunks_by_prefix(
+                                agent_id,
+                                &canonical.canonical_id,
+                                &session_path_prefix,
+                                &candidate.content,
+                                "raw",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                source,
+                                canonical_id = %canonical.canonical_id,
+                                error = %error,
+                                "Failed to record session chunk lineage for daily candidate"
+                            );
+                        }
+
+                        if daily_reindexed {
+                            if let Err(error) = lineage_store
+                                .attach_matching_chunks(
+                                    agent_id,
+                                    &canonical.canonical_id,
+                                    &relative_path,
+                                    &candidate.content,
+                                    "summary",
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    source,
+                                    canonical_id = %canonical.canonical_id,
+                                    error = %error,
+                                    "Failed to record daily chunk lineage for daily candidate"
+                                );
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        source,
+                        blocks = grouped.len(),
+                        "Wrote structured session summary"
+                    );
+                    let topics = grouped
+                        .iter()
+                        .map(|block| block.topic.clone())
+                        .collect::<Vec<String>>();
                     memory
                         .record_trace(
                             agent_id,
@@ -2453,15 +4153,18 @@ impl Orchestrator {
                             &serde_json::json!({
                                 "source": source,
                                 "target": format!("memory/{}.md", today.format("%Y-%m-%d")),
+                                "topics": topics,
                             })
                             .to_string(),
                             None,
                         )
                         .await;
                 }
+                true
             }
             Err(e) => {
                 tracing::warn!("Failed to generate {source}: {e}");
+                false
             }
         }
     }
@@ -2470,19 +4173,73 @@ impl Orchestrator {
         &self,
         view: &ConfigView,
         agent_id: &str,
-        session_key: &SessionKey,
+        session: &Session,
         agent: &FullAgentConfig,
+        reason: SessionResetReason,
     ) {
-        Self::generate_session_summary_static(
-            &view.router,
-            &self.file_store_for(agent_id),
-            &self.memory,
-            agent_id,
-            session_key,
-            agent,
-            "fallback_summary",
-        )
-        .await;
+        let Some(snapshot) = self
+            .capture_boundary_flush_snapshot(agent_id, session, agent)
+            .await
+        else {
+            self.update_boundary_flush_state(agent_id, session, None, true)
+                .await;
+            return;
+        };
+        let success = self
+            .run_boundary_flush_snapshot(
+                view,
+                agent_id,
+                session,
+                agent,
+                "fallback_summary",
+                snapshot,
+            )
+            .await;
+        if matches!(reason, SessionResetReason::Idle | SessionResetReason::Daily) {
+            if success {
+                let workspace = self.workspace_state_for(agent_id);
+                if let Err(error) = workspace
+                    .session_writer
+                    .archive_session(&session.session_id)
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        %agent_id,
+                        session_key = %session.session_key.0,
+                        session_id = %session.session_id,
+                        "Failed to archive stale session transcript after boundary flush"
+                    );
+                } else {
+                    let _ = self
+                        .memory
+                        .delete_session_memory_state(agent_id, &session.session_id)
+                        .await;
+                    self.enqueue_dirty_source(
+                        agent_id,
+                        DIRTY_KIND_SESSION,
+                        &session.session_id,
+                        "session_archived_after_reset",
+                    )
+                    .await;
+                    self.drain_dirty_sources(view, agent_id, 8).await;
+                }
+            } else {
+                tracing::warn!(
+                    %agent_id,
+                    session_key = %session.session_key.0,
+                    session_id = %session.session_id,
+                    "Boundary flush failed for stale session; keeping transcript in place to avoid losing retry source"
+                );
+            }
+        } else if !success {
+            tracing::warn!(
+                %agent_id,
+                session_key = %session.session_key.0,
+                session_id = %session.session_id,
+                "Boundary flush failed before explicit reset"
+            );
+        }
     }
 
     async fn build_memory_context(
@@ -2503,28 +4260,48 @@ impl Orchestrator {
             .get_active_facts(agent_id)
             .await
             .unwrap_or_default();
-        let facts_section = build_known_facts_section(&facts, budget);
-        let facts_chars = facts_section.chars().count();
-        let remaining_budget = budget.saturating_sub(facts_chars);
 
         let search_start = std::time::Instant::now();
-        let results = self
-            .search_index_for(agent_id)
-            .search(query, view.embedding_provider.as_ref(), 6, 0.25)
-            .await;
+        let results = search_memory(
+            &fact_store,
+            &self.search_index_for(agent_id),
+            view.embedding_provider.as_ref(),
+            agent_id,
+            query,
+            6,
+            0.25,
+        )
+        .await;
         let search_ms = search_start.elapsed().as_millis() as i64;
 
         match results {
             Ok(results) if !results.is_empty() => {
-                let search_context = clamp_to_budget(&results, remaining_budget);
-                let context = format!("{facts_section}{search_context}");
+                let matched_facts = results
+                    .iter()
+                    .filter_map(|hit| match hit {
+                        MemoryHit::Fact(hit) => Some(hit.fact.clone()),
+                        MemoryHit::Chunk(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                let routing_bias = infer_memory_routing_bias(&results);
+                let context = if should_use_long_term_fallback(routing_bias, &results) {
+                    let long_term = self.file_store_for(agent_id).read_long_term().await?;
+                    if long_term.trim().is_empty() {
+                        build_memory_context_from_hits(&results, budget)
+                    } else {
+                        build_memory_context_from_fallback(&matched_facts, &long_term, budget)
+                    }
+                } else {
+                    build_memory_context_from_hits(&results, budget)
+                };
                 self.memory.record_trace(
                     agent_id,
                     "search",
                     &serde_json::json!({
                         "query": query.chars().take(200).collect::<String>(),
                         "candidates": results.len(),
-                        "scores": results.iter().map(|r| format!("{:.2}", r.score)).collect::<Vec<_>>(),
+                        "scores": results.iter().map(|r| format!("{:.2}", r.score())).collect::<Vec<_>>(),
+                        "sources": results.iter().map(|r| format!("{:?}", r.source_kind())).collect::<Vec<_>>(),
                     }).to_string(),
                     Some(search_ms),
                 ).await;
@@ -2545,8 +4322,29 @@ impl Orchestrator {
             }
             _ => {
                 let fallback = self.file_store_for(agent_id).build_memory_context().await?;
-                let context_body = truncate_text_to_budget(&fallback, remaining_budget);
-                let context = format!("{facts_section}{context_body}");
+                if !fallback.trim().is_empty() {
+                    let context = build_memory_context_from_fallback(&facts, &fallback, budget);
+                    self.memory
+                        .record_trace(
+                            agent_id,
+                            "inject",
+                            &serde_json::json!({
+                                "budget": budget,
+                                "injected_chars": context.len(),
+                                "source": if facts.is_empty() { "fallback" } else { "facts_plus_fallback" },
+                            })
+                            .to_string(),
+                            Some(search_ms),
+                        )
+                        .await;
+                    return Ok(context);
+                }
+
+                if facts.is_empty() {
+                    return Ok(String::new());
+                }
+
+                let context = build_known_facts_section(&facts, budget);
                 self.memory
                     .record_trace(
                         agent_id,
@@ -2554,7 +4352,7 @@ impl Orchestrator {
                         &serde_json::json!({
                             "budget": budget,
                             "injected_chars": context.len(),
-                            "source": "fallback",
+                            "source": "facts_only",
                         })
                         .to_string(),
                         Some(search_ms),
@@ -2595,14 +4393,18 @@ pub fn build_tool_registry(
         .collect();
 
     let mut registry = ToolRegistry::new();
+    let fact_store = clawhive_memory::fact_store::FactStore::new(memory.db());
     registry.register(Box::new(MemorySearchTool::new(
+        fact_store.clone(),
         search_index.clone(),
         embedding_provider.clone(),
+        "default".to_string(),
     )));
     registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
-    let fact_store = clawhive_memory::fact_store::FactStore::new(memory.db());
     registry.register(Box::new(MemoryWriteTool::new(
         fact_store.clone(),
+        file_store.clone(),
+        Arc::clone(memory),
         "default".to_string(),
     )));
     registry.register(Box::new(MemoryForgetTool::new(
@@ -2919,6 +4721,19 @@ fn history_message_limit(agent: &FullAgentConfig) -> usize {
         .unwrap_or(10)
 }
 
+fn session_reset_policy_for(agent: &FullAgentConfig) -> crate::session::SessionResetPolicy {
+    let policy = agent.memory_policy.as_ref();
+    let default_policy = crate::session::SessionResetPolicy::default();
+    crate::session::SessionResetPolicy {
+        idle_minutes: policy
+            .and_then(|memory| memory.idle_minutes)
+            .or(default_policy.idle_minutes),
+        daily_at_hour: policy
+            .and_then(|memory| memory.daily_at_hour)
+            .or(default_policy.daily_at_hour),
+    }
+}
+
 fn is_explicit_web_search_request(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -3200,6 +5015,125 @@ fn repair_tool_pairing(messages: &mut Vec<LlmMessage>) {
     }
 }
 
+fn build_memory_context_from_hits(hits: &[MemoryHit], budget: usize) -> String {
+    if hits.is_empty() || budget == 0 {
+        return String::new();
+    }
+
+    let routing_bias = infer_memory_routing_bias(hits);
+    let facts = hits
+        .iter()
+        .filter_map(|hit| match hit {
+            MemoryHit::Fact(hit) => Some(hit.fact.clone()),
+            MemoryHit::Chunk(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let chunks = hits
+        .iter()
+        .filter_map(|hit| match hit {
+            MemoryHit::Chunk(hit) => Some(hit.clone()),
+            MemoryHit::Fact(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let chunks = select_chunks_for_context(
+        filter_duplicate_chunks_against_facts(chunks, &facts),
+        routing_bias,
+    );
+
+    let facts_budget = if facts.is_empty() || chunks.is_empty() {
+        budget
+    } else {
+        match routing_bias {
+            MemoryRoutingBias::LongTerm => (budget / 4).min(1500),
+            MemoryRoutingBias::ShortTerm => (budget / 6).min(900),
+            MemoryRoutingBias::Neutral => (budget / 3).min(1500),
+        }
+    };
+    let facts_section = build_known_facts_section(&facts, facts_budget);
+    let facts_chars = facts_section.chars().count();
+    let remaining_budget = budget.saturating_sub(facts_chars);
+    let chunks_section = clamp_to_budget(&chunks, remaining_budget);
+
+    format!("{facts_section}{chunks_section}")
+}
+
+fn build_memory_context_from_fallback(
+    facts: &[clawhive_memory::fact_store::Fact],
+    fallback: &str,
+    budget: usize,
+) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+
+    let fallback = truncate_text_to_budget(fallback, budget);
+    if facts.is_empty() {
+        return fallback;
+    }
+    if fallback.trim().is_empty() {
+        return build_known_facts_section(facts, budget);
+    }
+
+    let facts_budget = (budget / 3).min(1800);
+    let facts_section = build_known_facts_section(facts, facts_budget);
+    let remaining_budget = budget.saturating_sub(facts_section.chars().count());
+    let fallback_section = truncate_text_to_budget(fallback.trim(), remaining_budget);
+    format!("{facts_section}{fallback_section}")
+}
+
+fn should_use_long_term_fallback(routing_bias: MemoryRoutingBias, hits: &[MemoryHit]) -> bool {
+    routing_bias != MemoryRoutingBias::ShortTerm
+        && !hits.iter().any(|hit| {
+            matches!(
+                hit.source_kind(),
+                MemorySourceKind::Fact | MemorySourceKind::LongTerm
+            )
+        })
+}
+
+fn select_chunks_for_context(
+    chunks: Vec<clawhive_memory::search_index::SearchResult>,
+    routing_bias: MemoryRoutingBias,
+) -> Vec<clawhive_memory::search_index::SearchResult> {
+    let mut long_term = Vec::new();
+    let mut daily = Vec::new();
+    let mut session = Vec::new();
+    let mut other = Vec::new();
+
+    for chunk in chunks {
+        match super::memory_retrieval::classify_chunk_source(&chunk.source, &chunk.path) {
+            MemorySourceKind::LongTerm => long_term.push(chunk),
+            MemorySourceKind::Daily => daily.push(chunk),
+            MemorySourceKind::Session => session.push(chunk),
+            _ => other.push(chunk),
+        }
+    }
+
+    let has_long_term = !long_term.is_empty();
+    let mut selected = Vec::new();
+    match routing_bias {
+        MemoryRoutingBias::LongTerm => {
+            selected.extend(long_term.into_iter().take(4));
+            if !has_long_term {
+                selected.extend(daily.into_iter().take(3));
+                selected.extend(session.into_iter().take(1));
+            }
+        }
+        MemoryRoutingBias::ShortTerm => {
+            selected.extend(daily.into_iter().take(4));
+            selected.extend(session.into_iter().take(2));
+            selected.extend(long_term.into_iter().take(1));
+        }
+        MemoryRoutingBias::Neutral => {
+            selected.extend(long_term.into_iter().take(2));
+            selected.extend(daily.into_iter().take(2));
+            selected.extend(session.into_iter().take(1));
+        }
+    }
+    selected.extend(other);
+    selected
+}
+
 fn clamp_to_budget(
     results: &[clawhive_memory::search_index::SearchResult],
     budget: usize,
@@ -3283,15 +5217,50 @@ fn build_known_facts_section(facts: &[clawhive_memory::fact_store::Fact], budget
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use super::*;
+    use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
     use clawhive_bus::EventBus;
     use clawhive_memory::embedding::StubEmbeddingProvider;
+    use clawhive_memory::fact_store::FactStore;
     use clawhive_memory::file_store::MemoryFileStore;
     use clawhive_memory::search_index::SearchResult;
-    use clawhive_memory::{MemoryStore, SessionMessage};
+    use clawhive_memory::{MemoryStore, SessionEntry, SessionMessage, SessionRecord};
+    use clawhive_provider::{ContentBlock, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry};
+    use clawhive_runtime::NativeExecutor;
     use clawhive_scheduler::{ScheduleManager, SqliteStore};
     use serde_json::json;
+    use tempfile::TempDir;
+
+    use crate::RoutingConfig;
+
+    struct CompactionOnlyProvider;
+
+    #[async_trait]
+    impl LlmProvider for CompactionOnlyProvider {
+        async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let text = if request
+                .system
+                .as_deref()
+                .is_some_and(|system| system.starts_with("You are a conversation summarizer"))
+            {
+                "compact summary".to_string()
+            } else {
+                "reply: ok".to_string()
+            };
+
+            Ok(LlmResponse {
+                text: text.clone(),
+                content: vec![ContentBlock::Text { text }],
+                input_tokens: None,
+                output_tokens: None,
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
 
     fn agent_with_memory_policy(
         memory_policy: Option<crate::config::MemoryPolicyConfig>,
@@ -3317,6 +5286,142 @@ mod tests {
             max_response_tokens: None,
             max_iterations: None,
         }
+    }
+
+    fn test_full_agent(agent_id: &str) -> FullAgentConfig {
+        FullAgentConfig {
+            agent_id: agent_id.to_string(),
+            ..agent_with_memory_policy(None)
+        }
+    }
+
+    async fn make_memory_tool_orchestrator(
+        agent_ids: &[&str],
+    ) -> (Orchestrator, TempDir, Arc<MemoryStore>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let bus = EventBus::new(16);
+        let publisher = bus.publisher();
+        let file_store = MemoryFileStore::new(tmp.path());
+        let search_index = SearchIndex::new(memory.db(), "default");
+        let embedding_provider: Arc<dyn EmbeddingProvider> =
+            Arc::new(StubEmbeddingProvider::new(8));
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                SqliteStore::open(&tmp.path().join("data/scheduler.db")).unwrap(),
+                Arc::new(EventBus::new(16)),
+            )
+            .await
+            .unwrap(),
+        );
+        let router = LlmRouter::new(ProviderRegistry::new(), HashMap::new(), vec![]);
+        let agents = agent_ids
+            .iter()
+            .map(|agent_id| test_full_agent(agent_id))
+            .collect::<Vec<_>>();
+        let tool_registry = build_tool_registry(
+            &file_store,
+            &search_index,
+            &memory,
+            &embedding_provider,
+            tmp.path(),
+            tmp.path(),
+            &None,
+            &publisher,
+            Arc::clone(&schedule_manager),
+            None,
+            &router,
+            &agents,
+            &HashMap::new(),
+        );
+        let config_view = ConfigView::new(
+            0,
+            agents,
+            HashMap::new(),
+            RoutingConfig {
+                default_agent_id: agent_ids.first().unwrap_or(&"agent-a").to_string(),
+                bindings: vec![],
+            },
+            router,
+            tool_registry,
+            embedding_provider,
+        );
+
+        let orchestrator = OrchestratorBuilder::new(
+            config_view,
+            publisher,
+            Arc::clone(&memory),
+            Arc::new(NativeExecutor),
+            tmp.path().to_path_buf(),
+            schedule_manager,
+        )
+        .build();
+
+        (orchestrator, tmp, memory)
+    }
+
+    async fn make_file_backed_test_orchestrator(
+        agent_id: &str,
+        db_path: &std::path::Path,
+        workspace_root: &std::path::Path,
+    ) -> (Orchestrator, Arc<MemoryStore>) {
+        let memory = Arc::new(MemoryStore::open(db_path.to_str().expect("db path")).unwrap());
+        let bus = EventBus::new(16);
+        let publisher = bus.publisher();
+        let file_store = MemoryFileStore::new(workspace_root);
+        let search_index = SearchIndex::new(memory.db(), agent_id);
+        let embedding_provider: Arc<dyn EmbeddingProvider> =
+            Arc::new(StubEmbeddingProvider::new(8));
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                SqliteStore::open(&workspace_root.join("data/scheduler.db")).unwrap(),
+                Arc::new(EventBus::new(16)),
+            )
+            .await
+            .unwrap(),
+        );
+        let router = LlmRouter::new(ProviderRegistry::new(), HashMap::new(), vec![]);
+        let mut agent = test_full_agent(agent_id);
+        agent.workspace = Some(".".to_string());
+        let agents = vec![agent];
+        let tool_registry = build_tool_registry(
+            &file_store,
+            &search_index,
+            &memory,
+            &embedding_provider,
+            workspace_root,
+            workspace_root,
+            &None,
+            &publisher,
+            Arc::clone(&schedule_manager),
+            None,
+            &router,
+            &agents,
+            &HashMap::new(),
+        );
+        let config_view = ConfigView::new(
+            0,
+            agents,
+            HashMap::new(),
+            RoutingConfig {
+                default_agent_id: agent_id.to_string(),
+                bindings: vec![],
+            },
+            router,
+            tool_registry,
+            embedding_provider,
+        );
+        let orchestrator = OrchestratorBuilder::new(
+            config_view,
+            publisher,
+            Arc::clone(&memory),
+            Arc::new(NativeExecutor),
+            workspace_root.to_path_buf(),
+            schedule_manager,
+        )
+        .build();
+
+        (orchestrator, memory)
     }
 
     fn assistant_with_tool_use(id: &str) -> LlmMessage {
@@ -3348,11 +5453,11 @@ mod tests {
             .collect()
     }
 
-    fn make_result(path: &str, text: &str, score: f64) -> SearchResult {
+    fn make_result(path: &str, source: &str, text: &str, score: f64) -> SearchResult {
         SearchResult {
             chunk_id: format!("{}:0-1:abc", path),
             path: path.to_string(),
-            source: "test".to_string(),
+            source: source.to_string(),
             start_line: 0,
             end_line: 1,
             text: text.to_string(),
@@ -3368,8 +5473,8 @@ mod tests {
     #[test]
     fn test_clamp_to_budget_within_limit() {
         let results = vec![
-            make_result("memory/a.md", "first chunk", 0.91),
-            make_result("memory/b.md", "second chunk", 0.83),
+            make_result("memory/a.md", "daily", "first chunk", 0.91),
+            make_result("memory/b.md", "daily", "second chunk", 0.83),
         ];
 
         let context = clamp_to_budget(&results, 1_000);
@@ -3383,6 +5488,7 @@ mod tests {
     fn test_clamp_to_budget_exceeds_limit() {
         let results = vec![make_result(
             "memory/a.md",
+            "daily",
             "abcdefghijklmnopqrstuvwxyz",
             0.91,
         )];
@@ -3397,9 +5503,208 @@ mod tests {
 
     #[test]
     fn test_clamp_to_budget_zero_budget() {
-        let results = vec![make_result("memory/a.md", "first chunk", 0.91)];
+        let results = vec![make_result("memory/a.md", "daily", "first chunk", 0.91)];
 
         assert_eq!(clamp_to_budget(&results, 0), "");
+    }
+
+    #[test]
+    fn build_memory_context_from_hits_long_term_query_suppresses_daily_and_session_noise() {
+        let hits = vec![
+            MemoryHit::Chunk(make_result(
+                "MEMORY.md",
+                "long_term",
+                "长期主线：重构记忆系统，采用分层记忆架构。",
+                1.32,
+            )),
+            MemoryHit::Chunk(make_result(
+                "memory/2026-03-29.md",
+                "daily",
+                "daily 细节：品牌命名还在候选阶段。",
+                0.94,
+            )),
+            MemoryHit::Chunk(make_result(
+                "sessions/demo#turn:1-2",
+                "session",
+                "session 讨论：列出一堆当前缺陷清单。",
+                0.81,
+            )),
+        ];
+
+        let context = build_memory_context_from_hits(&hits, 4_000);
+
+        assert!(context.contains("MEMORY.md"));
+        assert!(context.contains("长期主线：重构记忆系统"));
+        assert!(!context.contains("品牌命名还在候选阶段"));
+        assert!(!context.contains("列出一堆当前缺陷清单"));
+    }
+
+    #[test]
+    fn build_memory_context_from_hits_short_term_query_prefers_daily_over_long_term() {
+        let hits = vec![
+            MemoryHit::Chunk(make_result(
+                "memory/2026-03-30.md",
+                "daily",
+                "短期事项：品牌命名还在候选阶段。",
+                1.28,
+            )),
+            MemoryHit::Chunk(make_result(
+                "sessions/demo#turn:1",
+                "session",
+                "session 补充：刚确认了几个候选词。",
+                1.04,
+            )),
+            MemoryHit::Chunk(make_result(
+                "MEMORY.md",
+                "long_term",
+                "长期主线：重构记忆系统。",
+                0.83,
+            )),
+        ];
+
+        let context = build_memory_context_from_hits(&hits, 4_000);
+
+        let daily_pos = context.find("memory/2026-03-30.md").expect("daily hit");
+        let long_term_pos = context.find("MEMORY.md").expect("long term hit");
+        assert!(daily_pos < long_term_pos);
+        assert!(context.contains("品牌命名还在候选阶段"));
+    }
+
+    #[test]
+    fn should_use_long_term_fallback_only_when_long_term_query_has_no_fact_or_memory_hit() {
+        let daily_hit = MemoryHit::Chunk(make_result(
+            "memory/2026-03-30.md",
+            "daily",
+            "短期事项：品牌命名还在候选阶段。",
+            1.0,
+        ));
+        let long_term_hit = MemoryHit::Chunk(make_result(
+            "MEMORY.md",
+            "long_term",
+            "长期主线：重构记忆系统。",
+            0.8,
+        ));
+
+        assert!(should_use_long_term_fallback(
+            MemoryRoutingBias::LongTerm,
+            std::slice::from_ref(&daily_hit),
+        ));
+        assert!(!should_use_long_term_fallback(
+            MemoryRoutingBias::LongTerm,
+            &[daily_hit, long_term_hit.clone()],
+        ));
+        assert!(!should_use_long_term_fallback(
+            MemoryRoutingBias::ShortTerm,
+            std::slice::from_ref(&long_term_hit),
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_for_agent_scopes_memory_write_to_current_agent() {
+        let (orchestrator, _tmp, memory) =
+            make_memory_tool_orchestrator(&["agent-a", "agent-b"]).await;
+        let view = orchestrator.config_view();
+        let ctx = ToolContext::builtin();
+
+        let output = orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_write",
+                json!({
+                    "content": "User prefers green tea",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+
+        let fact_store = FactStore::new(memory.db());
+        assert!(fact_store
+            .find_by_content("agent-a", "User prefers green tea")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(fact_store
+            .find_by_content("agent-b", "User prefers green tea")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_tool_for_agent_scopes_memory_get_to_current_agent_workspace() {
+        let (orchestrator, _tmp, _memory) =
+            make_memory_tool_orchestrator(&["agent-a", "agent-b"]).await;
+        let view = orchestrator.config_view();
+        let ctx = ToolContext::builtin();
+
+        orchestrator
+            .file_store_for("agent-a")
+            .write_long_term("# Agent A memory")
+            .await
+            .unwrap();
+        orchestrator
+            .file_store_for("agent-b")
+            .write_long_term("# Agent B memory")
+            .await
+            .unwrap();
+
+        let output = orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_get",
+                json!({"key": "MEMORY.md"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("Agent A memory"));
+        assert!(!output.content.contains("Agent B memory"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_for_agent_memory_search_returns_fact_hits() {
+        let (orchestrator, _tmp, _memory) =
+            make_memory_tool_orchestrator(&["agent-a", "agent-b"]).await;
+        let view = orchestrator.config_view();
+        let ctx = ToolContext::builtin();
+
+        orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_write",
+                json!({
+                    "content": "User prefers Chinese replies",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let output = orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_search",
+                json!({"query": "Chinese replies"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("[fact:preference]"));
+        assert!(output.content.contains("[fact]"));
+        assert!(output.content.contains("Chinese replies"));
     }
 
     #[tokio::test]
@@ -3567,13 +5872,1153 @@ Body"#,
     }
 
     #[test]
+    fn collect_unflushed_boundary_episodes_only_returns_turns_after_checkpoint() {
+        let entries = vec![
+            SessionEntry::Message {
+                id: "m1".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 0, 0).unwrap(),
+                message: SessionMessage {
+                    role: "user".to_string(),
+                    content: "first user".to_string(),
+                    timestamp: None,
+                },
+            },
+            SessionEntry::Message {
+                id: "m2".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 0, 1).unwrap(),
+                message: SessionMessage {
+                    role: "assistant".to_string(),
+                    content: "first reply".to_string(),
+                    timestamp: None,
+                },
+            },
+            SessionEntry::Message {
+                id: "m3".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 1, 0).unwrap(),
+                message: SessionMessage {
+                    role: "user".to_string(),
+                    content: "second user".to_string(),
+                    timestamp: None,
+                },
+            },
+            SessionEntry::Message {
+                id: "m4".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 1, 1).unwrap(),
+                message: SessionMessage {
+                    role: "assistant".to_string(),
+                    content: "second reply".to_string(),
+                    timestamp: None,
+                },
+            },
+        ];
+
+        let (episodes, turn_count) =
+            collect_unflushed_boundary_episodes(entries, 1, 20).expect("snapshot");
+
+        assert_eq!(turn_count, 2);
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].start_turn, 2);
+        assert_eq!(episodes[0].end_turn, 2);
+        assert_eq!(episodes[0].messages.len(), 2);
+        assert_eq!(episodes[0].messages[0].content, "second user");
+        assert_eq!(episodes[0].messages[1].content, "second reply");
+    }
+
+    #[test]
+    fn collect_unflushed_boundary_episodes_groups_related_turns() {
+        let entries = vec![
+            SessionEntry::Message {
+                id: "m1".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 0, 0).unwrap(),
+                message: SessionMessage {
+                    role: "user".to_string(),
+                    content: "How do I use Rust Vec push?".to_string(),
+                    timestamp: None,
+                },
+            },
+            SessionEntry::Message {
+                id: "m2".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 0, 1).unwrap(),
+                message: SessionMessage {
+                    role: "assistant".to_string(),
+                    content: "Use Vec::push to append items.".to_string(),
+                    timestamp: None,
+                },
+            },
+            SessionEntry::Message {
+                id: "m3".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 1, 0).unwrap(),
+                message: SessionMessage {
+                    role: "user".to_string(),
+                    content: "What about Rust Vec insert?".to_string(),
+                    timestamp: None,
+                },
+            },
+            SessionEntry::Message {
+                id: "m4".to_string(),
+                timestamp: Utc.with_ymd_and_hms(2026, 3, 30, 10, 1, 1).unwrap(),
+                message: SessionMessage {
+                    role: "assistant".to_string(),
+                    content: "Use Vec::insert for indexed insertion.".to_string(),
+                    timestamp: None,
+                },
+            },
+        ];
+
+        let (episodes, turn_count) =
+            collect_unflushed_boundary_episodes(entries, 0, 20).expect("snapshot");
+
+        assert_eq!(turn_count, 2);
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].start_turn, 1);
+        assert_eq!(episodes[0].end_turn, 2);
+        assert_eq!(episodes[0].messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn record_session_turn_episode_merges_related_turns_into_same_open_episode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-1";
+        let session_key = "telegram:tg:chat:episode-1";
+        let agent_id = "agent-a";
+
+        let (orchestrator, memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 0,
+        };
+
+        orchestrator
+            .record_session_turn_episode(
+                agent_id,
+                &session,
+                EpisodeTurnInput {
+                    turn_index: 1,
+                    user_text: "How do I use Rust Vec push?",
+                    assistant_text: "Use Vec::push to append items.",
+                    successful_tool_calls: 0,
+                    final_stop_reason: Some("end_turn"),
+                },
+            )
+            .await;
+        orchestrator
+            .record_session_turn_episode(
+                agent_id,
+                &session,
+                EpisodeTurnInput {
+                    turn_index: 2,
+                    user_text: "What about Rust Vec insert?",
+                    assistant_text: "Use Vec::insert for indexed insertion.",
+                    successful_tool_calls: 0,
+                    final_stop_reason: Some("end_turn"),
+                },
+            )
+            .await;
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 1);
+        let episode = &state.open_episodes[0];
+        assert_eq!(episode.start_turn, 1);
+        assert_eq!(episode.end_turn, 2);
+        assert_eq!(episode.status, EpisodeStatusRecord::Open);
+        assert_eq!(episode.task_state, EpisodeTaskStateRecord::Delivered);
+    }
+
+    #[tokio::test]
+    async fn record_session_turn_episode_closes_previous_episode_on_topic_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-closure";
+        let session_key = "telegram:tg:chat:episode-closure";
+        let agent_id = "agent-a";
+
+        let (orchestrator, memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 0,
+        };
+
+        orchestrator
+            .record_session_turn_episode(
+                agent_id,
+                &session,
+                EpisodeTurnInput {
+                    turn_index: 1,
+                    user_text: "How do I use Rust Vec push?",
+                    assistant_text: "Use Vec::push to append items.",
+                    successful_tool_calls: 0,
+                    final_stop_reason: Some("end_turn"),
+                },
+            )
+            .await;
+        let closed = orchestrator
+            .record_session_turn_episode(
+                agent_id,
+                &session,
+                EpisodeTurnInput {
+                    turn_index: 2,
+                    user_text: "How do I inspect RunPod GPU usage?",
+                    assistant_text: "Use nvidia-smi on the pod.",
+                    successful_tool_calls: 0,
+                    final_stop_reason: Some("end_turn"),
+                },
+            )
+            .await
+            .expect("closed episode");
+
+        assert_eq!(closed.start_turn, 1);
+        assert_eq!(closed.end_turn, 1);
+        assert_eq!(closed.status, EpisodeStatusRecord::Closed);
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 2);
+        assert_eq!(state.open_episodes[0].status, EpisodeStatusRecord::Closed);
+        assert_eq!(state.open_episodes[1].status, EpisodeStatusRecord::Open);
+        assert_eq!(state.open_episodes[1].start_turn, 2);
+    }
+
+    #[test]
+    fn infer_episode_task_state_distinguishes_structural_delivery_states() {
+        assert_eq!(
+            infer_episode_task_state("好，让我把所有内容整合起来：", 0, Some("end_turn")),
+            EpisodeTaskStateRecord::Executing
+        );
+        assert_eq!(
+            infer_episode_task_state("我现在就整理给你", 0, Some("end_turn")),
+            EpisodeTaskStateRecord::Exploring
+        );
+        assert_eq!(
+            infer_episode_task_state("整理好了，答案如下。", 0, Some("end_turn")),
+            EpisodeTaskStateRecord::Delivered
+        );
+        assert_eq!(
+            infer_episode_task_state("我现在就整理给你", 1, Some("end_turn")),
+            EpisodeTaskStateRecord::Delivered
+        );
+        assert_eq!(
+            infer_episode_task_state("整理到一半", 0, Some("length")),
+            EpisodeTaskStateRecord::Executing
+        );
+    }
+
+    #[test]
+    fn decide_episode_turn_keeps_related_topics_in_same_episode() {
+        let current = boundary_flush_topic_tokens_from_text("rust vec push");
+        let next = boundary_flush_topic_tokens_from_text("rust vec capacity");
+
+        let decision = decide_episode_turn(
+            &current,
+            &next,
+            "整理好了，答案如下。",
+            0,
+            Some("end_turn"),
+            EpisodeTaskStateRecord::Delivered,
+            1,
+        );
+
+        assert_eq!(decision.boundary, EpisodeBoundaryDecision::ContinueCurrent);
+        assert_eq!(decision.task_state, EpisodeTaskStateRecord::Delivered);
+    }
+
+    #[test]
+    fn decide_episode_turn_splits_unrelated_topics_and_tracks_runtime_state() {
+        let current = boundary_flush_topic_tokens_from_text("rust vec push");
+        let next = boundary_flush_topic_tokens_from_text("runpod gpu inspect");
+
+        let decision = decide_episode_turn(
+            &current,
+            &next,
+            "我现在就整理给你",
+            1,
+            Some("end_turn"),
+            EpisodeTaskStateRecord::Delivered,
+            1,
+        );
+
+        assert_eq!(
+            decision.boundary,
+            EpisodeBoundaryDecision::CloseCurrentAndOpenNext
+        );
+        assert_eq!(decision.task_state, EpisodeTaskStateRecord::Delivered);
+    }
+
+    #[test]
+    fn decide_episode_turn_splits_when_current_episode_reaches_turn_cap() {
+        let current = boundary_flush_topic_tokens_from_text("rust vec push");
+        let next = boundary_flush_topic_tokens_from_text("rust vec capacity");
+
+        let decision = decide_episode_turn(
+            &current,
+            &next,
+            "继续补充说明。",
+            0,
+            Some("end_turn"),
+            EpisodeTaskStateRecord::Delivered,
+            MAX_OPEN_EPISODE_TURNS,
+        );
+
+        assert_eq!(
+            decision.boundary,
+            EpisodeBoundaryDecision::CloseCurrentAndOpenNext
+        );
+    }
+
+    #[tokio::test]
+    async fn record_session_turn_episode_marks_open_episode_executing_for_structural_promise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-task-state";
+        let session_key = "telegram:tg:chat:episode-task-state";
+        let agent_id = "agent-a";
+
+        let (orchestrator, memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 0,
+        };
+
+        orchestrator
+            .record_session_turn_episode(
+                agent_id,
+                &session,
+                EpisodeTurnInput {
+                    turn_index: 1,
+                    user_text: "请整理 memory 重构方案",
+                    assistant_text: "好，让我把所有内容整合起来：",
+                    successful_tool_calls: 0,
+                    final_stop_reason: Some("end_turn"),
+                },
+            )
+            .await;
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 1);
+        assert_eq!(
+            state.open_episodes[0].task_state,
+            EpisodeTaskStateRecord::Executing
+        );
+    }
+
+    #[tokio::test]
+    async fn record_session_turn_episode_marks_inconclusive_reply_delivered_after_tool_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-task-state-tools";
+        let session_key = "telegram:tg:chat:episode-task-state-tools";
+        let agent_id = "agent-a";
+
+        let (orchestrator, memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 0,
+        };
+
+        orchestrator
+            .record_session_turn_episode(
+                agent_id,
+                &session,
+                EpisodeTurnInput {
+                    turn_index: 1,
+                    user_text: "请帮我检查 GPU 状态",
+                    assistant_text: "我现在就整理给你",
+                    successful_tool_calls: 1,
+                    final_stop_reason: Some("end_turn"),
+                },
+            )
+            .await;
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 1);
+        assert_eq!(
+            state.open_episodes[0].task_state,
+            EpisodeTaskStateRecord::Delivered
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_flush_snapshot_prefers_persisted_open_episode_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-2";
+        let session_key = "telegram:tg:chat:episode-2";
+        let agent_id = "agent-a";
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("db path")).unwrap();
+            store
+                .upsert_session(SessionRecord {
+                    session_key: session_key.to_string(),
+                    session_id: session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    ttl_seconds: 1800,
+                    interaction_count: 2,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    session_key: session_key.to_string(),
+                    last_flushed_turn: 0,
+                    last_boundary_flush_at: None,
+                    pending_flush: false,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: vec![EpisodeStateRecord {
+                        episode_id: format!("{session_id}:1"),
+                        start_turn: 1,
+                        end_turn: 2,
+                        status: EpisodeStatusRecord::Open,
+                        task_state: EpisodeTaskStateRecord::Delivered,
+                        topic_sketch: "rust vec".to_string(),
+                        last_activity_at: Utc::now(),
+                    }],
+                })
+                .await
+                .unwrap();
+        }
+
+        let writer = SessionWriter::new(tmp.path());
+        writer
+            .append_message(session_id, "user", "How do I use Rust Vec push?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Use Vec::push to append items.")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "user", "Completely different new task")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Handled the unrelated task.")
+            .await
+            .unwrap();
+
+        let (orchestrator, _memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 2,
+        };
+
+        let snapshot = orchestrator
+            .capture_boundary_flush_snapshot(agent_id, &session, &test_full_agent(agent_id))
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert_eq!(snapshot.episodes[0].start_turn, 1);
+        assert_eq!(snapshot.episodes[0].end_turn, 2);
+        assert_eq!(snapshot.episodes[0].messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn boundary_flush_snapshot_ignores_already_flushed_episode_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-3";
+        let session_key = "telegram:tg:chat:episode-3";
+        let agent_id = "agent-a";
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("db path")).unwrap();
+            store
+                .upsert_session(SessionRecord {
+                    session_key: session_key.to_string(),
+                    session_id: session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    ttl_seconds: 1800,
+                    interaction_count: 2,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    session_key: session_key.to_string(),
+                    last_flushed_turn: 1,
+                    last_boundary_flush_at: Some(Utc::now()),
+                    pending_flush: false,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: vec![
+                        EpisodeStateRecord {
+                            episode_id: format!("{session_id}:1"),
+                            start_turn: 1,
+                            end_turn: 1,
+                            status: EpisodeStatusRecord::Flushed,
+                            task_state: EpisodeTaskStateRecord::Delivered,
+                            topic_sketch: "rust vec".to_string(),
+                            last_activity_at: Utc::now(),
+                        },
+                        EpisodeStateRecord {
+                            episode_id: format!("{session_id}:2"),
+                            start_turn: 2,
+                            end_turn: 2,
+                            status: EpisodeStatusRecord::Open,
+                            task_state: EpisodeTaskStateRecord::Delivered,
+                            topic_sketch: "runpod gpu".to_string(),
+                            last_activity_at: Utc::now(),
+                        },
+                    ],
+                })
+                .await
+                .unwrap();
+        }
+
+        let writer = SessionWriter::new(tmp.path());
+        writer
+            .append_message(session_id, "user", "How do I use Rust Vec push?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Use Vec::push to append items.")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "user", "How do I inspect RunPod GPU usage?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Use nvidia-smi on the pod.")
+            .await
+            .unwrap();
+
+        let (orchestrator, _memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 2,
+        };
+
+        let snapshot = orchestrator
+            .capture_boundary_flush_snapshot(agent_id, &session, &test_full_agent(agent_id))
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert_eq!(snapshot.episodes[0].start_turn, 2);
+        assert_eq!(snapshot.episodes[0].end_turn, 2);
+        assert_eq!(snapshot.turn_count, 2);
+    }
+
+    #[tokio::test]
+    async fn boundary_flush_snapshot_skips_recent_flush_pending_episode_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-pending";
+        let session_key = "telegram:tg:chat:episode-pending";
+        let agent_id = "agent-a";
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("db path")).unwrap();
+            store
+                .upsert_session(SessionRecord {
+                    session_key: session_key.to_string(),
+                    session_id: session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    ttl_seconds: 1800,
+                    interaction_count: 2,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    session_key: session_key.to_string(),
+                    last_flushed_turn: 0,
+                    last_boundary_flush_at: None,
+                    pending_flush: false,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: vec![
+                        EpisodeStateRecord {
+                            episode_id: format!("{session_id}:1"),
+                            start_turn: 1,
+                            end_turn: 1,
+                            status: EpisodeStatusRecord::FlushPending,
+                            task_state: EpisodeTaskStateRecord::Delivered,
+                            topic_sketch: "rust vec".to_string(),
+                            last_activity_at: Utc::now(),
+                        },
+                        EpisodeStateRecord {
+                            episode_id: format!("{session_id}:2"),
+                            start_turn: 2,
+                            end_turn: 2,
+                            status: EpisodeStatusRecord::Closed,
+                            task_state: EpisodeTaskStateRecord::Delivered,
+                            topic_sketch: "runpod gpu".to_string(),
+                            last_activity_at: Utc::now(),
+                        },
+                    ],
+                })
+                .await
+                .unwrap();
+        }
+
+        let writer = SessionWriter::new(tmp.path());
+        writer
+            .append_message(session_id, "user", "How do I use Rust Vec push?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Use Vec::push to append items.")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "user", "How do I inspect RunPod GPU usage?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Use nvidia-smi on the pod.")
+            .await
+            .unwrap();
+
+        let (orchestrator, _memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 2,
+        };
+
+        let snapshot = orchestrator
+            .capture_boundary_flush_snapshot(agent_id, &session, &test_full_agent(agent_id))
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert_eq!(snapshot.episodes[0].start_turn, 2);
+        assert_eq!(snapshot.episodes[0].end_turn, 2);
+        assert_eq!(snapshot.turn_count, 2);
+    }
+
+    #[tokio::test]
+    async fn session_end_schedules_delivered_closed_episodes_before_fallback_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-session-end";
+        let session_key = "telegram:tg:chat:episode-session-end";
+        let agent_id = "agent-a";
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("db path")).unwrap();
+            store
+                .upsert_session(SessionRecord {
+                    session_key: session_key.to_string(),
+                    session_id: session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    ttl_seconds: 1800,
+                    interaction_count: 2,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    session_key: session_key.to_string(),
+                    last_flushed_turn: 0,
+                    last_boundary_flush_at: None,
+                    pending_flush: false,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: vec![
+                        EpisodeStateRecord {
+                            episode_id: format!("{session_id}:1"),
+                            start_turn: 1,
+                            end_turn: 1,
+                            status: EpisodeStatusRecord::Closed,
+                            task_state: EpisodeTaskStateRecord::Delivered,
+                            topic_sketch: "rust vec".to_string(),
+                            last_activity_at: Utc::now(),
+                        },
+                        EpisodeStateRecord {
+                            episode_id: format!("{session_id}:2"),
+                            start_turn: 2,
+                            end_turn: 2,
+                            status: EpisodeStatusRecord::Closed,
+                            task_state: EpisodeTaskStateRecord::Exploring,
+                            topic_sketch: "runpod gpu".to_string(),
+                            last_activity_at: Utc::now(),
+                        },
+                    ],
+                })
+                .await
+                .unwrap();
+        }
+
+        let writer = SessionWriter::new(tmp.path());
+        writer
+            .append_message(session_id, "user", "How do I use Rust Vec push?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "Use Vec::push to append items.")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "user", "How do I inspect RunPod GPU usage?")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "I need to check more details.")
+            .await
+            .unwrap();
+
+        let (orchestrator, memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 2,
+        };
+        let agent = test_full_agent(agent_id);
+        let view = orchestrator.config_view();
+
+        orchestrator
+            .schedule_delivered_episode_flushes_for_session_end(
+                view.as_ref(),
+                agent_id,
+                &session,
+                &agent,
+            )
+            .await;
+
+        let snapshot = orchestrator
+            .capture_boundary_flush_snapshot(agent_id, &session, &agent)
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert_eq!(snapshot.episodes[0].start_turn, 2);
+        assert_eq!(snapshot.episodes[0].end_turn, 2);
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 2);
+        assert_ne!(state.open_episodes[0].status, EpisodeStatusRecord::Open);
+        assert_eq!(state.open_episodes[1].status, EpisodeStatusRecord::Closed);
+    }
+
+    #[tokio::test]
+    async fn close_open_episodes_for_session_end_marks_remaining_open_episodes_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-4";
+        let session_key = "telegram:tg:chat:episode-4";
+        let agent_id = "agent-a";
+
+        let memory = Arc::new(MemoryStore::open(db_path.to_str().expect("db path")).unwrap());
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 2,
+        };
+
+        memory
+            .upsert_session_memory_state(SessionMemoryStateRecord {
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                session_key: session_key.to_string(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: false,
+                recent_explicit_writes: Vec::new(),
+                open_episodes: vec![
+                    EpisodeStateRecord {
+                        episode_id: format!("{session_id}:1"),
+                        start_turn: 1,
+                        end_turn: 1,
+                        status: EpisodeStatusRecord::Open,
+                        task_state: EpisodeTaskStateRecord::Executing,
+                        topic_sketch: "memory".to_string(),
+                        last_activity_at: Utc::now(),
+                    },
+                    EpisodeStateRecord {
+                        episode_id: format!("{session_id}:2"),
+                        start_turn: 2,
+                        end_turn: 2,
+                        status: EpisodeStatusRecord::Closed,
+                        task_state: EpisodeTaskStateRecord::Delivered,
+                        topic_sketch: "runpod".to_string(),
+                        last_activity_at: Utc::now(),
+                    },
+                    EpisodeStateRecord {
+                        episode_id: format!("{session_id}:3"),
+                        start_turn: 3,
+                        end_turn: 3,
+                        status: EpisodeStatusRecord::Flushed,
+                        task_state: EpisodeTaskStateRecord::Delivered,
+                        topic_sketch: "obsidian".to_string(),
+                        last_activity_at: Utc::now(),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        Orchestrator::close_open_episodes_for_session_end(&memory, agent_id, &session).await;
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 3);
+        assert_eq!(state.open_episodes[0].status, EpisodeStatusRecord::Closed);
+        assert_eq!(state.open_episodes[1].status, EpisodeStatusRecord::Closed);
+        assert_eq!(state.open_episodes[2].status, EpisodeStatusRecord::Flushed);
+    }
+
+    #[tokio::test]
+    async fn update_closed_episode_flush_state_reverts_pending_episode_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-episode-failure";
+        let session_key = "telegram:tg:chat:episode-failure";
+        let agent_id = "agent-a";
+
+        let memory = Arc::new(MemoryStore::open(db_path.to_str().expect("db path")).unwrap());
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 1,
+        };
+
+        memory
+            .upsert_session_memory_state(SessionMemoryStateRecord {
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                session_key: session_key.to_string(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: false,
+                recent_explicit_writes: Vec::new(),
+                open_episodes: vec![EpisodeStateRecord {
+                    episode_id: format!("{session_id}:1"),
+                    start_turn: 1,
+                    end_turn: 1,
+                    status: EpisodeStatusRecord::FlushPending,
+                    task_state: EpisodeTaskStateRecord::Delivered,
+                    topic_sketch: "memory".to_string(),
+                    last_activity_at: Utc::now(),
+                }],
+            })
+            .await
+            .unwrap();
+
+        Orchestrator::update_closed_episode_flush_state(
+            &memory,
+            agent_id,
+            &session,
+            &format!("{session_id}:1"),
+            false,
+        )
+        .await;
+
+        let state = memory
+            .get_session_memory_state(agent_id, session_id)
+            .await
+            .unwrap()
+            .expect("session memory state");
+        assert_eq!(state.open_episodes.len(), 1);
+        assert_eq!(state.open_episodes[0].status, EpisodeStatusRecord::Closed);
+    }
+
+    #[tokio::test]
+    async fn boundary_flush_snapshot_resumes_from_persisted_checkpoint_after_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-1";
+        let session_key = "telegram:tg:chat:1";
+        let agent_id = "agent-a";
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("db path")).unwrap();
+            store
+                .upsert_session(SessionRecord {
+                    session_key: session_key.to_string(),
+                    session_id: session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    ttl_seconds: 1800,
+                    interaction_count: 2,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    session_key: session_key.to_string(),
+                    last_flushed_turn: 1,
+                    last_boundary_flush_at: Some(Utc::now()),
+                    pending_flush: false,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: Vec::new(),
+                })
+                .await
+                .unwrap();
+            drop(store);
+        }
+
+        let writer = SessionWriter::new(tmp.path());
+        writer
+            .append_message(session_id, "user", "first user")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "first reply")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "user", "second user")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "second reply")
+            .await
+            .unwrap();
+
+        let (orchestrator, _memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 2,
+        };
+
+        let snapshot = orchestrator
+            .capture_boundary_flush_snapshot(agent_id, &session, &test_full_agent(agent_id))
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.turn_count, 2);
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert_eq!(snapshot.episodes[0].start_turn, 2);
+        assert_eq!(snapshot.episodes[0].end_turn, 2);
+        assert_eq!(snapshot.episodes[0].messages.len(), 2);
+        assert_eq!(snapshot.episodes[0].messages[0].content, "second user");
+        assert_eq!(snapshot.episodes[0].messages[1].content, "second reply");
+    }
+
+    #[tokio::test]
+    async fn explicit_memory_marker_survives_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let session_id = "session-1";
+        let session_key = "telegram:tg:chat:1";
+        let agent_id = "agent-a";
+        let recorded_at = Utc::now();
+
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("db path")).unwrap();
+            store
+                .upsert_session(SessionRecord {
+                    session_key: session_key.to_string(),
+                    session_id: session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    ttl_seconds: 1800,
+                    interaction_count: 2,
+                })
+                .await
+                .unwrap();
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    session_key: session_key.to_string(),
+                    last_flushed_turn: 0,
+                    last_boundary_flush_at: None,
+                    pending_flush: false,
+                    recent_explicit_writes: vec![RecentExplicitMemoryWrite {
+                        turn_index: 1,
+                        memory_ref: "fact-1".to_string(),
+                        canonical_id: Some("canon-1".to_string()),
+                        summary: "User prefers concise replies".to_string(),
+                        recorded_at,
+                    }],
+                    open_episodes: Vec::new(),
+                })
+                .await
+                .unwrap();
+            drop(store);
+        }
+
+        let writer = SessionWriter::new(tmp.path());
+        writer
+            .append_message(session_id, "user", "first user")
+            .await
+            .unwrap();
+        writer
+            .append_message(session_id, "assistant", "first reply")
+            .await
+            .unwrap();
+
+        let (orchestrator, _memory) =
+            make_file_backed_test_orchestrator(agent_id, &db_path, tmp.path()).await;
+        let session = Session {
+            session_key: SessionKey(session_key.to_string()),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            ttl_seconds: 1800,
+            interaction_count: 1,
+        };
+
+        let snapshot = orchestrator
+            .capture_boundary_flush_snapshot(agent_id, &session, &test_full_agent(agent_id))
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.recent_explicit_writes.len(), 1);
+        let marker = &snapshot.recent_explicit_writes[0];
+        assert_eq!(marker.memory_ref, "fact-1");
+        assert_eq!(marker.canonical_id.as_deref(), Some("canon-1"));
+        assert_eq!(marker.summary, "User prefers concise replies");
+        assert_eq!(marker.recorded_at, recorded_at);
+    }
+
+    #[tokio::test]
+    async fn compaction_does_not_write_persistent_memory_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let file_store = MemoryFileStore::new(tmp.path());
+        let fact_store = FactStore::new(memory.db());
+
+        let mut registry = ProviderRegistry::new();
+        registry.register("compact", Arc::new(CompactionOnlyProvider));
+        let router = Arc::new(LlmRouter::new(
+            registry,
+            HashMap::from([("compact".to_string(), "compact/model".to_string())]),
+            vec![],
+        ));
+        let ctx_mgr = crate::context::ContextManager::new(
+            router,
+            crate::context::ContextConfig::for_model(2_000),
+        );
+
+        let large = "x".repeat(25_000);
+        let messages = vec![
+            LlmMessage::user(large.clone()),
+            LlmMessage::assistant(large.clone()),
+            LlmMessage::user(large.clone()),
+            LlmMessage::assistant(large),
+        ];
+
+        let (_, compaction) = ctx_mgr
+            .ensure_within_limits("compact/model", messages)
+            .await
+            .expect("compaction succeeds");
+        assert!(compaction.is_some(), "compaction should have occurred");
+
+        let today = chrono::Utc::now().date_naive();
+        assert!(file_store.read_daily(today).await.unwrap().is_none());
+        assert!(file_store.read_long_term().await.unwrap().trim().is_empty());
+        assert!(fact_store
+            .get_active_facts("test-agent")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn history_message_limit_converts_turns() {
         let agent = agent_with_memory_policy(Some(crate::config::MemoryPolicyConfig {
             mode: "session".to_string(),
             write_scope: "session".to_string(),
+            idle_minutes: Some(30),
+            daily_at_hour: Some(4),
             limit_history_turns: Some(7),
             max_injected_chars: 6000,
-            daily_summary_interval: 10,
+            daily_summary_interval: 0,
         }));
 
         assert_eq!(history_message_limit(&agent), 14);

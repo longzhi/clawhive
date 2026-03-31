@@ -46,3 +46,4 @@ deploy.sh
 temp/
 tasks/
 docs/plans/
+adr/

@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use tokio::task;
 use uuid::Uuid;
 
+use crate::memory_lineage::MemoryLineageStore;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub id: String,
@@ -58,9 +60,26 @@ impl FactStore {
         Self { db }
     }
 
+    pub fn db(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.db)
+    }
+
     pub async fn insert_fact(&self, fact: &Fact) -> Result<()> {
+        self.insert_fact_with_canonical_key(fact, None).await
+    }
+
+    pub async fn insert_fact_with_canonical_key(
+        &self,
+        fact: &Fact,
+        canonical_key: Option<&str>,
+    ) -> Result<()> {
         let db = Arc::clone(&self.db);
         let fact = fact.clone();
+        let fact_for_lineage = fact.clone();
+        let canonical_key = canonical_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
         task::spawn_blocking(move || {
             let conn = db
                 .lock()
@@ -92,9 +111,59 @@ impl FactStore {
                     fact.updated_at,
                 ],
             )?;
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })
-        .await?
+        .await??;
+
+        let lineage_store = MemoryLineageStore::new(Arc::clone(&self.db));
+        if let Some(canonical_key) = canonical_key.as_deref() {
+            match lineage_store
+                .ensure_canonical_with_key(
+                    &fact_for_lineage.agent_id,
+                    "fact",
+                    Some(canonical_key),
+                    &fact_for_lineage.content,
+                )
+                .await
+            {
+                Ok(canonical) => {
+                    if let Err(error) = lineage_store
+                        .attach_source(
+                            &fact_for_lineage.agent_id,
+                            &canonical.canonical_id,
+                            "fact",
+                            &fact_for_lineage.id,
+                            "promoted",
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            fact_id = %fact_for_lineage.id,
+                            agent_id = %fact_for_lineage.agent_id,
+                            error = %error,
+                            "failed to attach keyed lineage for inserted fact"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        fact_id = %fact_for_lineage.id,
+                        agent_id = %fact_for_lineage.agent_id,
+                        error = %error,
+                        "failed to create keyed lineage for inserted fact"
+                    );
+                }
+            }
+        } else if let Err(error) = lineage_store.link_fact(&fact_for_lineage).await {
+            tracing::warn!(
+                fact_id = %fact_for_lineage.id,
+                agent_id = %fact_for_lineage.agent_id,
+                error = %error,
+                "failed to create lineage for inserted fact"
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn get_active_facts(&self, agent_id: &str) -> Result<Vec<Fact>> {
@@ -149,6 +218,7 @@ impl FactStore {
         let db = Arc::clone(&self.db);
         let old_id = old_fact_id.to_owned();
         let new_fact = new_fact.clone();
+        let new_fact_for_lineage = new_fact.clone();
         let reason = reason.to_owned();
         let now = Utc::now().to_rfc3339();
         task::spawn_blocking(move || {
@@ -218,7 +288,21 @@ impl FactStore {
             tx.commit()?;
             Ok(())
         })
-        .await?
+        .await??;
+
+        if let Err(error) = MemoryLineageStore::new(Arc::clone(&self.db))
+            .link_fact(&new_fact_for_lineage)
+            .await
+        {
+            tracing::warn!(
+                fact_id = %new_fact_for_lineage.id,
+                agent_id = %new_fact_for_lineage.agent_id,
+                error = %error,
+                "failed to create lineage for superseding fact"
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn update_status(&self, fact_id: &str, new_status: &str, reason: &str) -> Result<()> {
@@ -286,6 +370,30 @@ impl FactStore {
         .await?
     }
 
+    /// Increment access_count and set last_accessed for the given fact IDs.
+    pub async fn bump_access(&self, fact_ids: &[String]) -> Result<()> {
+        if fact_ids.is_empty() {
+            return Ok(());
+        }
+        let db = Arc::clone(&self.db);
+        let ids = fact_ids.to_vec();
+        let now = Utc::now().to_rfc3339();
+        task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| anyhow!("lock failed"))?;
+            let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            conn.execute(
+                &format!(
+                    "UPDATE facts SET access_count = access_count + 1, last_accessed = ?1 \
+                     WHERE id IN ({placeholders})"
+                ),
+                rusqlite::params_from_iter(std::iter::once(now).chain(ids.into_iter())),
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
     pub async fn get_history(&self, fact_id: &str) -> Result<Vec<FactHistory>> {
         let db = Arc::clone(&self.db);
         let fact_id = fact_id.to_owned();
@@ -342,6 +450,7 @@ fn row_to_fact(r: &rusqlite::Row) -> rusqlite::Result<Fact> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory_lineage::MemoryLineageStore;
     use crate::MemoryStore;
 
     fn make_fact(agent_id: &str, content: &str, fact_type: &str) -> Fact {
@@ -447,5 +556,53 @@ mod tests {
 
         let history = fact_store.get_history(&fact.id).await.unwrap();
         assert_eq!(history[0].event, "RETRACT");
+    }
+
+    #[tokio::test]
+    async fn bump_access_increments_count_and_sets_last_accessed() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+        let fact = make_fact("agent-1", "Test access counting", "preference");
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        fact_store
+            .bump_access(std::slice::from_ref(&fact.id))
+            .await
+            .unwrap();
+        fact_store
+            .bump_access(std::slice::from_ref(&fact.id))
+            .await
+            .unwrap();
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Test access counting")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.access_count, 2);
+        assert!(loaded.last_accessed.is_some());
+    }
+
+    #[tokio::test]
+    async fn insert_fact_creates_lineage() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+        let lineage_store = MemoryLineageStore::new(store.db());
+
+        let fact = make_fact("agent-1", "User likes black coffee", "preference");
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let links = lineage_store
+            .get_links_for_source("agent-1", "fact", &fact.id)
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1);
+
+        let canonical = lineage_store
+            .get_canonical(&links[0].canonical_id)
+            .await
+            .unwrap()
+            .expect("canonical should exist");
+        assert_eq!(canonical.summary, "User likes black coffee");
     }
 }

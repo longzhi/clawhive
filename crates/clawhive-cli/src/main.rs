@@ -107,7 +107,10 @@ enum Commands {
     #[command(about = "Validate config files")]
     Validate,
     #[command(about = "Run memory consolidation manually")]
-    Consolidate,
+    Consolidate {
+        /// Agent ID to consolidate (defaults to routing default_agent_id)
+        agent_id: Option<String>,
+    },
     #[command(subcommand, about = "Memory management")]
     Memory(commands::memory::MemoryCommands),
     #[command(subcommand, about = "Agent management")]
@@ -287,8 +290,8 @@ async fn main() -> Result<()> {
         } => {
             commands::chat::run(&cli.config_root, agent, security, no_security).await?;
         }
-        Commands::Consolidate => {
-            commands::consolidate::run(&cli.config_root).await?;
+        Commands::Consolidate { agent_id } => {
+            commands::consolidate::run(&cli.config_root, agent_id.as_deref()).await?;
         }
         Commands::Memory(cmd) => {
             commands::memory::run(cmd, &cli.config_root).await?;
@@ -344,7 +347,7 @@ mod tests {
     #[test]
     fn parses_consolidate_subcommand() {
         let cli = Cli::parse_from(["clawhive", "consolidate"]);
-        assert!(matches!(cli.command.unwrap(), Commands::Consolidate));
+        assert!(matches!(cli.command.unwrap(), Commands::Consolidate { .. }));
     }
 
     #[test]

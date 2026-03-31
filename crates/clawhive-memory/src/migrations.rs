@@ -204,6 +204,197 @@ fn migrations() -> Vec<Migration> {
             DELETE FROM chunks_fts WHERE rowid NOT IN (SELECT rowid FROM chunks);
             "#,
         ),
+        (
+            11,
+            r#"
+            CREATE TABLE IF NOT EXISTS files_v2 (
+                agent_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                mtime INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                PRIMARY KEY (agent_id, path)
+            );
+
+            INSERT INTO files_v2(agent_id, path, source, hash, mtime, size)
+            SELECT DISTINCT
+                COALESCE(NULLIF(chunks.agent_id, ''), '') AS agent_id,
+                files.path,
+                files.source,
+                files.hash,
+                files.mtime,
+                files.size
+            FROM files
+            LEFT JOIN chunks ON chunks.path = files.path;
+
+            DROP TABLE files;
+            ALTER TABLE files_v2 RENAME TO files;
+            CREATE INDEX IF NOT EXISTS idx_files_agent_source ON files(agent_id, source);
+            "#,
+        ),
+        (
+            12,
+            r#"
+            CREATE TABLE IF NOT EXISTS memory_canon (
+                canonical_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                canonical_kind TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memory_canon_agent_status
+            ON memory_canon(agent_id, status);
+
+            CREATE TABLE IF NOT EXISTS memory_lineage (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                canonical_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (canonical_id) REFERENCES memory_canon(canonical_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memory_lineage_agent_canonical
+            ON memory_lineage(agent_id, canonical_id);
+
+            CREATE INDEX IF NOT EXISTS idx_memory_lineage_source
+            ON memory_lineage(agent_id, source_kind, source_ref);
+            "#,
+        ),
+        (
+            13,
+            r#"
+            CREATE TABLE IF NOT EXISTS dirty_sources (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                processed_at TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dirty_sources_unique
+            ON dirty_sources(agent_id, source_kind, source_ref);
+
+            CREATE INDEX IF NOT EXISTS idx_dirty_sources_pending
+            ON dirty_sources(agent_id, processed_at, created_at);
+            "#,
+        ),
+        (
+            14,
+            r#"
+            CREATE TABLE IF NOT EXISTS session_memory_state (
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
+                session_key TEXT NOT NULL,
+                last_flushed_turn INTEGER NOT NULL DEFAULT 0,
+                last_boundary_flush_at TEXT,
+                pending_flush INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_id, session_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_session_memory_state_pending
+            ON session_memory_state(agent_id, pending_flush, updated_at);
+            "#,
+        ),
+        (
+            15,
+            r#"
+            ALTER TABLE sessions ADD COLUMN session_id TEXT NOT NULL DEFAULT '';
+            UPDATE sessions
+            SET session_id = session_key
+            WHERE session_id = '';
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_agent_session_id
+            ON sessions(agent_id, session_id);
+            "#,
+        ),
+        (
+            16,
+            r#"
+            CREATE TABLE IF NOT EXISTS session_memory_state_v2 (
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                last_flushed_turn INTEGER NOT NULL DEFAULT 0,
+                last_boundary_flush_at TEXT,
+                pending_flush INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_id, session_id)
+            );
+
+            INSERT INTO session_memory_state_v2 (
+                agent_id,
+                session_id,
+                session_key,
+                last_flushed_turn,
+                last_boundary_flush_at,
+                pending_flush,
+                created_at,
+                updated_at
+            )
+            SELECT
+                agent_id,
+                CASE WHEN session_id = '' THEN session_key ELSE session_id END,
+                session_key,
+                last_flushed_turn,
+                last_boundary_flush_at,
+                pending_flush,
+                created_at,
+                updated_at
+            FROM session_memory_state;
+
+            DROP TABLE session_memory_state;
+            ALTER TABLE session_memory_state_v2 RENAME TO session_memory_state;
+
+            CREATE INDEX IF NOT EXISTS idx_session_memory_state_pending
+            ON session_memory_state(agent_id, pending_flush, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_session_memory_state_key
+            ON session_memory_state(agent_id, session_key);
+            "#,
+        ),
+        (
+            17,
+            r#"
+            ALTER TABLE session_memory_state
+            ADD COLUMN recent_explicit_writes TEXT NOT NULL DEFAULT '[]';
+            "#,
+        ),
+        (
+            18,
+            r#"
+            ALTER TABLE session_memory_state
+            ADD COLUMN open_episodes TEXT NOT NULL DEFAULT '[]';
+            "#,
+        ),
+        (
+            19,
+            r#"
+            DROP TABLE IF EXISTS links;
+            DROP TABLE IF EXISTS concepts;
+            DROP TABLE IF EXISTS episodes;
+            "#,
+        ),
+        (
+            20,
+            r#"
+            UPDATE chunks SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', updated_at, 'unixepoch')
+            WHERE typeof(updated_at) = 'integer';
+
+            UPDATE embedding_cache SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', updated_at, 'unixepoch')
+            WHERE typeof(updated_at) = 'integer';
+            "#,
+        ),
     ]
 }
 

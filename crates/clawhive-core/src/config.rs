@@ -661,6 +661,10 @@ impl Default for SandboxPolicyConfig {
 pub struct MemoryPolicyConfig {
     pub mode: String,
     pub write_scope: String,
+    #[serde(default = "default_idle_reset_minutes")]
+    pub idle_minutes: Option<u64>,
+    #[serde(default = "default_daily_reset_hour")]
+    pub daily_at_hour: Option<u8>,
     #[serde(default)]
     pub limit_history_turns: Option<u32>,
     #[serde(default = "default_max_injected_chars")]
@@ -673,8 +677,16 @@ fn default_max_injected_chars() -> usize {
     6000
 }
 
+fn default_idle_reset_minutes() -> Option<u64> {
+    Some(30)
+}
+
+fn default_daily_reset_hour() -> Option<u8> {
+    Some(4)
+}
+
 fn default_daily_summary_interval() -> u64 {
-    10
+    0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1103,8 +1115,10 @@ write_scope: session
 "#;
         let config: MemoryPolicyConfig = serde_yaml::from_str(yaml).unwrap();
 
+        assert_eq!(config.idle_minutes, Some(30));
+        assert_eq!(config.daily_at_hour, Some(4));
         assert_eq!(config.max_injected_chars, 6000);
-        assert_eq!(config.daily_summary_interval, 10);
+        assert_eq!(config.daily_summary_interval, 0);
     }
 
     #[test]
