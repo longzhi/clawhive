@@ -171,9 +171,9 @@ impl ExecuteCommandTool {
                 .await;
         }
 
-        match rx.await {
-            Ok(ApprovalDecision::AllowOnce) => Ok(None),
-            Ok(ApprovalDecision::AlwaysAllow) => {
+        match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+            Ok(Ok(ApprovalDecision::AllowOnce)) => Ok(None),
+            Ok(Ok(ApprovalDecision::AlwaysAllow)) => {
                 let pattern = format!("{} *", approval_program(command));
                 registry
                     .add_runtime_allow_pattern(&self.agent_id, pattern.clone())
@@ -181,7 +181,13 @@ impl ExecuteCommandTool {
                 tracing::info!(pattern, "adding to exec allowlist");
                 Ok(None)
             }
-            Ok(ApprovalDecision::Deny) | Err(_) => Ok(Some("Command denied by user".to_string())),
+            Ok(Ok(ApprovalDecision::Deny)) | Ok(Err(_)) => {
+                Ok(Some("Command denied by user".to_string()))
+            }
+            Err(_) => {
+                tracing::warn!(command, "approval request timed out after 10 minutes");
+                Ok(Some("Approval timed out".to_string()))
+            }
         }
     }
 
@@ -228,18 +234,28 @@ impl ExecuteCommandTool {
                 .await;
         }
 
-        match rx.await {
-            Ok(ApprovalDecision::AllowOnce) => Ok(None),
-            Ok(ApprovalDecision::AlwaysAllow) => {
+        match tokio::time::timeout(std::time::Duration::from_secs(600), rx).await {
+            Ok(Ok(ApprovalDecision::AllowOnce)) => Ok(None),
+            Ok(Ok(ApprovalDecision::AlwaysAllow)) => {
                 registry
                     .add_network_allow_pattern(&self.agent_id, target)
                     .await;
                 tracing::info!(host, port, "adding to network allowlist");
                 Ok(None)
             }
-            Ok(ApprovalDecision::Deny) | Err(_) => Ok(Some(format!(
+            Ok(Ok(ApprovalDecision::Deny)) | Ok(Err(_)) => Ok(Some(format!(
                 "Network access to {host}:{port} denied by user"
             ))),
+            Err(_) => {
+                tracing::warn!(
+                    host,
+                    port,
+                    "network approval request timed out after 10 minutes"
+                );
+                Ok(Some(format!(
+                    "Network access to {host}:{port} approval timed out"
+                )))
+            }
         }
     }
 

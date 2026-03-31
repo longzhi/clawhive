@@ -119,7 +119,7 @@ impl ApprovalRegistry {
             sender: tx,
         };
         self.pending.lock().await.insert(trace_id, approval);
-        let short_id = trace_id.to_string()[..8].to_string();
+        let short_id = trace_id.to_string()[..4].to_string();
         self.short_id_map.lock().await.insert(short_id, trace_id);
         rx
     }
@@ -128,7 +128,7 @@ impl ApprovalRegistry {
     pub async fn resolve(&self, trace_id: Uuid, decision: ApprovalDecision) -> Result<(), String> {
         match self.pending.lock().await.remove(&trace_id) {
             Some(approval) => {
-                let short_id = trace_id.to_string()[..8].to_string();
+                let short_id = trace_id.to_string()[..4].to_string();
                 self.short_id_map.lock().await.remove(&short_id);
                 let _ = approval.sender.send(decision);
                 Ok(())

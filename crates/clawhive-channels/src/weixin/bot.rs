@@ -7,7 +7,9 @@ use base64::Engine;
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
-use clawhive_schema::{Attachment, AttachmentKind, BusMessage, InboundMessage, OutboundMessage};
+use clawhive_schema::{
+    ApprovalDisplay, Attachment, AttachmentKind, BusMessage, InboundMessage, OutboundMessage,
+};
 use uuid::Uuid;
 
 use super::api::ILinkClient;
@@ -52,6 +54,7 @@ impl WeixinBot {
 
         // Spawn outbound delivery listener
         spawn_delivery_listener(self.bus.clone(), client.clone(), self.connector_id.clone());
+        spawn_approval_listener(self.bus.clone(), client.clone(), self.connector_id.clone());
 
         let mut consecutive_errors: u32 = 0;
 
@@ -326,6 +329,77 @@ fn spawn_delivery_listener(bus: Arc<EventBus>, client: Arc<ILinkClient>, connect
                     );
                 }
             }
+        }
+    });
+}
+
+fn spawn_approval_listener(bus: Arc<EventBus>, client: Arc<ILinkClient>, connector_id: String) {
+    tokio::spawn(async move {
+        let mut rx = bus.subscribe(Topic::DeliverApprovalRequest).await;
+        while let Some(msg) = rx.recv().await {
+            let BusMessage::DeliverApprovalRequest {
+                channel_type,
+                connector_id: msg_connector_id,
+                conversation_scope,
+                short_id,
+                agent_id,
+                command,
+                network_target,
+                summary,
+            } = msg
+            else {
+                continue;
+            };
+
+            if channel_type != "weixin" || msg_connector_id != connector_id {
+                continue;
+            }
+
+            let user_id = match conversation_scope.strip_prefix("dm:") {
+                Some(id) => id.to_string(),
+                None => {
+                    tracing::warn!(
+                        target: "clawhive::channel::weixin",
+                        conversation_scope = %conversation_scope,
+                        "cannot parse user_id for approval delivery"
+                    );
+                    continue;
+                }
+            };
+
+            let ctx_token = client.get_context_token(&user_id).await.unwrap_or_default();
+            if ctx_token.is_empty() {
+                tracing::warn!(
+                    target: "clawhive::channel::weixin",
+                    user_id = %user_id,
+                    "no context_token cached, cannot deliver approval"
+                );
+                continue;
+            }
+
+            let display =
+                ApprovalDisplay::new(&agent_id, &command, network_target.as_deref(), summary);
+            let text = format!(
+                "{}\n\nReply:\n✅ yes {short_id}\n🔓 always {short_id}\n❌ no {short_id}",
+                display.to_markdown()
+            );
+
+            for chunk in split_text(text.trim(), MAX_TEXT_LEN) {
+                if let Err(e) = client.send_text(&user_id, chunk, &ctx_token).await {
+                    tracing::error!(
+                        target: "clawhive::channel::weixin",
+                        error = %e,
+                        "failed to deliver approval to weixin"
+                    );
+                }
+            }
+
+            tracing::info!(
+                target: "clawhive::channel::weixin",
+                short_id,
+                connector_id,
+                "weixin approval message sent"
+            );
         }
     });
 }

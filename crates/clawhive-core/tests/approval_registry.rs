@@ -62,7 +62,7 @@ async fn pending_list_contains_registered_items() {
 async fn resolve_by_short_id_returns_decision() {
     let registry = ApprovalRegistry::new();
     let trace_id = uuid::Uuid::new_v4();
-    let short_id = trace_id.to_string()[..8].to_string();
+    let short_id = trace_id.to_string()[..4].to_string();
 
     let rx = registry
         .request(trace_id, "echo hi".to_string(), "agent-1".to_string())

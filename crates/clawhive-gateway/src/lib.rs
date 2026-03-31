@@ -117,11 +117,20 @@ impl Gateway {
 
     async fn try_handle_approve(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
         let text = inbound.text.trim();
-        if !text.starts_with("/approve") {
+        if !text.starts_with("/approve")
+            && !text.starts_with("yes ")
+            && !text.starts_with("no ")
+            && !text.starts_with("always ")
+        {
             return None;
         }
 
         let registry = self.approval_registry.as_ref()?;
+
+        if !text.starts_with("/approve") && !registry.has_pending().await {
+            return None;
+        }
+
         let make_reply = |text: String| OutboundMessage {
             trace_id: inbound.trace_id,
             channel_type: inbound.channel_type.clone(),
@@ -133,31 +142,38 @@ impl Gateway {
             attachments: vec![],
         };
 
-        let parts: Vec<&str> = text.split_whitespace().collect();
-        if parts.len() < 3 {
-            return Some(make_reply(
-                "Usage: /approve <id> allow|always|deny".to_string(),
-            ));
-        }
-
-        let short_id = parts[1];
-        let decision = match parts[2].to_ascii_lowercase().as_str() {
-            "allow" | "once" | "allow-once" => ApprovalDecision::AllowOnce,
-            "always" | "allow-always" | "always-allow" => ApprovalDecision::AlwaysAllow,
-            "deny" | "reject" | "block" => ApprovalDecision::Deny,
-            _ => {
-                return Some(make_reply(format!(
-                    "Unknown decision '{}'. Use: allow, always, or deny",
-                    parts[2]
-                )));
+        let (short_id, decision) = if let Some(rest) = text.strip_prefix("yes ") {
+            (rest.trim(), ApprovalDecision::AllowOnce)
+        } else if let Some(rest) = text.strip_prefix("always ") {
+            (rest.trim(), ApprovalDecision::AlwaysAllow)
+        } else if let Some(rest) = text.strip_prefix("no ") {
+            (rest.trim(), ApprovalDecision::Deny)
+        } else {
+            let parts: Vec<&str> = text.split_whitespace().collect();
+            if parts.len() < 3 {
+                return Some(make_reply(
+                    "Usage: /approve <id> allow|always|deny\nOr: yes <id> / no <id>".to_string(),
+                ));
             }
+            let decision = match parts[2].to_ascii_lowercase().as_str() {
+                "allow" | "once" | "allow-once" | "yes" | "y" => ApprovalDecision::AllowOnce,
+                "always" | "allow-always" | "always-allow" => ApprovalDecision::AlwaysAllow,
+                "deny" | "reject" | "block" | "no" | "n" => ApprovalDecision::Deny,
+                _ => {
+                    return Some(make_reply(format!(
+                        "Unknown decision '{}'. Use: allow, always, or deny",
+                        parts[2]
+                    )));
+                }
+            };
+            (parts[1], decision)
         };
 
         match registry
             .resolve_by_short_id(short_id, decision.clone())
             .await
         {
-            Ok(()) => Some(make_reply(format!("✅ Approval resolved: {:?}", decision))),
+            Ok(()) => Some(make_reply(format!("✅ Approval resolved: {decision:?}"))),
             Err(e) => Some(make_reply(format!("❌ {e}"))),
         }
     }
@@ -1010,7 +1026,7 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                 "approval_delivery_listener: forwarding to channel"
             );
 
-            let short_id = trace_id.to_string()[..8].to_string();
+            let short_id = trace_id.to_string()[..4].to_string();
 
             let _ = publisher
                 .publish(BusMessage::DeliverApprovalRequest {
@@ -1748,7 +1764,7 @@ mod tests {
         gw.approval_registry = Some(approval_registry.clone());
 
         let trace_id = uuid::Uuid::new_v4();
-        let short_id = trace_id.to_string()[..8].to_string();
+        let short_id = trace_id.to_string()[..4].to_string();
         let rx = approval_registry
             .request(trace_id, "echo ok".to_string(), "agent-x".to_string())
             .await;

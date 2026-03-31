@@ -6,7 +6,8 @@ use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
 use clawhive_gateway::Gateway;
 use clawhive_schema::{
-    ActionKind, Attachment, AttachmentKind, BusMessage, InboundMessage, OutboundMessage,
+    ActionKind, ApprovalDisplay, Attachment, AttachmentKind, BusMessage, InboundMessage,
+    OutboundMessage,
 };
 use uuid::Uuid;
 use wacore::download::MediaType;
@@ -451,6 +452,11 @@ pub async fn start_whatsapp(
         connector_id.clone(),
         wa_client.clone(),
     ));
+    tokio::spawn(spawn_approval_listener(
+        bus.clone(),
+        connector_id.clone(),
+        wa_client.clone(),
+    ));
 
     tracing::info!("Starting WhatsApp channel (connector: {})", connector_id);
     bot.run().await?.await?;
@@ -610,6 +616,56 @@ async fn spawn_delivery_listener(bus: Arc<EventBus>, connector_id: String, clien
         };
         if let Err(e) = client.send_message(chat_jid, message).await {
             tracing::error!("Failed to deliver WhatsApp announce: {e}");
+        }
+    }
+}
+
+async fn spawn_approval_listener(bus: Arc<EventBus>, connector_id: String, client: Arc<Client>) {
+    let mut rx = bus.subscribe(Topic::DeliverApprovalRequest).await;
+    while let Some(msg) = rx.recv().await {
+        let BusMessage::DeliverApprovalRequest {
+            channel_type,
+            connector_id: msg_connector_id,
+            conversation_scope,
+            short_id,
+            agent_id,
+            command,
+            network_target,
+            summary,
+        } = msg
+        else {
+            continue;
+        };
+
+        if channel_type != "whatsapp" || msg_connector_id != connector_id {
+            continue;
+        }
+
+        let Some(chat_jid_str) = parse_chat_jid(&conversation_scope) else {
+            tracing::warn!("Could not parse WhatsApp chat JID for approval: {conversation_scope}");
+            continue;
+        };
+
+        let Ok(chat_jid) = chat_jid_str.parse() else {
+            tracing::warn!("Invalid WhatsApp JID for approval: {chat_jid_str}");
+            continue;
+        };
+
+        let display = ApprovalDisplay::new(&agent_id, &command, network_target.as_deref(), summary);
+        let text = format!(
+            "{}\n\nReply:\n✅ yes {short_id}\n🔓 always {short_id}\n❌ no {short_id}",
+            display.to_markdown()
+        );
+
+        let prefix = build_bot_prefix(None);
+        let message = wa::Message {
+            conversation: Some(format!("{prefix}{text}")),
+            ..Default::default()
+        };
+        if let Err(e) = client.send_message(chat_jid, message).await {
+            tracing::error!("Failed to send WhatsApp approval message: {e}");
+        } else {
+            tracing::info!(short_id, connector_id, "WhatsApp approval message sent");
         }
     }
 }
