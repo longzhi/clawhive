@@ -119,12 +119,6 @@ async fn update_channels(
 
     write_main_config(&state, &val)?;
 
-    if let Some(coordinator) = state.reload_coordinator.as_ref() {
-        if let Err(e) = coordinator.reload().await {
-            tracing::warn!(error = %e, "auto-reload after update_channels failed");
-        }
-    }
-
     Ok(Json(channels))
 }
 
@@ -445,12 +439,6 @@ async fn create_webhook_source(
     sources.push(serde_yaml::Value::Mapping(source));
     write_main_config(&state, &main)?;
 
-    if let Some(coordinator) = state.reload_coordinator.as_ref() {
-        if let Err(e) = coordinator.reload().await {
-            tracing::warn!(error = %e, "auto-reload after create_webhook_source failed");
-        }
-    }
-
     Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({
@@ -528,12 +516,6 @@ async fn delete_webhook_source(
 
     write_main_config(&state, &main)?;
 
-    if let Some(coordinator) = state.reload_coordinator.as_ref() {
-        if let Err(e) = coordinator.reload().await {
-            tracing::warn!(error = %e, "auto-reload after delete_webhook_source failed");
-        }
-    }
-
     Ok(Json(serde_json::json!({
         "ok": true,
         "source_id": source_id,
@@ -586,12 +568,6 @@ async fn rotate_webhook_source_key(
     );
 
     write_main_config(&state, &main)?;
-
-    if let Some(coordinator) = state.reload_coordinator.as_ref() {
-        if let Err(e) = coordinator.reload().await {
-            tracing::warn!(error = %e, "auto-reload after update_connector_settings failed");
-        }
-    }
 
     Ok(Json(serde_json::json!({
         "source_id": source_id,
@@ -786,13 +762,6 @@ async fn add_connector(
         }
     }
 
-    // Auto-reload config so the new connector starts immediately
-    if let Some(coordinator) = state.reload_coordinator.as_ref() {
-        if let Err(e) = coordinator.reload().await {
-            tracing::warn!(error = %e, "auto-reload after add_connector failed");
-        }
-    }
-
     Ok(Json(serde_json::json!({
         "kind": kind,
         "connector_id": body.connector_id,
@@ -819,12 +788,6 @@ async fn remove_connector(
     }
 
     write_main_config(&state, &main)?;
-
-    if let Some(coordinator) = state.reload_coordinator.as_ref() {
-        if let Err(e) = coordinator.reload().await {
-            tracing::warn!(error = %e, "auto-reload after remove_connector failed");
-        }
-    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
