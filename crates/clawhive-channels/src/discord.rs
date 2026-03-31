@@ -826,7 +826,7 @@ async fn spawn_approval_listener(
             agent_id,
             command,
             network_target,
-            ..
+            summary,
         } = msg
         else {
             continue;
@@ -861,7 +861,7 @@ async fn spawn_approval_listener(
             continue;
         };
 
-        let display = ApprovalDisplay::new(&agent_id, &command, network_target.as_deref(), None);
+        let display = ApprovalDisplay::new(&agent_id, &command, network_target.as_deref(), summary);
         let text = display.to_markdown();
 
         let buttons = CreateActionRow::Buttons(vec![

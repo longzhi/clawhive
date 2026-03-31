@@ -1221,6 +1221,13 @@ impl Orchestrator {
             "write" | "write_file" => WriteFileTool::new(ws, gate).execute(input, ctx).await,
             "edit" | "edit_file" => EditFileTool::new(ws, gate).execute(input, ctx).await,
             "exec" | "execute_command" => {
+                let summarizer = view.agent(agent_id).map(|agent| {
+                    super::shell_tool::ApprovalSummarizer::new(
+                        view.router.clone(),
+                        agent.model_policy.primary.clone(),
+                        agent.model_policy.fallbacks.clone(),
+                    )
+                });
                 ExecuteCommandTool::new(
                     ws,
                     sandbox_config.timeout_secs,
@@ -1230,7 +1237,7 @@ impl Orchestrator {
                     self.approval_registry.clone(),
                     Some(self.bus.clone()),
                     agent_id.to_string(),
-                    None,
+                    summarizer,
                 )
                 .execute(input, ctx)
                 .await

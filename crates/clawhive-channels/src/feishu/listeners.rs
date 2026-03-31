@@ -70,7 +70,7 @@ pub fn spawn_approval_listener(
                 agent_id,
                 command,
                 network_target,
-                ..
+                summary,
             } = msg
             else {
                 continue;
@@ -90,7 +90,7 @@ pub fn spawn_approval_listener(
                 &agent_id,
                 &command,
                 network_target.as_deref(),
-                None,
+                summary,
             );
             let card = build_approval_card(&display, &short_id, &conversation_scope);
 

@@ -6,14 +6,19 @@ pub fn build_approval_card(
     short_id: &str,
     scope: &str,
 ) -> serde_json::Value {
-    let mut md_content = format!(
-        "**Agent:** `{}`\n**Program:** `{}`",
-        display.agent_id, display.program,
-    );
-    if let Some(ref target) = display.network_target {
-        md_content.push_str(&format!("\n**Target:** `{target}`"));
-    }
-    md_content.push_str(&format!("\n**Command:** `{}`", display.command_preview));
+    let md_content = if let Some(ref summary) = display.summary {
+        format!("🤖 **Agent:** `{}`\n📝 {}", display.agent_id, summary)
+    } else {
+        let mut content = format!(
+            "**Agent:** `{}`\n**Program:** `{}`",
+            display.agent_id, display.program,
+        );
+        if let Some(ref target) = display.network_target {
+            content.push_str(&format!("\n**Target:** `{target}`"));
+        }
+        content.push_str(&format!("\n**Command:** `{}`", display.command_preview));
+        content
+    };
 
     serde_json::json!({
         "schema": "2.0",
