@@ -943,6 +943,7 @@ mod tests {
             agent_id: "test-agent".to_string(),
             command: "python --version".to_string(),
             network_target: None,
+            summary: None,
             source_channel_type: None,
             source_connector_id: None,
             source_conversation_scope: None,

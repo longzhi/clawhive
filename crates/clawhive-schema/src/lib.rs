@@ -232,6 +232,8 @@ pub enum BusMessage {
         command: String,
         /// Network target requiring approval (None = exec-only approval)
         network_target: Option<String>,
+        #[serde(default)]
+        summary: Option<String>,
         source_channel_type: Option<String>,
         source_connector_id: Option<String>,
         source_conversation_scope: Option<String>,
@@ -298,6 +300,8 @@ pub enum BusMessage {
         command: String,
         #[serde(default)]
         network_target: Option<String>,
+        #[serde(default)]
+        summary: Option<String>,
     },
     DeliverSkillConfirm {
         channel_type: String,
@@ -347,6 +351,8 @@ pub struct ApprovalDisplay {
     pub command_preview: String,
     /// Network target if this is a network approval
     pub network_target: Option<String>,
+    /// Human-friendly summary (hides raw command when present)
+    pub summary: Option<String>,
 }
 
 /// Extract the main program name from a shell command for approval decisions.
@@ -390,7 +396,12 @@ pub fn approval_program(command: &str) -> String {
 }
 
 impl ApprovalDisplay {
-    pub fn new(agent_id: &str, command: &str, network_target: Option<&str>) -> Self {
+    pub fn new(
+        agent_id: &str,
+        command: &str,
+        network_target: Option<&str>,
+        summary: Option<String>,
+    ) -> Self {
         let program = approval_program(command);
 
         let command_preview = if command.len() > APPROVAL_CMD_MAX_CHARS {
@@ -412,11 +423,18 @@ impl ApprovalDisplay {
             program,
             command_preview,
             network_target: network_target.map(|s| s.to_string()),
+            summary,
         }
     }
 
     /// Format as Discord/generic Markdown.
     pub fn to_markdown(&self) -> String {
+        if let Some(ref summary) = self.summary {
+            return format!(
+                "⚠️ **{}**\n🤖 `{}`\n📝 {}",
+                self.title, self.agent_id, summary
+            );
+        }
         let mut s = format!(
             "⚠️ **{}**\n**Agent:** `{}`\n**Program:** `{}`",
             self.title, self.agent_id, self.program
@@ -434,6 +452,14 @@ impl ApprovalDisplay {
             s.replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
+        }
+        if let Some(ref summary) = self.summary {
+            return format!(
+                "⚠️ <b>{}</b>\n🤖 <code>{}</code>\n📝 {}",
+                esc(&self.title),
+                esc(&self.agent_id),
+                esc(summary),
+            );
         }
         let mut s = format!(
             "⚠️ <b>{}</b>\n<b>Agent:</b> <code>{}</code>\n<b>Program:</b> <code>{}</code>",
@@ -659,6 +685,7 @@ mod tests {
             agent_id: "agent-1".into(),
             command: "rm -rf /tmp/test".into(),
             network_target: None,
+            summary: None,
             source_channel_type: Some("telegram".into()),
             source_connector_id: Some("tg_main".into()),
             source_conversation_scope: Some("chat:123".into()),
@@ -771,7 +798,7 @@ mod tests {
 
     #[test]
     fn approval_display_exec_command() {
-        let d = ApprovalDisplay::new("agent-1", "rm -rf /tmp", None);
+        let d = ApprovalDisplay::new("agent-1", "rm -rf /tmp", None, None);
         assert_eq!(d.title, "Command Approval Required");
         assert_eq!(d.program, "rm");
         assert_eq!(d.command_preview, "rm -rf /tmp");
@@ -784,6 +811,7 @@ mod tests {
             "agent-1",
             "curl https://example.com",
             Some("example.com:443"),
+            None,
         );
         assert_eq!(d.title, "Network Access Required");
         assert_eq!(d.program, "curl");
@@ -793,7 +821,7 @@ mod tests {
     #[test]
     fn approval_display_truncates_long_command() {
         let long_cmd = format!("python3 {}", "x".repeat(300));
-        let d = ApprovalDisplay::new("agent-1", &long_cmd, None);
+        let d = ApprovalDisplay::new("agent-1", &long_cmd, None, None);
         assert!(d.command_preview.len() < 210);
         assert!(d.command_preview.ends_with('…'));
         assert_eq!(d.program, "python3");
@@ -801,7 +829,12 @@ mod tests {
 
     #[test]
     fn approval_display_markdown_format() {
-        let d = ApprovalDisplay::new("agent-1", "curl https://api.com/data", Some("api.com:443"));
+        let d = ApprovalDisplay::new(
+            "agent-1",
+            "curl https://api.com/data",
+            Some("api.com:443"),
+            None,
+        );
         let md = d.to_markdown();
         assert!(md.contains("**Network Access Required**"));
         assert!(md.contains("**Program:** `curl`"));
@@ -812,22 +845,44 @@ mod tests {
     #[test]
     fn approval_display_skips_variable_assignments() {
         let cmd = r#"NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))") FROM_MS=$(python3 -c "import time; print(int((time.time()-86400)*1000))") curl -s -H "Authorization: Bearer token" https://api.example.com"#;
-        let d = ApprovalDisplay::new("agent-1", cmd, None);
+        let d = ApprovalDisplay::new("agent-1", cmd, None, None);
         assert_eq!(d.program, "curl");
     }
 
     #[test]
     fn approval_display_simple_var_assignment() {
-        let d = ApprovalDisplay::new("agent-1", "FOO=bar python3 script.py", None);
+        let d = ApprovalDisplay::new("agent-1", "FOO=bar python3 script.py", None, None);
         assert_eq!(d.program, "python3");
     }
 
     #[test]
     fn approval_display_html_escapes() {
-        let d = ApprovalDisplay::new("agent<x>", "echo '<tag>'", None);
+        let d = ApprovalDisplay::new("agent<x>", "echo '<tag>'", None, None);
         let html = d.to_html();
         assert!(html.contains("agent&lt;x&gt;"));
         assert!(html.contains("&lt;tag&gt;"));
         assert!(!html.contains("<tag>"));
+    }
+
+    #[test]
+    fn approval_display_with_summary_hides_command() {
+        let d = ApprovalDisplay::new(
+            "agent-1",
+            "curl -s -H 'Auth: Bearer xxx' https://api.example.com/data",
+            Some("api.example.com:443"),
+            Some("访问 api.example.com 获取数据".to_string()),
+        );
+        let md = d.to_markdown();
+        assert!(md.contains("访问 api.example.com 获取数据"));
+        assert!(!md.contains("curl"));
+        assert!(!md.contains("Command:"));
+    }
+
+    #[test]
+    fn approval_display_without_summary_shows_command() {
+        let d = ApprovalDisplay::new("agent-1", "rm -rf /tmp", None, None);
+        let md = d.to_markdown();
+        assert!(md.contains("**Program:** `rm`"));
+        assert!(md.contains("**Command:**"));
     }
 }

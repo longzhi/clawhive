@@ -814,6 +814,7 @@ async fn spawn_approval_listener(
             agent_id,
             command,
             network_target,
+            ..
         } = msg
         else {
             continue;
@@ -841,7 +842,7 @@ async fn spawn_approval_listener(
             continue;
         };
 
-        let display = ApprovalDisplay::new(&agent_id, &command, network_target.as_deref());
+        let display = ApprovalDisplay::new(&agent_id, &command, network_target.as_deref(), None);
         let text = display.to_html();
 
         let keyboard = InlineKeyboardMarkup::new(vec![vec![
@@ -1746,7 +1747,7 @@ mod tests {
     #[test]
     fn approval_html_escapes_untrusted_command_and_agent() {
         let command = "python3 - <<'PY'\nprint('<tag>')\nPY";
-        let display = ApprovalDisplay::new("agent<one>", command, Some("example.com:443"));
+        let display = ApprovalDisplay::new("agent<one>", command, Some("example.com:443"), None);
         let html = display.to_html();
 
         assert!(html.contains("<b>Network Access Required</b>"));

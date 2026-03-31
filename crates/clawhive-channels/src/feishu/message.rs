@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn build_approval_card_structure() {
-        let display = ApprovalDisplay::new("test-agent", "rm -rf /tmp", None);
+        let display = ApprovalDisplay::new("test-agent", "rm -rf /tmp", None, None);
         let card = build_approval_card(&display, "abc123", "group:chat:oc_test");
         let elements = card.pointer("/body/elements").unwrap().as_array().unwrap();
         assert_eq!(elements.len(), 2);
@@ -357,6 +357,7 @@ mod tests {
             "test-agent",
             "curl api.example.com",
             Some("api.example.com:443"),
+            None,
         );
         let card = build_approval_card(&display, "abc123", "group:chat:oc_test");
         let content = card

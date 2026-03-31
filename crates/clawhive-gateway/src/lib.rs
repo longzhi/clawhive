@@ -984,6 +984,7 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                 agent_id,
                 command,
                 network_target,
+                summary,
                 source_channel_type,
                 source_connector_id,
                 source_conversation_scope,
@@ -1020,6 +1021,7 @@ pub fn spawn_approval_delivery_listener(bus: Arc<EventBus>) -> tokio::task::Join
                     agent_id,
                     command,
                     network_target,
+                    summary,
                 })
                 .await;
         }
