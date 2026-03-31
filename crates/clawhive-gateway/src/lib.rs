@@ -117,17 +117,18 @@ impl Gateway {
 
     async fn try_handle_approve(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
         let text = inbound.text.trim();
-        if !text.starts_with("/approve")
-            && !text.starts_with("yes ")
-            && !text.starts_with("no ")
-            && !text.starts_with("always ")
+        let lower = text.to_ascii_lowercase();
+        if !lower.starts_with("/approve")
+            && !lower.starts_with("yes ")
+            && !lower.starts_with("no ")
+            && !lower.starts_with("always ")
         {
             return None;
         }
 
         let registry = self.approval_registry.as_ref()?;
 
-        if !text.starts_with("/approve") && !registry.has_pending().await {
+        if !lower.starts_with("/approve") && !registry.has_pending().await {
             return None;
         }
 
@@ -142,11 +143,11 @@ impl Gateway {
             attachments: vec![],
         };
 
-        let (short_id, decision) = if let Some(rest) = text.strip_prefix("yes ") {
+        let (short_id, decision) = if let Some(rest) = lower.strip_prefix("yes ") {
             (rest.trim(), ApprovalDecision::AllowOnce)
-        } else if let Some(rest) = text.strip_prefix("always ") {
+        } else if let Some(rest) = lower.strip_prefix("always ") {
             (rest.trim(), ApprovalDecision::AlwaysAllow)
-        } else if let Some(rest) = text.strip_prefix("no ") {
+        } else if let Some(rest) = lower.strip_prefix("no ") {
             (rest.trim(), ApprovalDecision::Deny)
         } else {
             let parts: Vec<&str> = text.split_whitespace().collect();

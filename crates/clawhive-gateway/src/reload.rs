@@ -104,6 +104,7 @@ impl ReloadCoordinator {
         let current_gen = self.generation.load(Ordering::SeqCst);
 
         if diff.is_empty() {
+            *self.loaded_hashes.write().unwrap() = disk_file_hashes(&self.root.join("config"));
             return Ok(ReloadOutcome::no_changes(current_gen));
         }
 
@@ -135,6 +136,7 @@ impl ReloadCoordinator {
             agents_changed = diff.agents_changed.len(),
             routing_changed = diff.routing_changed,
             providers_changed = diff.providers_changed,
+            channels_changed = diff.channels_changed,
             "config reloaded"
         );
 

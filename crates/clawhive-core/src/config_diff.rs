@@ -9,6 +9,7 @@ pub struct ConfigDiff {
     pub routing_changed: bool,
     pub providers_changed: bool,
     pub embedding_changed: bool,
+    pub channels_changed: bool,
     pub requires_restart: Vec<String>,
 }
 
@@ -21,6 +22,7 @@ impl ConfigDiff {
             routing_changed: false,
             providers_changed: false,
             embedding_changed: false,
+            channels_changed: false,
             requires_restart: Vec::new(),
         };
 
@@ -62,6 +64,8 @@ impl ConfigDiff {
             != serde_json::to_string(&new.providers).ok();
         diff.embedding_changed = serde_json::to_string(&old.main.embedding).ok()
             != serde_json::to_string(&new.main.embedding).ok();
+        diff.channels_changed = serde_json::to_string(&old.main.channels).ok()
+            != serde_json::to_string(&new.main.channels).ok();
 
         if old.main.log_level != new.main.log_level {
             diff.requires_restart.push("log_level".to_string());
@@ -77,6 +81,7 @@ impl ConfigDiff {
             && !self.routing_changed
             && !self.providers_changed
             && !self.embedding_changed
+            && !self.channels_changed
             && self.requires_restart.is_empty()
     }
 
@@ -87,6 +92,7 @@ impl ConfigDiff {
             || self.routing_changed
             || self.providers_changed
             || self.embedding_changed
+            || self.channels_changed
     }
 }
 
