@@ -516,8 +516,24 @@ impl HippocampusConsolidator {
                 "Dedup reduced MEMORY.md content"
             );
         }
-        self.file_store.write_long_term(&deduped_memory).await?;
-        self.record_memory_lineage(current_memory, &deduped_memory, memory_candidates)
+        let cleanup_result = clawhive_memory::file_audit::cleanup_memory_file(
+            &deduped_memory,
+            clawhive_memory::file_audit::MemoryFileKind::LongTerm,
+        );
+        if cleanup_result.stats.removed_prompt_leakage_lines > 0
+            || cleanup_result.stats.removed_empty_headings > 0
+            || cleanup_result.stats.removed_duplicate_bullets > 0
+        {
+            tracing::info!(
+                stats = ?cleanup_result.stats,
+                "Cleaned up MEMORY.md before write"
+            );
+        }
+
+        self.file_store
+            .write_long_term(&cleanup_result.content)
+            .await?;
+        self.record_memory_lineage(current_memory, &cleanup_result.content, memory_candidates)
             .await;
 
         let reindexed =
@@ -540,8 +556,11 @@ impl HippocampusConsolidator {
                 {
                     Ok(()) => match index.index_dirty(fs, reader, provider.as_ref(), 8).await {
                         Ok(count) => {
-                            self.record_memory_chunk_lineage(&deduped_memory, memory_candidates)
-                                .await;
+                            self.record_memory_chunk_lineage(
+                                &cleanup_result.content,
+                                memory_candidates,
+                            )
+                            .await;
                             tracing::info!(
                                 "Post-consolidation incremental reindex: {count} chunks indexed"
                             );
@@ -562,7 +581,8 @@ impl HippocampusConsolidator {
             };
 
         let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
-        self.record_fact_memory_alignment(&deduped_memory).await;
+        self.record_fact_memory_alignment(&cleanup_result.content)
+            .await;
 
         if let Some(ref store) = self.memory_store {
             store
@@ -2814,6 +2834,49 @@ Working on Clawhive memory safety.
         let after_facts = fact_store.get_active_facts("agent-1").await?;
         assert!(after_memory.contains("Use section-based consolidation for memory"));
         assert_eq!(after_facts.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_sanitizes_prompt_leakage_before_memory_write() -> Result<()> {
+        use chrono::Local;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- Existing project note\n\n## 持续性背景脉络\n\n- Keep context\n\n## 关键历史决策\n\n- Keep decision\n",
+            )
+            .await?;
+
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Memory\n\n- User updated a durable project note.")
+            .await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            format!(
+                r#"[{{"content":"Capture durable project note","target_kind":"memory","target_section":"长期项目主线","source_date":"{}","importance":0.9,"duplicate_key":"durable-note"}}]"#,
+                today.format("%Y-%m-%d")
+            ),
+            "- Existing project note\nPlease synthesize the daily observations.\n- Another durable fact"
+                .to_string(),
+            "[]".to_string(),
+        ]));
+
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store.clone(),
+            router,
+            "sonnet".to_string(),
+            vec![],
+        );
+
+        let report = consolidator.consolidate().await?;
+        assert!(report.memory_updated);
+
+        let updated = file_store.read_long_term().await?;
+        assert!(!updated.contains("Please synthesize the daily observations."));
+        assert!(updated.contains("Another durable fact"));
         Ok(())
     }
 
