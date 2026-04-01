@@ -371,7 +371,26 @@ impl HippocampusConsolidator {
             let merged = self
                 .merge_memory_section(section, &doc.section_content(section), &section_candidates)
                 .await?;
+            let old_content = doc.section_content(section).to_string();
             doc.replace_section(section, &merged);
+            let new_content = doc.section_content(section).to_string();
+
+            if let Some(ref store) = self.memory_store {
+                store
+                    .record_trace(
+                        &self.agent_id,
+                        "section_merge",
+                        &serde_json::json!({
+                            "section": section,
+                            "old_len": old_content.len(),
+                            "new_len": new_content.len(),
+                            "diff": compute_line_diff(&old_content, &new_content),
+                        })
+                        .to_string(),
+                        None,
+                    )
+                    .await;
+            }
             touched_sections += 1;
         }
 
@@ -1413,30 +1432,59 @@ fn validate_consolidation_output(output: &str, existing: &str) -> Result<()> {
 
 pub struct ConsolidationScheduler {
     consolidators: Vec<Arc<HippocampusConsolidator>>,
-    interval_hours: u64,
+    cron_expr: String,
     archive_retention_days: u64,
 }
 
 impl ConsolidationScheduler {
     pub fn new(
         consolidators: Vec<Arc<HippocampusConsolidator>>,
-        interval_hours: u64,
+        cron_expr: String,
         archive_retention_days: u64,
     ) -> Self {
         Self {
             consolidators,
-            interval_hours,
+            cron_expr,
             archive_retention_days,
         }
     }
 
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(self.interval_hours * 3600));
-            interval.tick().await;
+            let local_tz = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
             loop {
-                interval.tick().await;
+                let now_ms = Utc::now().timestamp_millis();
+                let schedule = clawhive_scheduler::ScheduleType::Cron {
+                    expr: self.cron_expr.clone(),
+                    tz: local_tz.clone(),
+                };
+                let next_ms = match clawhive_scheduler::compute_next_run_at_ms(&schedule, now_ms) {
+                    Ok(Some(ms)) => ms,
+                    Ok(None) => {
+                        tracing::error!(
+                            cron_expr = %self.cron_expr,
+                            "Consolidation cron schedule has no upcoming fire time"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            cron_expr = %self.cron_expr,
+                            error = %e,
+                            "Failed to compute next consolidation time"
+                        );
+                        return;
+                    }
+                };
+                let delay_ms = (next_ms - now_ms).max(0) as u64;
+                tracing::info!(
+                    cron_expr = %self.cron_expr,
+                    tz = %local_tz,
+                    next_run_in_secs = delay_ms / 1000,
+                    "Consolidation scheduled"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+
                 tracing::info!(
                     agent_count = self.consolidators.len(),
                     "Running scheduled hippocampus consolidation for all agents..."
@@ -1558,6 +1606,26 @@ fn dedup_paragraphs(content: &str) -> String {
         .join("\n\n")
 }
 
+fn compute_line_diff(old: &str, new: &str) -> Vec<String> {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut diff = Vec::new();
+
+    for line in &old_lines {
+        if !new_lines.contains(line) && !line.trim().is_empty() {
+            diff.push(format!("- {line}"));
+        }
+    }
+
+    for line in &new_lines {
+        if !old_lines.contains(line) && !line.trim().is_empty() {
+            diff.push(format!("+ {line}"));
+        }
+    }
+
+    diff
+}
+
 fn normalized_word_set(text: &str) -> std::collections::HashSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -1603,7 +1671,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        apply_patch, dedup_paragraphs, jaccard_similarity, parse_patch,
+        apply_patch, compute_line_diff, dedup_paragraphs, jaccard_similarity, parse_patch,
         validate_consolidation_output, AddInstruction, ConsolidationReport, ConsolidationScheduler,
         HippocampusConsolidator, MemoryPatch, UpdateInstruction,
     };
@@ -1750,6 +1818,16 @@ mod tests {
             ["foo", "bar"].iter().map(|s| s.to_string()).collect();
 
         assert!(jaccard_similarity(&a, &b).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_line_diff_marks_added_and_removed_lines() {
+        let old_content = "line kept\nline removed\n";
+        let new_content = "line kept\nline added\n";
+
+        let diff = compute_line_diff(old_content, new_content);
+
+        assert_eq!(diff, vec!["- line removed", "+ line added"]);
     }
 
     #[test]
@@ -1964,8 +2042,12 @@ Working on Clawhive memory safety.
             vec![],
         ));
 
-        let scheduler = ConsolidationScheduler::new(vec![Arc::clone(&consolidator)], 24, 30);
-        assert_eq!(scheduler.interval_hours, 24);
+        let scheduler = ConsolidationScheduler::new(
+            vec![Arc::clone(&consolidator)],
+            "0 4 * * *".to_string(),
+            30,
+        );
+        assert_eq!(scheduler.cron_expr, "0 4 * * *");
         Ok(())
     }
 
@@ -2697,7 +2779,8 @@ Working on Clawhive memory safety.
             vec![],
         ));
 
-        let scheduler = ConsolidationScheduler::new(vec![consolidator], 1, 30);
+        let scheduler =
+            ConsolidationScheduler::new(vec![consolidator], "0 4 * * *".to_string(), 30);
         let handle = scheduler.start();
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         handle.abort();
