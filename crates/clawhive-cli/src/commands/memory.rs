@@ -6,7 +6,8 @@ use chrono::NaiveDate;
 use clap::Subcommand;
 use clawhive_core::{MemoryDocument, MEMORY_SECTION_ORDER};
 use clawhive_memory::dirty_sources::{
-    DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_MEMORY_FILE,
+    DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_FACT, DIRTY_KIND_MEMORY_FILE,
+    DIRTY_KIND_SESSION,
 };
 use clawhive_memory::fact_store::FactStore;
 use clawhive_memory::file_audit::{audit_memory_file, cleanup_memory_file, MemoryFileKind};
@@ -20,13 +21,20 @@ use crate::runtime::bootstrap::{bootstrap, build_embedding_provider};
 #[derive(Subcommand)]
 pub enum MemoryCommands {
     #[command(about = "Show memory index statistics")]
-    Stats,
+    Stats {
+        #[arg(help = "Agent ID")]
+        agent_id: String,
+    },
     #[command(about = "Show memory trace audit log for an agent")]
     Audit {
         #[arg(help = "Agent ID to audit")]
         agent_id: String,
         #[arg(long, short = 'n', default_value = "20", help = "Number of entries")]
         limit: usize,
+        #[arg(long, help = "Only show entries on/after YYYY-MM-DD")]
+        since: Option<String>,
+        #[arg(long, help = "Expand details for section merges")]
+        detail: bool,
     },
     #[command(about = "Audit MEMORY.md and daily files for prompt leakage and low-value residue")]
     AuditMemoryFiles {
@@ -76,7 +84,10 @@ pub enum MemoryCommands {
         days: usize,
     },
     #[command(about = "Rebuild search index from memory files")]
-    RebuildIndex,
+    RebuildIndex {
+        #[arg(help = "Agent ID to rebuild")]
+        agent_id: String,
+    },
     #[command(about = "Export all memory for an agent (facts, MEMORY.md, daily files)")]
     Export {
         #[arg(help = "Agent ID to export")]
@@ -91,84 +102,52 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
         bootstrap(root, None).await?;
 
     match cmd {
-        MemoryCommands::Stats => {
-            let db = memory.db();
-            let conn = db.lock().map_err(|_| anyhow::anyhow!("lock failed"))?;
+        MemoryCommands::Stats { agent_id } => {
+            let stats = memory.stats_for_agent(&agent_id).await?;
 
-            let chunk_count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
-            let file_count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
-            let cache_count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM embedding_cache", [], |r| r.get(0))?;
-            let trace_count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM memory_trace", [], |r| r.get(0))?;
-
-            let total_access: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(access_count), 0) FROM chunks",
-                [],
-                |r| r.get(0),
-            )?;
-
-            let hot_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM chunks WHERE access_count > 0",
-                [],
-                |r| r.get(0),
-            )?;
-
-            println!("Memory Index Statistics:");
-            println!("  Chunks indexed:    {chunk_count}");
-            println!("  Files tracked:     {file_count}");
-            println!("  Embedding cache:   {cache_count}");
-            println!("  Trace entries:     {trace_count}");
-            println!("  Total accesses:    {total_access}");
-            println!("  Hot chunks (>0):   {hot_count}");
-
-            // Show per-source breakdown
-            let mut stmt = conn
-                .prepare("SELECT source, COUNT(*) FROM chunks GROUP BY source ORDER BY source")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            println!("\n  By source:");
-            for row in rows {
-                let (source, count) = row?;
-                println!("    {source}: {count}");
-            }
+            println!("Memory Statistics ({agent_id}):");
+            println!("  chunks:            {}", stats.chunk_count);
+            println!("  facts:             {}", stats.fact_count);
+            println!("  pending_dirty:     {}", stats.pending_dirty_sources);
+            println!("  embedding_cache:   {}", stats.embedding_cache_count);
+            println!("  trace_entries:     {}", stats.trace_count);
 
             Ok(())
         }
-        MemoryCommands::Audit { agent_id, limit } => {
-            let db = memory.db();
-            let conn = db.lock().map_err(|_| anyhow::anyhow!("lock failed"))?;
+        MemoryCommands::Audit {
+            agent_id,
+            limit,
+            since,
+            detail,
+        } => {
+            let traces = memory
+                .list_traces(&agent_id, limit, since.as_deref())
+                .await?;
 
-            let mut stmt = conn.prepare(
-                "SELECT timestamp, operation, details, duration_ms FROM memory_trace WHERE agent_id = ?1 ORDER BY timestamp DESC LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(rusqlite::params![agent_id, limit as i64], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<i64>>(3)?,
-                ))
-            })?;
-
-            let mut count = 0;
-            for row in rows {
-                let (timestamp, operation, details, duration_ms) = row?;
-                let duration = duration_ms
-                    .map(|ms| format!(" ({ms}ms)"))
-                    .unwrap_or_default();
-                println!("[{timestamp}] {operation}{duration}");
-                println!("  {details}");
-                println!();
-                count += 1;
-            }
-
-            if count == 0 {
+            if traces.is_empty() {
                 println!("No trace entries found for agent '{agent_id}'.");
-            } else {
-                println!("Showing {count} entries (newest first).");
+                return Ok(());
             }
 
+            println!("timestamp | operation | details_summary");
+            println!("--------- | --------- | ---------------");
+            for trace in &traces {
+                let summary = summarize_trace_details(&trace.details);
+                println!("{} | {} | {}", trace.timestamp, trace.operation, summary);
+                if detail && trace.operation == "section_merge" {
+                    if let Ok(details_json) =
+                        serde_json::from_str::<serde_json::Value>(&trace.details)
+                    {
+                        if let Some(rendered) = format_section_merge_detail(&details_json) {
+                            for line in rendered.lines() {
+                                println!("  {line}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!("\nShowing {} entries (newest first).", traces.len());
             Ok(())
         }
         MemoryCommands::AuditMemoryFiles { agent_id, days } => {
@@ -474,14 +453,14 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
             );
             Ok(())
         }
-        MemoryCommands::RebuildIndex => {
-            let workspace_dir = root.to_path_buf();
-            let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
-            let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
-            let search_index = clawhive_memory::search_index::SearchIndex::new_with_config(
+        MemoryCommands::RebuildIndex { agent_id } => {
+            let workspace_dir = root.join("workspaces").join(&agent_id);
+            let file_store = MemoryFileStore::new(&workspace_dir);
+            let session_reader = SessionReader::new(&workspace_dir);
+            let search_index = SearchIndex::new_with_config(
                 memory.db(),
-                "",
-                clawhive_memory::search_index::SearchConfig {
+                &agent_id,
+                SearchConfig {
                     vector_weight: config.main.memory_search.vector_weight,
                     bm25_weight: config.main.memory_search.bm25_weight,
                     decay_half_life_days: config.main.memory_search.decay_half_life_days,
@@ -500,14 +479,63 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
                     embedding_cache_ttl_days: config.main.memory_search.embedding_cache_ttl_days,
                 },
             );
+            let dirty_store = DirtySourceStore::new(memory.db());
+            let fact_store = FactStore::new(memory.db());
+
+            let mut enqueued = 0usize;
+            if file_store.read_long_term().await.is_ok() {
+                dirty_store
+                    .enqueue(
+                        &agent_id,
+                        DIRTY_KIND_MEMORY_FILE,
+                        "MEMORY.md",
+                        "rebuild_index",
+                    )
+                    .await?;
+                enqueued += 1;
+            }
+
+            for (date, _path) in file_store.list_daily_files().await? {
+                dirty_store
+                    .enqueue(
+                        &agent_id,
+                        DIRTY_KIND_DAILY_FILE,
+                        &format!("memory/{}.md", date.format("%Y-%m-%d")),
+                        "rebuild_index",
+                    )
+                    .await?;
+                enqueued += 1;
+            }
+
+            for fact in fact_store.get_active_facts(&agent_id).await? {
+                dirty_store
+                    .enqueue(&agent_id, DIRTY_KIND_FACT, &fact.id, "rebuild_index")
+                    .await?;
+                enqueued += 1;
+            }
+
+            for session_id in session_reader.list_sessions().await? {
+                dirty_store
+                    .enqueue(&agent_id, DIRTY_KIND_SESSION, &session_id, "rebuild_index")
+                    .await?;
+                enqueued += 1;
+            }
 
             let embedding_provider = build_embedding_provider(&config).await;
-            println!("Rebuilding search index...");
-            let count = search_index
-                .index_all(&file_store, &session_reader, embedding_provider.as_ref())
+            let reindexed = search_index
+                .process_dirty_sources(
+                    &dirty_store,
+                    &agent_id,
+                    &file_store,
+                    &session_reader,
+                    embedding_provider.as_ref(),
+                    usize::MAX,
+                )
                 .await?;
-            println!("Done. Indexed {count} chunks.");
 
+            println!(
+                "Reindex complete for '{agent_id}': enqueued={enqueued}, reindexed_chunks={reindexed}"
+            );
             Ok(())
         }
         MemoryCommands::Export { agent_id, format } => {
@@ -697,11 +725,57 @@ fn jaccard_similarity(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
     overlap / left.union(right).count() as f64
 }
 
+fn summarize_trace_details(details: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(details) {
+        if let Some(diff_count) = value
+            .get("diff")
+            .and_then(|diff| diff.as_array())
+            .map(|arr| arr.len())
+        {
+            let section = value
+                .get("section")
+                .and_then(|section| section.as_str())
+                .unwrap_or("unknown");
+            return format!("section={section}, diff_lines={diff_count}");
+        }
+        if let Some(obj) = value.as_object() {
+            let keys = obj.keys().take(3).cloned().collect::<Vec<_>>().join(",");
+            return format!("json keys: {keys}");
+        }
+    }
+
+    let one_line = details.replace('\n', " ");
+    one_line.chars().take(80).collect()
+}
+
+fn format_section_merge_detail(details: &serde_json::Value) -> Option<String> {
+    let section = details.get("section")?.as_str()?;
+    let Some(diff) = details.get("diff").and_then(|diff| diff.as_array()) else {
+        return Some(format!("[{section}]\n  (no changes)"));
+    };
+
+    let mut lines = vec![format!("[{section}]")];
+    if diff.is_empty() {
+        lines.push("  (no changes)".to_string());
+        return Some(lines.join("\n"));
+    }
+
+    for entry in diff {
+        if let Some(line) = entry.as_str() {
+            lines.push(format!("  {line}"));
+        }
+    }
+    if lines.len() == 1 {
+        lines.push("  (no changes)".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_daily_items, find_best_canonical_match, memory_entry_matches_fact,
-        DailyCanonicalEntry,
+        extract_daily_items, find_best_canonical_match, format_section_merge_detail,
+        memory_entry_matches_fact, DailyCanonicalEntry,
     };
 
     #[test]
@@ -748,5 +822,21 @@ mod tests {
             "Runpod pod restarted overnight",
             "User prefers Chinese replies"
         ));
+    }
+
+    #[test]
+    fn format_section_merge_detail_renders_diff_lines() {
+        let details = serde_json::json!({
+            "section": "关键历史决策",
+            "diff": [
+                "+ 放弃 A2A 协议，改用内部 sub-agent 方案",
+                "+ 前端框架确定用 React 19 + Vite 6"
+            ]
+        });
+
+        let rendered = format_section_merge_detail(&details).expect("render detail");
+        assert!(rendered.contains("[关键历史决策]"));
+        assert!(rendered.contains("+ 放弃 A2A 协议，改用内部 sub-agent 方案"));
+        assert!(rendered.contains("+ 前端框架确定用 React 19 + Vite 6"));
     }
 }

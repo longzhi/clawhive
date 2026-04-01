@@ -73,6 +73,23 @@ pub struct SessionMemoryStateRecord {
     pub open_episodes: Vec<EpisodeStateRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TraceRecord {
+    pub timestamp: String,
+    pub operation: String,
+    pub details: String,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryStatsRecord {
+    pub chunk_count: i64,
+    pub fact_count: i64,
+    pub pending_dirty_sources: i64,
+    pub embedding_cache_count: i64,
+    pub trace_count: i64,
+}
+
 #[derive(Clone)]
 pub struct MemoryStore {
     db: Arc<Mutex<Connection>>,
@@ -144,6 +161,100 @@ impl MemoryStore {
 
     pub fn db(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.db)
+    }
+
+    pub async fn list_traces(
+        &self,
+        agent_id: &str,
+        limit: usize,
+        since: Option<&str>,
+    ) -> Result<Vec<TraceRecord>> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let since = since.map(ToOwned::to_owned);
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut rows_out = Vec::new();
+
+            if let Some(since_value) = since {
+                let mut stmt = conn.prepare(
+                    "SELECT timestamp, operation, details, duration_ms\n                     FROM memory_trace\n                     WHERE agent_id = ?1\n                       AND timestamp >= ?2\n                     ORDER BY timestamp DESC\n                     LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![agent_id, since_value, limit as i64], |row| {
+                    Ok(TraceRecord {
+                        timestamp: row.get(0)?,
+                        operation: row.get(1)?,
+                        details: row.get(2)?,
+                        duration_ms: row.get(3)?,
+                    })
+                })?;
+                for row in rows {
+                    rows_out.push(row?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT timestamp, operation, details, duration_ms\n                     FROM memory_trace\n                     WHERE agent_id = ?1\n                     ORDER BY timestamp DESC\n                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![agent_id, limit as i64], |row| {
+                    Ok(TraceRecord {
+                        timestamp: row.get(0)?,
+                        operation: row.get(1)?,
+                        details: row.get(2)?,
+                        duration_ms: row.get(3)?,
+                    })
+                })?;
+                for row in rows {
+                    rows_out.push(row?);
+                }
+            }
+
+            Ok::<Vec<TraceRecord>, anyhow::Error>(rows_out)
+        })
+        .await?
+    }
+
+    pub async fn stats_for_agent(&self, agent_id: &str) -> Result<MemoryStatsRecord> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+
+            let chunk_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM chunks WHERE agent_id = ?1",
+                params![agent_id],
+                |row| row.get(0),
+            )?;
+            let fact_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM facts WHERE agent_id = ?1",
+                params![agent_id],
+                |row| row.get(0),
+            )?;
+            let pending_dirty_sources: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM dirty_sources WHERE agent_id = ?1 AND processed_at IS NULL",
+                params![agent_id],
+                |row| row.get(0),
+            )?;
+            let trace_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM memory_trace WHERE agent_id = ?1",
+                params![agent_id],
+                |row| row.get(0),
+            )?;
+            let embedding_cache_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM embedding_cache", [], |row| row.get(0))?;
+
+            Ok::<MemoryStatsRecord, anyhow::Error>(MemoryStatsRecord {
+                chunk_count,
+                fact_count,
+                pending_dirty_sources,
+                embedding_cache_count,
+                trace_count,
+            })
+        })
+        .await?
     }
 
     pub async fn get_session(&self, key: &str) -> Result<Option<SessionRecord>> {
@@ -1003,5 +1114,50 @@ mod tests {
             assert_eq!(remaining_old, 0);
             assert_eq!(remaining_fresh, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn list_traces_respects_since_and_limit() {
+        let store = MemoryStore::open_in_memory().expect("store");
+
+        {
+            let db = store.db();
+            let conn = db.lock().expect("lock db");
+            conn.execute(
+                "INSERT INTO memory_trace (agent_id, operation, details, duration_ms, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "agent-a",
+                    "search",
+                    "{}",
+                    10_i64,
+                    "2026-02-28T10:00:00Z"
+                ],
+            )
+            .expect("insert old trace");
+            conn.execute(
+                "INSERT INTO memory_trace (agent_id, operation, details, duration_ms, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "agent-a",
+                    "section_merge",
+                    "{\"section\":\"关键历史决策\",\"diff\":[\"+ 新增\"]}",
+                    20_i64,
+                    "2026-03-02T10:00:00Z"
+                ],
+            )
+            .expect("insert new trace");
+        }
+
+        let traces = store
+            .list_traces("agent-a", 10, Some("2026-03-01"))
+            .await
+            .expect("list traces");
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].operation, "section_merge");
+
+        let limited = store
+            .list_traces("agent-a", 1, None)
+            .await
+            .expect("list traces with limit");
+        assert_eq!(limited.len(), 1);
     }
 }
