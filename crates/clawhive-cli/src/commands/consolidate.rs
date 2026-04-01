@@ -54,7 +54,8 @@ pub(crate) async fn run(root: &Path, agent_id_override: Option<&str>) -> Result<
         .with_embedding_provider(consolidation_embedding_provider)
         .with_file_store_for_reindex(file_store)
         .with_session_reader_for_reindex(session_reader)
-        .with_memory_store(Arc::clone(&memory)),
+        .with_memory_store(Arc::clone(&memory))
+        .with_embedding_cache_ttl_days(config.main.memory_search.embedding_cache_ttl_days),
     );
 
     let scheduler = ConsolidationScheduler::new(

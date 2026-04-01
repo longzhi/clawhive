@@ -580,6 +580,14 @@ async fn start_bot(
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
     let consolidation_schedule = config.main.consolidation_schedule.clone();
     let archive_retention_days = config.main.archive_retention_days;
+    let embedding_cache_ttl_days = config.main.memory_search.embedding_cache_ttl_days;
+
+    if let Err(e) = memory
+        .cleanup_expired_embedding_cache(embedding_cache_ttl_days)
+        .await
+    {
+        tracing::warn!("Startup embedding cache cleanup failed: {e}");
+    }
 
     let mut consolidators: Vec<Arc<HippocampusConsolidator>> = Vec::new();
     for agent_config in config.agents.iter().filter(|a| a.enabled) {
@@ -639,7 +647,8 @@ async fn start_bot(
             .with_embedding_provider(consolidation_embedding_provider.clone())
             .with_file_store_for_reindex(file_store)
             .with_session_reader_for_reindex(session_reader)
-            .with_memory_store(Arc::clone(&memory)),
+            .with_memory_store(Arc::clone(&memory))
+            .with_embedding_cache_ttl_days(embedding_cache_ttl_days),
         );
         consolidators.push(consolidator);
     }

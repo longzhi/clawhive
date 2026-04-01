@@ -573,6 +573,26 @@ impl MemoryStore {
         })
         .await?
     }
+
+    pub async fn cleanup_expired_embedding_cache(&self, ttl_days: u64) -> Result<usize> {
+        if ttl_days == 0 {
+            return Ok(0);
+        }
+
+        let db = Arc::clone(&self.db);
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|e| anyhow!("failed to lock sqlite connection: {e}"))?;
+            let cutoff = (Utc::now() - chrono::TimeDelta::days(ttl_days as i64)).to_rfc3339();
+            let deleted = conn.execute(
+                "DELETE FROM embedding_cache WHERE updated_at < ?1",
+                params![cutoff],
+            )?;
+            Ok::<usize, anyhow::Error>(deleted)
+        })
+        .await?
+    }
 }
 
 fn parse_datetime_sql(raw: &str) -> rusqlite::Result<DateTime<Utc>> {
@@ -934,5 +954,54 @@ mod tests {
             .await
             .expect("load keep-active")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_embedding_cache_removes_only_old_entries() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let old_ts = (Utc::now() - TimeDelta::days(45)).to_rfc3339();
+        let fresh_ts = Utc::now().to_rfc3339();
+
+        {
+            let db = store.db();
+            let conn = db.lock().expect("lock db");
+            conn.execute(
+                "INSERT INTO embedding_cache (provider, model, provider_key, hash, embedding, dims, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params!["openai", "text-embedding-3-small", "key1", "hash-old", "[0.1,0.2]", 2_i64, old_ts],
+            )
+            .expect("insert old embedding cache");
+            conn.execute(
+                "INSERT INTO embedding_cache (provider, model, provider_key, hash, embedding, dims, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params!["openai", "text-embedding-3-small", "key1", "hash-fresh", "[0.3,0.4]", 2_i64, fresh_ts],
+            )
+            .expect("insert fresh embedding cache");
+        }
+
+        let deleted = store
+            .cleanup_expired_embedding_cache(30)
+            .await
+            .expect("cleanup embedding cache");
+        assert_eq!(deleted, 1);
+
+        {
+            let db = store.db();
+            let conn = db.lock().expect("lock db");
+            let remaining_old: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM embedding_cache WHERE hash = 'hash-old'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count old");
+            let remaining_fresh: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM embedding_cache WHERE hash = 'hash-fresh'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count fresh");
+            assert_eq!(remaining_old, 0);
+            assert_eq!(remaining_fresh, 1);
+        }
     }
 }

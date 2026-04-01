@@ -152,6 +152,7 @@ pub struct HippocampusConsolidator {
     reindex_file_store: Option<MemoryFileStore>,
     reindex_session_reader: Option<SessionReader>,
     memory_store: Option<Arc<MemoryStore>>,
+    embedding_cache_ttl_days: u64,
 }
 
 #[derive(Debug)]
@@ -183,6 +184,7 @@ impl HippocampusConsolidator {
             reindex_file_store: None,
             reindex_session_reader: None,
             memory_store: None,
+            embedding_cache_ttl_days: 90,
         }
     }
 
@@ -211,6 +213,11 @@ impl HippocampusConsolidator {
         self
     }
 
+    pub fn with_embedding_cache_ttl_days(mut self, ttl_days: u64) -> Self {
+        self.embedding_cache_ttl_days = ttl_days;
+        self
+    }
+
     pub fn with_session_reader_for_reindex(mut self, reader: SessionReader) -> Self {
         self.reindex_session_reader = Some(reader);
         self
@@ -221,6 +228,15 @@ impl HippocampusConsolidator {
     }
 
     pub async fn consolidate(&self) -> Result<ConsolidationReport> {
+        if let Some(ref store) = self.memory_store {
+            if let Err(error) = store
+                .cleanup_expired_embedding_cache(self.embedding_cache_ttl_days)
+                .await
+            {
+                tracing::warn!("Embedding cache cleanup failed: {error}");
+            }
+        }
+
         let current_memory = self.file_store.read_long_term().await?;
         let recent_daily = self
             .file_store
@@ -2068,6 +2084,50 @@ Working on Clawhive memory safety.
         assert_eq!(report.daily_files_read, 0);
         assert!(!report.memory_updated);
         assert!(report.summary.contains("No daily files found"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_cleans_expired_embedding_cache_before_run() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# Memory\n\nExisting").await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        {
+            let db = memory_store.db();
+            let conn = db.lock().expect("lock db");
+            conn.execute(
+                &format!(
+                    "INSERT INTO embedding_cache (provider, model, provider_key, hash, embedding, dims, updated_at) VALUES ('openai', 'text-embedding-3-small', 'key1', 'hash-old', '[0.1,0.2]', 2, '{}')",
+                    (chrono::Utc::now() - chrono::TimeDelta::days(120)).to_rfc3339()
+                ),
+                [],
+            )?;
+        }
+
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            build_router(),
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store))
+        .with_embedding_cache_ttl_days(30);
+
+        let _ = consolidator.consolidate().await?;
+
+        let remaining_old: i64 = {
+            let db = memory_store.db();
+            let conn = db.lock().expect("lock db");
+            conn.query_row(
+                "SELECT COUNT(*) FROM embedding_cache WHERE hash = 'hash-old'",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        assert_eq!(remaining_old, 0);
+
         Ok(())
     }
 
