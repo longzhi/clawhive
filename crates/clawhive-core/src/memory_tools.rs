@@ -581,9 +581,10 @@ mod tests {
             snippet: "short snippet...".to_string(),
             text: "very long full chunk text that should not be printed directly".to_string(),
             score: 0.9,
+            score_breakdown: None,
         };
 
-        let rendered = format_memory_hit(&MemoryHit::Chunk(chunk));
+        let rendered = format_memory_hit(&MemoryHit::Chunk(Box::new(chunk)));
         assert!(rendered.contains("short snippet..."));
         assert!(!rendered.contains("very long full chunk text"));
     }

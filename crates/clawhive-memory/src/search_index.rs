@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::task;
 
@@ -109,6 +110,18 @@ pub struct SearchResult {
     pub snippet: String,
     pub text: String,
     pub score: f64,
+    pub score_breakdown: Option<ScoreBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoreBreakdown {
+    pub vector_score: Option<f64>,
+    pub bm25_score: Option<f64>,
+    pub fused_score: f64,
+    pub temporal_decay: f64,
+    pub access_boost: f64,
+    pub temperature: String,
+    pub final_score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -993,11 +1006,13 @@ impl SearchIndex {
         } // end if use_vectors
 
         let safe_fts_query = build_safe_fts_query(query);
-        let mut bm25_candidates = if safe_fts_query.is_empty() {
+        let has_bm25_query = !safe_fts_query.is_empty();
+        let mut bm25_candidates = if !has_bm25_query {
             Vec::new()
         } else {
             let db = Arc::clone(&self.db);
             let agent_id = self.agent_id.clone();
+            let safe_fts_query_for_sql = safe_fts_query.clone();
             match task::spawn_blocking(move || {
                 let conn = db
                     .lock()
@@ -1012,8 +1027,9 @@ impl SearchIndex {
                     LIMIT ?3
                     "#,
                 )?;
-                let rows =
-                    stmt.query_map(params![safe_fts_query, agent_id, candidate_limit as i64], |r| {
+                let rows = stmt.query_map(
+                    params![safe_fts_query_for_sql, agent_id, candidate_limit as i64],
+                    |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, String>(1)?,
@@ -1023,7 +1039,8 @@ impl SearchIndex {
                             r.get::<_, String>(5)?,
                             r.get::<_, f64>(6)?,
                         ))
-                    })?;
+                    },
+                )?;
 
                 let mut out = Vec::new();
                 for row in rows {
@@ -1121,6 +1138,29 @@ impl SearchIndex {
                 } else {
                     item.bm25_score // BM25-only mode
                 },
+                score_breakdown: Some(ScoreBreakdown {
+                    vector_score: use_vectors.then_some(item.vector_score),
+                    bm25_score: if has_bm25_query {
+                        Some(item.bm25_score)
+                    } else {
+                        None
+                    },
+                    fused_score: if use_vectors {
+                        (item.vector_score * self.search_config.vector_weight)
+                            + (item.bm25_score * self.search_config.bm25_weight)
+                    } else {
+                        item.bm25_score
+                    },
+                    temporal_decay: 1.0,
+                    access_boost: 1.0,
+                    temperature: "cold".to_string(),
+                    final_score: if use_vectors {
+                        (item.vector_score * self.search_config.vector_weight)
+                            + (item.bm25_score * self.search_config.bm25_weight)
+                    } else {
+                        item.bm25_score
+                    },
+                }),
             })
             .filter(|item| item.score >= min_score)
             .collect::<Vec<SearchResult>>();
@@ -1140,6 +1180,10 @@ impl SearchIndex {
             if age_days > 0.0 {
                 let decay = (-decay_lambda * age_days).exp();
                 result.score *= decay;
+                if let Some(breakdown) = result.score_breakdown.as_mut() {
+                    breakdown.temporal_decay = decay;
+                    breakdown.final_score = result.score;
+                }
             }
         }
 
@@ -1176,9 +1220,14 @@ impl SearchIndex {
                         let (count, last_accessed) =
                             counts.get(&result.chunk_id).cloned().unwrap_or((0, None));
                         if count > 0 {
-                            result.score *= 1.0
+                            let access_boost = 1.0
                                 + (1.0 + count as f64).ln()
                                     * self.search_config.access_boost_factor;
+                            result.score *= access_boost;
+                            if let Some(breakdown) = result.score_breakdown.as_mut() {
+                                breakdown.access_boost = access_boost;
+                                breakdown.final_score = result.score;
+                            }
                         }
 
                         let temperature = classify_temperature(
@@ -1191,6 +1240,16 @@ impl SearchIndex {
 
                         if temperature == Temperature::Hot {
                             result.score = (result.score + 0.01).min(1.0);
+                        }
+
+                        if let Some(breakdown) = result.score_breakdown.as_mut() {
+                            breakdown.temperature = match temperature {
+                                Temperature::Hot => "hot",
+                                Temperature::Warm => "warm",
+                                Temperature::Cold => "cold",
+                            }
+                            .to_string();
+                            breakdown.final_score = result.score;
                         }
                     }
 
@@ -3058,6 +3117,43 @@ mod tests {
         assert!(!results.is_empty());
         assert!(results[0].snippet.len() <= 230);
         assert!(results[0].text.len() >= results[0].snippet.len());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_result_includes_score_breakdown() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db, "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "memory/2026-03-20.md",
+                "# Notes\n\nRust async runtime and tokio execution details",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let results = index
+            .search("tokio runtime", &provider, 3, 0.0, None)
+            .await?;
+        assert!(!results.is_empty());
+
+        let breakdown = results[0]
+            .score_breakdown
+            .as_ref()
+            .expect("score breakdown should exist");
+
+        let base = breakdown.fused_score * breakdown.temporal_decay * breakdown.access_boost;
+        let expected_final = if breakdown.temperature == "hot" {
+            (base + 0.01).min(1.0)
+        } else {
+            base
+        };
+        assert!((breakdown.final_score - expected_final).abs() < 1e-6);
+        assert!((results[0].score - breakdown.final_score).abs() < 1e-6);
+
         Ok(())
     }
 }

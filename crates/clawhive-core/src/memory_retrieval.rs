@@ -38,7 +38,7 @@ pub struct MemoryFactHit {
 #[derive(Debug, Clone)]
 pub enum MemoryHit {
     Fact(Box<MemoryFactHit>),
-    Chunk(SearchResult),
+    Chunk(Box<SearchResult>),
 }
 
 impl MemoryHit {
@@ -121,7 +121,11 @@ pub async fn search_memory(
         )
         .await?;
     rerank_chunks_by_source(&mut chunks, MemoryRoutingBias::Neutral);
-    hits.extend(chunks.into_iter().map(MemoryHit::Chunk));
+    hits.extend(
+        chunks
+            .into_iter()
+            .map(|chunk| MemoryHit::Chunk(Box::new(chunk))),
+    );
     hits.sort_by(|a, b| b.score().total_cmp(&a.score()));
     let chunk_canonical_ids = load_chunk_canonical_ids(fact_store, agent_id, &hits)
         .await
@@ -681,6 +685,7 @@ mod tests {
             snippet: "demo".to_string(),
             text: "demo".to_string(),
             score,
+            score_breakdown: None,
         }
     }
 
@@ -727,7 +732,7 @@ mod tests {
     #[test]
     fn infer_memory_routing_bias_prefers_long_term_when_top_hits_are_durable() {
         let hits = vec![
-            MemoryHit::Chunk(make_result("MEMORY.md", "long_term", 0.92)),
+            MemoryHit::Chunk(Box::new(make_result("MEMORY.md", "long_term", 0.92))),
             MemoryHit::Fact(Box::new(MemoryFactHit {
                 fact: Fact {
                     id: "fact-1".to_string(),
@@ -760,9 +765,13 @@ mod tests {
     #[test]
     fn infer_memory_routing_bias_prefers_short_term_when_recent_hits_dominate() {
         let hits = vec![
-            MemoryHit::Chunk(make_result("memory/2026-03-30.md", "daily", 0.91)),
-            MemoryHit::Chunk(make_result("sessions/demo#turn:1-2", "session", 0.77)),
-            MemoryHit::Chunk(make_result("MEMORY.md", "long_term", 0.42)),
+            MemoryHit::Chunk(Box::new(make_result("memory/2026-03-30.md", "daily", 0.91))),
+            MemoryHit::Chunk(Box::new(make_result(
+                "sessions/demo#turn:1-2",
+                "session",
+                0.77,
+            ))),
+            MemoryHit::Chunk(Box::new(make_result("MEMORY.md", "long_term", 0.42))),
         ];
 
         assert_eq!(
@@ -800,11 +809,12 @@ mod tests {
             snippet: "User prefers Chinese replies for all future answers".to_string(),
             text: "User prefers Chinese replies for all future answers".to_string(),
             score: 0.9,
+            score_breakdown: None,
         };
 
         let hits = dedup_memory_hits(vec![
             MemoryHit::Fact(Box::new(MemoryFactHit { fact, score: 1.0 })),
-            MemoryHit::Chunk(chunk),
+            MemoryHit::Chunk(Box::new(chunk)),
         ]);
 
         assert_eq!(hits.len(), 1);
@@ -814,7 +824,7 @@ mod tests {
     #[test]
     fn dedup_memory_hits_drops_later_chunk_with_same_canonical() {
         let hits = vec![
-            MemoryHit::Chunk(SearchResult {
+            MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-memory".to_string(),
                 path: "MEMORY.md".to_string(),
                 source: "long_term".to_string(),
@@ -823,8 +833,9 @@ mod tests {
                 snippet: "ActionBook 采用 CDP 抽取文章结构".to_string(),
                 text: "ActionBook 采用 CDP 抽取文章结构".to_string(),
                 score: 1.1,
-            }),
-            MemoryHit::Chunk(SearchResult {
+                score_breakdown: None,
+            })),
+            MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-daily".to_string(),
                 path: "memory/2026-03-29.md".to_string(),
                 source: "daily".to_string(),
@@ -833,7 +844,8 @@ mod tests {
                 snippet: "今天讨论了 ActionBook 的 CDP 文章抽取方案".to_string(),
                 text: "今天讨论了 ActionBook 的 CDP 文章抽取方案".to_string(),
                 score: 0.95,
-            }),
+                score_breakdown: None,
+            })),
         ];
         let chunk_canonical_ids = HashMap::from([
             (
@@ -852,7 +864,7 @@ mod tests {
     #[test]
     fn dedup_memory_hits_drops_chunk_when_all_its_canonicals_are_superseded() {
         let hits = vec![
-            MemoryHit::Chunk(SearchResult {
+            MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-old".to_string(),
                 path: "memory/2026-03-28.md".to_string(),
                 source: "daily".to_string(),
@@ -861,8 +873,9 @@ mod tests {
                 snippet: "Use incremental patch consolidation for memory".to_string(),
                 text: "Use incremental patch consolidation for memory".to_string(),
                 score: 1.2,
-            }),
-            MemoryHit::Chunk(SearchResult {
+                score_breakdown: None,
+            })),
+            MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-new".to_string(),
                 path: "MEMORY.md".to_string(),
                 source: "long_term".to_string(),
@@ -871,7 +884,8 @@ mod tests {
                 snippet: "Use section-based consolidation for memory".to_string(),
                 text: "Use section-based consolidation for memory".to_string(),
                 score: 0.9,
-            }),
+                score_breakdown: None,
+            })),
         ];
         let chunk_canonical_ids = HashMap::from([
             ("chunk-old".to_string(), vec!["canon-old".to_string()]),
@@ -913,7 +927,7 @@ mod tests {
         };
         let hits = vec![
             MemoryHit::Fact(Box::new(MemoryFactHit { fact, score: 1.1 })),
-            MemoryHit::Chunk(SearchResult {
+            MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-memory".to_string(),
                 path: "MEMORY.md".to_string(),
                 source: "long_term".to_string(),
@@ -922,7 +936,8 @@ mod tests {
                 snippet: "The project uses section-based consolidation for memory".to_string(),
                 text: "The project uses section-based consolidation for memory".to_string(),
                 score: 1.05,
-            }),
+                score_breakdown: None,
+            })),
         ];
         let fact_canonical_ids = HashMap::from([(
             "fact-1".to_string(),

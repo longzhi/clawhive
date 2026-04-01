@@ -4412,6 +4412,15 @@ impl Orchestrator {
                         "candidates": results.len(),
                         "scores": results.iter().map(|r| format!("{:.2}", r.score())).collect::<Vec<_>>(),
                         "sources": results.iter().map(|r| format!("{:?}", r.source_kind())).collect::<Vec<_>>(),
+                        "score_breakdown": results.iter().filter_map(|hit| match hit {
+                            MemoryHit::Chunk(chunk) => chunk.score_breakdown.clone().map(|breakdown| {
+                                serde_json::json!({
+                                    "chunk_id": chunk.chunk_id.clone(),
+                                    "breakdown": breakdown,
+                                })
+                            }),
+                            MemoryHit::Fact(_) => None,
+                        }).collect::<Vec<_>>(),
                     }).to_string(),
                     Some(search_ms),
                 ).await;
@@ -5134,7 +5143,7 @@ fn build_memory_context_from_hits(hits: &[MemoryHit], budget: usize) -> String {
     let chunks = hits
         .iter()
         .filter_map(|hit| match hit {
-            MemoryHit::Chunk(hit) => Some(hit.clone()),
+            MemoryHit::Chunk(hit) => Some(hit.as_ref().clone()),
             MemoryHit::Fact(_) => None,
         })
         .collect::<Vec<_>>();
@@ -5566,6 +5575,7 @@ mod tests {
             snippet: text.to_string(),
             text: text.to_string(),
             score,
+            score_breakdown: None,
         }
     }
 
@@ -5615,24 +5625,24 @@ mod tests {
     #[test]
     fn build_memory_context_from_hits_long_term_query_suppresses_daily_and_session_noise() {
         let hits = vec![
-            MemoryHit::Chunk(make_result(
+            MemoryHit::Chunk(Box::new(make_result(
                 "MEMORY.md",
                 "long_term",
                 "长期主线：重构记忆系统，采用分层记忆架构。",
                 1.32,
-            )),
-            MemoryHit::Chunk(make_result(
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
                 "memory/2026-03-29.md",
                 "daily",
                 "daily 细节：品牌命名还在候选阶段。",
                 0.94,
-            )),
-            MemoryHit::Chunk(make_result(
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
                 "sessions/demo#turn:1-2",
                 "session",
                 "session 讨论：列出一堆当前缺陷清单。",
                 0.81,
-            )),
+            ))),
         ];
 
         let context = build_memory_context_from_hits(&hits, 4_000);
@@ -5646,24 +5656,24 @@ mod tests {
     #[test]
     fn build_memory_context_from_hits_short_term_query_prefers_daily_over_long_term() {
         let hits = vec![
-            MemoryHit::Chunk(make_result(
+            MemoryHit::Chunk(Box::new(make_result(
                 "memory/2026-03-30.md",
                 "daily",
                 "短期事项：品牌命名还在候选阶段。",
                 1.28,
-            )),
-            MemoryHit::Chunk(make_result(
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
                 "sessions/demo#turn:1",
                 "session",
                 "session 补充：刚确认了几个候选词。",
                 1.04,
-            )),
-            MemoryHit::Chunk(make_result(
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
                 "MEMORY.md",
                 "long_term",
                 "长期主线：重构记忆系统。",
                 0.83,
-            )),
+            ))),
         ];
 
         let context = build_memory_context_from_hits(&hits, 4_000);
@@ -5676,18 +5686,18 @@ mod tests {
 
     #[test]
     fn should_use_long_term_fallback_only_when_long_term_query_has_no_fact_or_memory_hit() {
-        let daily_hit = MemoryHit::Chunk(make_result(
+        let daily_hit = MemoryHit::Chunk(Box::new(make_result(
             "memory/2026-03-30.md",
             "daily",
             "短期事项：品牌命名还在候选阶段。",
             1.0,
-        ));
-        let long_term_hit = MemoryHit::Chunk(make_result(
+        )));
+        let long_term_hit = MemoryHit::Chunk(Box::new(make_result(
             "MEMORY.md",
             "long_term",
             "长期主线：重构记忆系统。",
             0.8,
-        ));
+        )));
 
         assert!(should_use_long_term_fallback(
             MemoryRoutingBias::LongTerm,
