@@ -36,6 +36,10 @@ pub struct SearchConfig {
     pub decay_half_life_days: u64,
     pub mmr_lambda: f64,
     pub access_boost_factor: f64,
+    pub hot_days: u64,
+    pub warm_days: u64,
+    pub cold_filter: bool,
+    pub access_protect_count: u64,
     pub max_results: usize,
     pub min_score: f64,
     pub embedding_cache_ttl_days: u64,
@@ -49,10 +53,49 @@ impl Default for SearchConfig {
             decay_half_life_days: 30,
             mmr_lambda: 0.7,
             access_boost_factor: 0.2,
+            hot_days: 7,
+            warm_days: 30,
+            cold_filter: true,
+            access_protect_count: 5,
             max_results: 6,
             min_score: 0.35,
             embedding_cache_ttl_days: 90,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Temperature {
+    Hot,
+    Warm,
+    Cold,
+}
+
+fn classify_temperature(
+    last_accessed: Option<&str>,
+    access_count: i64,
+    hot_days: u64,
+    warm_days: u64,
+    access_protect_count: u64,
+) -> Temperature {
+    let days_since = last_accessed
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_days())
+        .unwrap_or(i64::MAX);
+
+    if access_count >= access_protect_count as i64 {
+        if days_since <= hot_days as i64 {
+            return Temperature::Hot;
+        }
+        return Temperature::Warm;
+    }
+
+    if days_since <= hot_days as i64 {
+        Temperature::Hot
+    } else if days_since <= warm_days as i64 {
+        Temperature::Warm
+    } else {
+        Temperature::Cold
     }
 }
 
@@ -358,8 +401,8 @@ impl SearchIndex {
                 tx.execute(
                     r#"
                     INSERT INTO chunks(
-                        id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, agent_id
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, last_accessed, agent_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                     "#,
                     params![
                         chunk_id,
@@ -371,6 +414,7 @@ impl SearchIndex {
                         model,
                         text,
                         embedding,
+                        now_rfc,
                         now_rfc,
                         agent_id
                     ],
@@ -1057,27 +1101,28 @@ impl SearchIndex {
             }
         }
 
-        // --- Access-count boost (Hot/Warm/Cold protection) ---
         {
             let chunk_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
             if !chunk_ids.is_empty() {
                 let db = Arc::clone(&self.db);
                 let counts = task::spawn_blocking(
-                    move || -> Result<std::collections::HashMap<String, i64>> {
+                    move || -> Result<std::collections::HashMap<String, (i64, Option<String>)>> {
                         let conn = db.lock().map_err(|_| anyhow!("lock failed"))?;
                         let placeholders: String =
                             chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                        let sql = format!(
-                            "SELECT id, access_count FROM chunks WHERE id IN ({placeholders})"
-                        );
+                        let sql = format!("SELECT id, access_count, last_accessed FROM chunks WHERE id IN ({placeholders})");
                         let mut stmt = conn.prepare(&sql)?;
                         let mut map = std::collections::HashMap::new();
                         let rows = stmt.query_map(rusqlite::params_from_iter(&chunk_ids), |r| {
-                            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, Option<String>>(2)?,
+                            ))
                         })?;
                         for row in rows {
-                            let (id, count) = row?;
-                            map.insert(id, count);
+                            let (id, count, last_accessed) = row?;
+                            map.insert(id, (count, last_accessed));
                         }
                         Ok(map)
                     },
@@ -1086,12 +1131,39 @@ impl SearchIndex {
 
                 if let Ok(Ok(counts)) = counts {
                     for result in &mut results {
-                        let count = counts.get(&result.chunk_id).copied().unwrap_or(0);
+                        let (count, last_accessed) =
+                            counts.get(&result.chunk_id).cloned().unwrap_or((0, None));
                         if count > 0 {
                             result.score *= 1.0
                                 + (1.0 + count as f64).ln()
                                     * self.search_config.access_boost_factor;
                         }
+
+                        let temperature = classify_temperature(
+                            last_accessed.as_deref(),
+                            count,
+                            self.search_config.hot_days,
+                            self.search_config.warm_days,
+                            self.search_config.access_protect_count,
+                        );
+
+                        if temperature == Temperature::Hot {
+                            result.score = (result.score + 0.01).min(1.0);
+                        }
+                    }
+
+                    if self.search_config.cold_filter {
+                        results.retain(|result| {
+                            let (count, last_accessed) =
+                                counts.get(&result.chunk_id).cloned().unwrap_or((0, None));
+                            classify_temperature(
+                                last_accessed.as_deref(),
+                                count,
+                                self.search_config.hot_days,
+                                self.search_config.warm_days,
+                                self.search_config.access_protect_count,
+                            ) != Temperature::Cold
+                        });
                     }
                 }
             }
@@ -1112,8 +1184,12 @@ impl SearchIndex {
                 let conn = db.lock().map_err(|_| anyhow!("lock failed"))?;
                 let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 conn.execute(
-                    &format!("UPDATE chunks SET access_count = access_count + 1 WHERE id IN ({placeholders})"),
-                    rusqlite::params_from_iter(&ids),
+                    &format!(
+                        "UPDATE chunks SET access_count = access_count + 1, last_accessed = ?1 WHERE id IN ({placeholders})"
+                    ),
+                    rusqlite::params_from_iter(
+                        std::iter::once(chrono::Utc::now().to_rfc3339()).chain(ids.clone()),
+                    ),
                 )?;
                 Ok(())
             })
@@ -1756,6 +1832,196 @@ mod tests {
 
         let results = index.search("keyword", &provider, 3, 0.0).await?;
         assert!(results.len() <= 3);
+        Ok(())
+    }
+
+    #[test]
+    fn classify_temperature_basic() {
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::days(1)).to_rfc3339();
+        let warm = (now - chrono::Duration::days(15)).to_rfc3339();
+        let old = (now - chrono::Duration::days(60)).to_rfc3339();
+
+        assert_eq!(
+            classify_temperature(Some(recent.as_str()), 0, 7, 30, 5),
+            Temperature::Hot
+        );
+        assert_eq!(
+            classify_temperature(Some(warm.as_str()), 0, 7, 30, 5),
+            Temperature::Warm
+        );
+        assert_eq!(
+            classify_temperature(Some(old.as_str()), 0, 7, 30, 5),
+            Temperature::Cold
+        );
+        assert_eq!(classify_temperature(None, 0, 7, 30, 5), Temperature::Cold);
+        assert_eq!(
+            classify_temperature(Some(old.as_str()), 10, 7, 30, 5),
+            Temperature::Warm
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_filter_removes_cold_from_results() -> Result<()> {
+        let provider = StubEmbeddingProvider::new(8);
+        let now = chrono::Utc::now();
+        let hot_ts = (now - chrono::Duration::days(1)).to_rfc3339();
+        let warm_ts = (now - chrono::Duration::days(20)).to_rfc3339();
+        let cold_ts = (now - chrono::Duration::days(60)).to_rfc3339();
+
+        let db_filtered = test_db()?;
+        let index_filtered = SearchIndex::new_with_config(
+            Arc::clone(&db_filtered),
+            "test-agent",
+            SearchConfig {
+                cold_filter: true,
+                min_score: 0.0,
+                ..SearchConfig::default()
+            },
+        );
+
+        index_filtered
+            .index_file(
+                "memory/hot.md",
+                "# Topic\n\nshared keyword hot",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index_filtered
+            .index_file(
+                "memory/warm.md",
+                "# Topic\n\nshared keyword warm",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index_filtered
+            .index_file(
+                "memory/cold.md",
+                "# Topic\n\nshared keyword cold",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        {
+            let conn = db_filtered.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 0 WHERE path = 'memory/hot.md'",
+                params![hot_ts],
+            )?;
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 0 WHERE path = 'memory/warm.md'",
+                params![warm_ts],
+            )?;
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 0 WHERE path = 'memory/cold.md'",
+                params![cold_ts],
+            )?;
+        }
+
+        let filtered = index_filtered
+            .search("shared keyword", &provider, 10, 0.0)
+            .await?;
+        assert!(filtered.iter().all(|r| r.path != "memory/cold.md"));
+
+        let db_unfiltered = test_db()?;
+        let index_unfiltered = SearchIndex::new_with_config(
+            Arc::clone(&db_unfiltered),
+            "test-agent",
+            SearchConfig {
+                cold_filter: false,
+                min_score: 0.0,
+                ..SearchConfig::default()
+            },
+        );
+
+        index_unfiltered
+            .index_file(
+                "memory/hot.md",
+                "# Topic\n\nshared keyword hot",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index_unfiltered
+            .index_file(
+                "memory/warm.md",
+                "# Topic\n\nshared keyword warm",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index_unfiltered
+            .index_file(
+                "memory/cold.md",
+                "# Topic\n\nshared keyword cold",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        {
+            let conn = db_unfiltered.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 0 WHERE path = 'memory/hot.md'",
+                params![hot_ts],
+            )?;
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 0 WHERE path = 'memory/warm.md'",
+                params![warm_ts],
+            )?;
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 0 WHERE path = 'memory/cold.md'",
+                params![cold_ts],
+            )?;
+        }
+
+        let unfiltered = index_unfiltered
+            .search("shared keyword", &provider, 10, 0.0)
+            .await?;
+        assert!(unfiltered.iter().any(|r| r.path == "memory/cold.md"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn access_protect_prevents_cold_demotion() -> Result<()> {
+        let provider = StubEmbeddingProvider::new(8);
+        let db = test_db()?;
+        let index = SearchIndex::new_with_config(
+            Arc::clone(&db),
+            "test-agent",
+            SearchConfig {
+                cold_filter: true,
+                access_protect_count: 5,
+                min_score: 0.0,
+                ..SearchConfig::default()
+            },
+        );
+
+        index
+            .index_file(
+                "memory/protected.md",
+                "# Topic\n\nshared keyword protected",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let stale = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET last_accessed = ?1, access_count = 10 WHERE path = 'memory/protected.md'",
+                params![stale],
+            )?;
+        }
+
+        let results = index.search("shared keyword", &provider, 10, 0.0).await?;
+        assert!(results.iter().any(|r| r.path == "memory/protected.md"));
+
         Ok(())
     }
 

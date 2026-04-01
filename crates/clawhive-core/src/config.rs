@@ -701,6 +701,20 @@ pub struct MemorySearchConfig {
     pub min_score: f64,
     #[serde(default = "default_embedding_cache_ttl_days")]
     pub embedding_cache_ttl_days: u64,
+    #[serde(default)]
+    pub temperature: TemperatureConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemperatureConfig {
+    #[serde(default = "default_hot_days")]
+    pub hot_days: u64,
+    #[serde(default = "default_warm_days")]
+    pub warm_days: u64,
+    #[serde(default = "default_cold_filter")]
+    pub cold_filter: bool,
+    #[serde(default = "default_access_protect_count")]
+    pub access_protect_count: u64,
 }
 
 fn default_vector_weight() -> f64 {
@@ -735,6 +749,33 @@ fn default_embedding_cache_ttl_days() -> u64 {
     90
 }
 
+fn default_hot_days() -> u64 {
+    7
+}
+
+fn default_warm_days() -> u64 {
+    30
+}
+
+fn default_cold_filter() -> bool {
+    true
+}
+
+fn default_access_protect_count() -> u64 {
+    5
+}
+
+impl Default for TemperatureConfig {
+    fn default() -> Self {
+        Self {
+            hot_days: default_hot_days(),
+            warm_days: default_warm_days(),
+            cold_filter: default_cold_filter(),
+            access_protect_count: default_access_protect_count(),
+        }
+    }
+}
+
 impl Default for MemorySearchConfig {
     fn default() -> Self {
         Self {
@@ -746,6 +787,7 @@ impl Default for MemorySearchConfig {
             max_results: default_max_results(),
             min_score: default_min_score(),
             embedding_cache_ttl_days: default_embedding_cache_ttl_days(),
+            temperature: TemperatureConfig::default(),
         }
     }
 }
@@ -1208,6 +1250,10 @@ channels: {}
         assert_eq!(config.memory_search.max_results, 6);
         assert_eq!(config.memory_search.min_score, 0.35);
         assert_eq!(config.memory_search.embedding_cache_ttl_days, 90);
+        assert_eq!(config.memory_search.temperature.hot_days, 7);
+        assert_eq!(config.memory_search.temperature.warm_days, 30);
+        assert!(config.memory_search.temperature.cold_filter);
+        assert_eq!(config.memory_search.temperature.access_protect_count, 5);
     }
 
     #[test]

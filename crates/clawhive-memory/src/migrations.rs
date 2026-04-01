@@ -395,6 +395,12 @@ fn migrations() -> Vec<Migration> {
             WHERE typeof(updated_at) = 'integer';
             "#,
         ),
+        (
+            21,
+            r#"
+            ALTER TABLE chunks ADD COLUMN last_accessed TEXT;
+            "#,
+        ),
     ]
 }
 
