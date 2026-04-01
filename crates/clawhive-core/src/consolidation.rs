@@ -536,49 +536,57 @@ impl HippocampusConsolidator {
         self.record_memory_lineage(current_memory, &cleanup_result.content, memory_candidates)
             .await;
 
-        let reindexed =
-            if let (Some(index), Some(provider), Some(fs), Some(reader), Some(memory_store)) = (
-                &self.search_index,
-                &self.embedding_provider,
-                &self.reindex_file_store,
-                &self.reindex_session_reader,
-                &self.memory_store,
-            ) {
-                let dirty = DirtySourceStore::new(memory_store.db());
-                match dirty
-                    .enqueue(
-                        &self.agent_id,
-                        DIRTY_KIND_MEMORY_FILE,
-                        "MEMORY.md",
-                        "consolidation_write",
-                    )
+        let reindexed = if let (
+            Some(index),
+            Some(provider),
+            Some(fs),
+            Some(reader),
+            Some(memory_store),
+        ) = (
+            &self.search_index,
+            &self.embedding_provider,
+            &self.reindex_file_store,
+            &self.reindex_session_reader,
+            &self.memory_store,
+        ) {
+            let dirty = DirtySourceStore::new(memory_store.db());
+            match dirty
+                .enqueue(
+                    &self.agent_id,
+                    DIRTY_KIND_MEMORY_FILE,
+                    "MEMORY.md",
+                    "consolidation_write",
+                )
+                .await
+            {
+                Ok(()) => match index
+                    .process_dirty_sources(&dirty, &self.agent_id, fs, reader, provider.as_ref(), 8)
                     .await
                 {
-                    Ok(()) => match index.index_dirty(fs, reader, provider.as_ref(), 8).await {
-                        Ok(count) => {
-                            self.record_memory_chunk_lineage(
-                                &cleanup_result.content,
-                                memory_candidates,
-                            )
-                            .await;
-                            tracing::info!(
-                                "Post-consolidation incremental reindex: {count} chunks indexed"
-                            );
-                            true
-                        }
-                        Err(e) => {
-                            tracing::warn!("Post-consolidation incremental reindex failed: {e}");
-                            false
-                        }
-                    },
+                    Ok(count) => {
+                        self.record_memory_chunk_lineage(
+                            &cleanup_result.content,
+                            memory_candidates,
+                        )
+                        .await;
+                        tracing::info!(
+                            "Post-consolidation incremental reindex: {count} chunks indexed"
+                        );
+                        true
+                    }
                     Err(e) => {
-                        tracing::warn!("Failed to enqueue MEMORY.md dirty source: {e}");
+                        tracing::warn!("Post-consolidation incremental reindex failed: {e}");
                         false
                     }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to enqueue MEMORY.md dirty source: {e}");
+                    false
                 }
-            } else {
-                false
-            };
+            }
+        } else {
+            false
+        };
 
         let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
         self.record_fact_memory_alignment(&cleanup_result.content)

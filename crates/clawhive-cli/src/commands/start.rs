@@ -624,6 +624,7 @@ async fn start_bot(
             let sr = clawhive_memory::session::SessionReader::new(&workspace_dir);
             let ep = consolidation_embedding_provider.clone();
             let aid = agent_config.agent_id.clone();
+            let mem = Arc::clone(&memory);
             tokio::task::spawn(async move {
                 if let Err(e) = idx.ensure_vec_table(ep.dimensions()) {
                     tracing::warn!(agent_id = %aid, "Failed to ensure vec table: {e}");
@@ -635,6 +636,14 @@ async fn start_bot(
                     }
                     Err(e) => tracing::warn!(agent_id = %aid, "Startup indexing failed: {e}"),
                     _ => {}
+                }
+
+                let dirty = clawhive_memory::dirty_sources::DirtySourceStore::new(mem.db());
+                if let Err(e) = idx
+                    .process_dirty_sources(&dirty, &aid, &fs, &sr, ep.as_ref(), 32)
+                    .await
+                {
+                    tracing::warn!(agent_id = %aid, "Startup dirty source drain failed: {e}");
                 }
             });
         }

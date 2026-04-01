@@ -781,6 +781,38 @@ impl SearchIndex {
         Ok(total)
     }
 
+    pub async fn process_dirty_sources(
+        &self,
+        dirty_store: &DirtySourceStore,
+        agent_id: &str,
+        file_store: &crate::file_store::MemoryFileStore,
+        reader: &SessionReader,
+        provider: &dyn EmbeddingProvider,
+        batch_limit: usize,
+    ) -> Result<usize> {
+        let pending = dirty_store.list_pending(agent_id, batch_limit).await?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let count = self
+            .index_dirty(file_store, reader, provider, batch_limit)
+            .await?;
+
+        for item in &pending {
+            dirty_store.mark_processed(&item.id).await?;
+        }
+
+        tracing::info!(
+            agent_id = %agent_id,
+            pending = pending.len(),
+            indexed = count,
+            "Processed dirty sources"
+        );
+
+        Ok(count)
+    }
+
     pub fn needs_reindex(&self, provider: &dyn EmbeddingProvider) -> Result<bool> {
         let conn = self
             .db
@@ -2376,6 +2408,72 @@ mod tests {
             |r| r.get(0),
         )?;
         assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_dirty_sources_marks_all_pending_processed() -> Result<()> {
+        let dir = TempDir::new()?;
+        let file_store = MemoryFileStore::new(dir.path());
+        let session_writer = SessionWriter::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
+
+        file_store
+            .write_long_term("# Long\n\nlong-term dirty content")
+            .await?;
+        let daily_date = chrono::NaiveDate::from_ymd_opt(2026, 4, 1).expect("valid date");
+        file_store
+            .write_daily(daily_date, "# Daily\n\ndaily dirty content")
+            .await?;
+        session_writer.start_session("s1", "main").await?;
+        session_writer
+            .append_message("s1", "user", "session dirty content")
+            .await?;
+
+        let db = test_db()?;
+        let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_MEMORY_FILE,
+                "MEMORY.md",
+                "memory_written",
+            )
+            .await?;
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_DAILY_FILE,
+                "memory/2026-04-01.md",
+                "daily_written",
+            )
+            .await?;
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_SESSION,
+                "s1",
+                "session_appended",
+            )
+            .await?;
+
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        let indexed = index
+            .process_dirty_sources(
+                &dirty,
+                "test-agent",
+                &file_store,
+                &session_reader,
+                &provider,
+                10,
+            )
+            .await?;
+
+        assert!(indexed > 0);
+        assert_eq!(dirty.pending_count("test-agent").await?, 0);
+
         Ok(())
     }
 

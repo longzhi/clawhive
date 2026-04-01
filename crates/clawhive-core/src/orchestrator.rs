@@ -1357,9 +1357,12 @@ impl Orchestrator {
 
     async fn drain_dirty_sources(&self, view: &ConfigView, agent_id: &str, limit: usize) {
         let workspace = self.workspace_state_for(agent_id);
+        let dirty = DirtySourceStore::new(self.memory.db());
         if let Err(error) = workspace
             .search_index
-            .index_dirty(
+            .process_dirty_sources(
+                &dirty,
+                agent_id,
                 &workspace.file_store,
                 &workspace.session_reader,
                 view.embedding_provider.as_ref(),
@@ -1369,6 +1372,21 @@ impl Orchestrator {
         {
             tracing::warn!(agent_id = %agent_id, %error, "failed to index dirty sources");
         }
+    }
+
+    async fn process_session_close_daily_dirty(&self, view: &ConfigView, agent_id: &str) {
+        let daily_path = format!(
+            "memory/{}.md",
+            chrono::Utc::now().date_naive().format("%Y-%m-%d")
+        );
+        self.enqueue_dirty_source(
+            agent_id,
+            DIRTY_KIND_DAILY_FILE,
+            &daily_path,
+            "session_close",
+        )
+        .await;
+        self.drain_dirty_sources(view, agent_id, 8).await;
     }
 
     pub async fn ensure_workspaces(&self) -> Result<()> {
@@ -1602,6 +1620,8 @@ impl Orchestrator {
                     .await;
                 }
             }
+            self.process_session_close_daily_dirty(view.as_ref(), agent_id)
+                .await;
         }
 
         let session_text = build_session_text(&inbound.text, &inbound.attachments);
@@ -2003,6 +2023,8 @@ impl Orchestrator {
                     .await;
                 }
             }
+            self.process_session_close_daily_dirty(view.as_ref(), agent_id)
+                .await;
         }
 
         let system_prompt = view
@@ -3504,7 +3526,14 @@ impl Orchestrator {
         let session_reader = SessionReader::new(file_store.workspace_dir());
         let search_index = SearchIndex::new(memory.db(), agent_id);
         if let Err(error) = search_index
-            .index_dirty(file_store, &session_reader, embedding_provider.as_ref(), 8)
+            .process_dirty_sources(
+                &dirty,
+                agent_id,
+                file_store,
+                &session_reader,
+                embedding_provider.as_ref(),
+                8,
+            )
             .await
         {
             tracing::warn!(
@@ -4071,7 +4100,14 @@ impl Orchestrator {
                     } else {
                         let search_index = SearchIndex::new(memory.db(), agent_id);
                         if let Err(error) = search_index
-                            .index_dirty(file_store, &reader, embedding_provider.as_ref(), 4)
+                            .process_dirty_sources(
+                                &dirty,
+                                agent_id,
+                                file_store,
+                                &reader,
+                                embedding_provider.as_ref(),
+                                4,
+                            )
                             .await
                         {
                             tracing::warn!(source, %error, "Failed to drain daily dirty source");
