@@ -42,7 +42,7 @@ use super::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
 use super::image_tool::ImageTool;
 use super::memory_retrieval::{
     filter_duplicate_chunks_against_facts, infer_memory_routing_bias, is_matching_memory_content,
-    search_memory, MemoryHit, MemoryRoutingBias, MemorySourceKind,
+    search_memory, MemoryHit, MemoryRoutingBias, MemorySearchParams, MemorySourceKind,
 };
 use super::memory_tools::{MemoryForgetTool, MemoryGetTool, MemorySearchTool, MemoryWriteTool};
 use super::persona::Persona;
@@ -4331,8 +4331,11 @@ impl Orchestrator {
             view.embedding_provider.as_ref(),
             agent_id,
             query,
-            6,
-            0.25,
+            MemorySearchParams {
+                max_results: 6,
+                min_score: 0.25,
+                time_range: None,
+            },
         )
         .await;
         let search_ms = search_start.elapsed().as_millis() as i64;

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::fact_store::{self, Fact, FactStore};
 use clawhive_memory::file_store::MemoryFileStore;
-use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::search_index::{SearchIndex, TimeRange};
 use clawhive_memory::{MemoryStore, RecentExplicitMemoryWrite, SessionMemoryStateRecord};
 use clawhive_provider::ToolDef;
 
@@ -13,6 +13,7 @@ use crate::memory_document::MemoryDocument;
 
 use super::memory_retrieval::{
     classify_chunk_source, find_matching_fact, search_memory, source_label, MemoryHit,
+    MemorySearchParams,
 };
 use super::tool::{ToolContext, ToolExecutor, ToolOutput};
 
@@ -56,6 +57,20 @@ impl ToolExecutor for MemorySearchTool {
                         "type": "integer",
                         "description": "Maximum number of results (default: 6)",
                         "default": 6
+                    },
+                    "time_range": {
+                        "type": "object",
+                        "description": "Optional occurred_at/date filter. Supports YYYY-MM or YYYY-MM-DD.",
+                        "properties": {
+                            "from": {
+                                "type": "string",
+                                "description": "Start date (inclusive), e.g. 2026-03 or 2026-03-15"
+                            },
+                            "to": {
+                                "type": "string",
+                                "description": "End date (inclusive), e.g. 2026-03 or 2026-03-31"
+                            }
+                        }
                     }
                 },
                 "required": ["query"]
@@ -68,6 +83,19 @@ impl ToolExecutor for MemorySearchTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'query' field"))?;
         let max_results = input["max_results"].as_u64().unwrap_or(6) as usize;
+        let time_range = input
+            .get("time_range")
+            .and_then(|v| v.as_object())
+            .map(|obj| TimeRange {
+                from: obj
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned),
+                to: obj
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned),
+            });
 
         match search_memory(
             &self.fact_store,
@@ -75,8 +103,11 @@ impl ToolExecutor for MemorySearchTool {
             self.embedding_provider.as_ref(),
             &self.agent_id,
             query,
-            max_results,
-            0.35,
+            MemorySearchParams {
+                max_results,
+                min_score: 0.35,
+                time_range,
+            },
         )
         .await
         {
@@ -588,6 +619,49 @@ mod tests {
         assert!(result.content.contains("[fact:preference]"));
         assert!(result.content.contains("[fact]"));
         assert!(result.content.contains("Chinese replies"));
+    }
+
+    #[tokio::test]
+    async fn memory_search_honors_time_range_for_daily_chunks() {
+        let (_tmp, _memory, tool, _) = setup();
+        let ctx = ToolContext::builtin();
+
+        tool.search_index
+            .index_file(
+                "memory/2026-03-01.md",
+                "# March\n\nrelease planning and sprint notes",
+                "daily",
+                tool.embedding_provider.as_ref(),
+            )
+            .await
+            .unwrap();
+        tool.search_index
+            .index_file(
+                "memory/2026-04-01.md",
+                "# April\n\nrelease planning and sprint notes",
+                "daily",
+                tool.embedding_provider.as_ref(),
+            )
+            .await
+            .unwrap();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "query": "release planning",
+                    "time_range": {
+                        "from": "2026-03",
+                        "to": "2026-03"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("memory/2026-03-01.md"));
+        assert!(!result.content.contains("memory/2026-04-01.md"));
     }
 
     #[tokio::test]

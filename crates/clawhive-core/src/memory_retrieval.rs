@@ -4,7 +4,7 @@ use anyhow::Result;
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::fact_store::{Fact, FactStore};
 use clawhive_memory::memory_lineage::MemoryLineageStore;
-use clawhive_memory::search_index::{SearchIndex, SearchResult};
+use clawhive_memory::search_index::{SearchIndex, SearchResult, TimeRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySourceKind {
@@ -20,6 +20,13 @@ pub enum MemoryRoutingBias {
     LongTerm,
     ShortTerm,
     Neutral,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemorySearchParams {
+    pub max_results: usize,
+    pub min_score: f64,
+    pub time_range: Option<TimeRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,14 +92,19 @@ pub async fn search_memory(
     provider: &dyn EmbeddingProvider,
     agent_id: &str,
     query: &str,
-    max_results: usize,
-    min_score: f64,
+    params: MemorySearchParams,
 ) -> Result<Vec<MemoryHit>> {
-    let target_results = if max_results == 0 { 6 } else { max_results };
+    let target_results = if params.max_results == 0 {
+        6
+    } else {
+        params.max_results
+    };
+    let facts = fact_store.get_active_facts(agent_id).await?;
+    let filtered_facts = filter_facts_by_time_range(&facts, params.time_range.as_ref());
     let mut hits = score_facts(
-        &fact_store.get_active_facts(agent_id).await?,
+        &filtered_facts,
         query,
-        min_score,
+        params.min_score,
         MemoryRoutingBias::Neutral,
     )
     .into_iter()
@@ -100,7 +112,13 @@ pub async fn search_memory(
     .collect::<Vec<_>>();
 
     let mut chunks = search_index
-        .search(query, provider, target_results.saturating_mul(3), min_score)
+        .search(
+            query,
+            provider,
+            target_results.saturating_mul(3),
+            params.min_score,
+            params.time_range,
+        )
         .await?;
     rerank_chunks_by_source(&mut chunks, MemoryRoutingBias::Neutral);
     hits.extend(chunks.into_iter().map(MemoryHit::Chunk));
@@ -173,6 +191,78 @@ pub async fn search_memory(
     }
 
     Ok(hits)
+}
+
+fn filter_facts_by_time_range(facts: &[Fact], time_range: Option<&TimeRange>) -> Vec<Fact> {
+    let Some(range) = time_range else {
+        return facts.to_vec();
+    };
+
+    let from = range
+        .from
+        .as_deref()
+        .and_then(|value| parse_time_boundary(value, true));
+    let to = range
+        .to
+        .as_deref()
+        .and_then(|value| parse_time_boundary(value, false));
+
+    facts
+        .iter()
+        .filter(|fact| {
+            let Some(occurred_at) = fact.occurred_at.as_deref() else {
+                return false;
+            };
+            let Some(date) = parse_fact_occurred_date(occurred_at) else {
+                return false;
+            };
+            if let Some(from_date) = from {
+                if date < from_date {
+                    return false;
+                }
+            }
+            if let Some(to_date) = to {
+                if date > to_date {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+fn parse_fact_occurred_date(value: &str) -> Option<chrono::NaiveDate> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.date_naive())
+        .ok()
+        .or_else(|| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+}
+
+fn parse_time_boundary(value: &str, is_start: bool) -> Option<chrono::NaiveDate> {
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Some(date);
+    }
+
+    let (year, month) = value.split_once('-')?;
+    if month.len() != 2 || year.len() != 4 || value.matches('-').count() != 1 {
+        return None;
+    }
+
+    let year: i32 = year.parse().ok()?;
+    let month: u32 = month.parse().ok()?;
+    let start = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+    if is_start {
+        return Some(start);
+    }
+
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next_start = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    Some(next_start - chrono::Duration::days(1))
 }
 
 pub fn dedup_memory_hits(hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
@@ -887,5 +977,43 @@ mod tests {
             "score {} should be >= 0.25",
             hits[0].score
         );
+    }
+
+    #[test]
+    fn filter_facts_by_time_range_uses_occurred_at() {
+        let in_range = Fact {
+            id: "fact-in".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "In range fact".to_string(),
+            fact_type: "event".to_string(),
+            importance: 0.5,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: Some("2026-03-15T10:00:00Z".to_string()),
+            recorded_at: "2026-03-15T10:00:00Z".to_string(),
+            source_type: "agent_write".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            created_at: "2026-03-15T10:00:00Z".to_string(),
+            updated_at: "2026-03-15T10:00:00Z".to_string(),
+        };
+        let out_of_range = Fact {
+            id: "fact-out".to_string(),
+            occurred_at: Some("2026-04-01T00:00:00Z".to_string()),
+            ..in_range.clone()
+        };
+
+        let filtered = filter_facts_by_time_range(
+            &[in_range, out_of_range],
+            Some(&TimeRange {
+                from: Some("2026-03".to_string()),
+                to: Some("2026-03".to_string()),
+            }),
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "fact-in");
     }
 }

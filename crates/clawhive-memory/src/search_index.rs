@@ -110,6 +110,12 @@ pub struct SearchResult {
     pub score: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct TimeRange {
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
 impl SearchIndex {
     pub fn new(db: Arc<Mutex<Connection>>, agent_id: impl Into<String>) -> Self {
         Self::new_with_config(db, agent_id, SearchConfig::default())
@@ -834,6 +840,7 @@ impl SearchIndex {
         provider: &dyn EmbeddingProvider,
         max_results: usize,
         min_score: f64,
+        time_range: Option<TimeRange>,
     ) -> Result<Vec<SearchResult>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
@@ -1098,6 +1105,7 @@ impl SearchIndex {
 
         let mut results = merged
             .into_values()
+            .filter(|item| path_matches_time_range(&item.path, time_range.as_ref()))
             .map(|item| SearchResult {
                 chunk_id: item.chunk_id,
                 path: item.path,
@@ -1391,6 +1399,76 @@ fn extract_date_from_path(path: &str) -> Option<chrono::NaiveDate> {
         .trim_end_matches(".md");
 
     chrono::NaiveDate::parse_from_str(re_pattern, "%Y-%m-%d").ok()
+}
+
+fn path_matches_time_range(path: &str, time_range: Option<&TimeRange>) -> bool {
+    let Some(range) = time_range else {
+        return true;
+    };
+
+    if path.ends_with("MEMORY.md") {
+        return true;
+    }
+
+    if path.starts_with("memory/") {
+        let Some(date) = extract_date_from_path(path) else {
+            return true;
+        };
+        return date_in_time_range(date, range);
+    }
+
+    true
+}
+
+fn date_in_time_range(date: chrono::NaiveDate, range: &TimeRange) -> bool {
+    let from = range
+        .from
+        .as_deref()
+        .and_then(|value| parse_time_boundary(value, true));
+    let to = range
+        .to
+        .as_deref()
+        .and_then(|value| parse_time_boundary(value, false));
+
+    if let Some(from_date) = from {
+        if date < from_date {
+            return false;
+        }
+    }
+
+    if let Some(to_date) = to {
+        if date > to_date {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn parse_time_boundary(value: &str, is_start: bool) -> Option<chrono::NaiveDate> {
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Some(date);
+    }
+
+    let (year, month) = value.split_once('-')?;
+    if month.len() != 2 || year.len() != 4 || value.matches('-').count() != 1 {
+        return None;
+    }
+
+    let year: i32 = year.parse().ok()?;
+    let month: u32 = month.parse().ok()?;
+    let start = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+    if is_start {
+        return Some(start);
+    }
+
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next_start = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    Some(next_start - chrono::Duration::days(1))
 }
 
 fn build_safe_fts_query(query: &str) -> String {
@@ -1801,7 +1879,9 @@ mod tests {
             )
             .await?;
 
-        let results = index.search("architecture", &provider, 6, 0.0).await?;
+        let results = index
+            .search("architecture", &provider, 6, 0.0, None)
+            .await?;
         assert!(!results.is_empty());
         Ok(())
     }
@@ -1821,7 +1901,9 @@ mod tests {
             )
             .await?;
 
-        let results = index.search("tokio runtime", &provider, 6, 0.0).await?;
+        let results = index
+            .search("tokio runtime", &provider, 6, 0.0, None)
+            .await?;
         assert!(!results.is_empty());
         assert!(results[0].score >= 0.0);
         Ok(())
@@ -1842,8 +1924,8 @@ mod tests {
             )
             .await?;
 
-        let loose = index.search("apple", &provider, 6, 0.0).await?;
-        let strict = index.search("apple", &provider, 6, 0.95).await?;
+        let loose = index.search("apple", &provider, 6, 0.0, None).await?;
+        let strict = index.search("apple", &provider, 6, 0.95, None).await?;
         assert!(strict.len() <= loose.len());
         Ok(())
     }
@@ -1862,7 +1944,7 @@ mod tests {
                 .await?;
         }
 
-        let results = index.search("keyword", &provider, 3, 0.0).await?;
+        let results = index.search("keyword", &provider, 3, 0.0, None).await?;
         assert!(results.len() <= 3);
         Ok(())
     }
@@ -1954,7 +2036,7 @@ mod tests {
         }
 
         let filtered = index_filtered
-            .search("shared keyword", &provider, 10, 0.0)
+            .search("shared keyword", &provider, 10, 0.0, None)
             .await?;
         assert!(filtered.iter().all(|r| r.path != "memory/cold.md"));
 
@@ -2011,7 +2093,7 @@ mod tests {
         }
 
         let unfiltered = index_unfiltered
-            .search("shared keyword", &provider, 10, 0.0)
+            .search("shared keyword", &provider, 10, 0.0, None)
             .await?;
         assert!(unfiltered.iter().any(|r| r.path == "memory/cold.md"));
 
@@ -2051,7 +2133,9 @@ mod tests {
             )?;
         }
 
-        let results = index.search("shared keyword", &provider, 10, 0.0).await?;
+        let results = index
+            .search("shared keyword", &provider, 10, 0.0, None)
+            .await?;
         assert!(results.iter().any(|r| r.path == "memory/protected.md"));
 
         Ok(())
@@ -2090,7 +2174,9 @@ mod tests {
             )
             .await?;
 
-        let bm25_results = index_bm25.search("keyword", &provider, 2, 0.0).await?;
+        let bm25_results = index_bm25
+            .search("keyword", &provider, 2, 0.0, None)
+            .await?;
         assert_eq!(bm25_results[0].path, "memory/bm25-wins.md");
 
         let db_vector = test_db()?;
@@ -2122,7 +2208,9 @@ mod tests {
             )
             .await?;
 
-        let vector_results = index_vector.search("keyword", &provider, 2, 0.0).await?;
+        let vector_results = index_vector
+            .search("keyword", &provider, 2, 0.0, None)
+            .await?;
         assert_eq!(vector_results[0].path, "memory/vector-wins.md");
 
         Ok(())
@@ -2145,7 +2233,7 @@ mod tests {
                 .await?;
         }
 
-        let results = index.search("topic", &provider, 3, 0.0).await?;
+        let results = index.search("topic", &provider, 3, 0.0, None).await?;
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
 
@@ -2167,7 +2255,7 @@ mod tests {
         let index = SearchIndex::new(db, "test-agent");
         let provider = StubEmbeddingProvider::new(8);
 
-        let results = index.search("anything", &provider, 6, 0.0).await?;
+        let results = index.search("anything", &provider, 6, 0.0, None).await?;
         assert!(results.is_empty());
         Ok(())
     }
@@ -2206,7 +2294,9 @@ mod tests {
             )
             .await?;
 
-        let results = index.search("hello OR world*", &provider, 6, 0.0).await?;
+        let results = index
+            .search("hello OR world*", &provider, 6, 0.0, None)
+            .await?;
         assert!(!results.is_empty());
         Ok(())
     }
@@ -2835,7 +2925,9 @@ mod tests {
             )
             .await?;
 
-        let results = index.search("pasta cooking", &provider, 6, 0.0).await?;
+        let results = index
+            .search("pasta cooking", &provider, 6, 0.0, None)
+            .await?;
         assert!(!results.is_empty());
         for result in &results {
             assert!(result.score >= 0.0, "Score below 0: {}", result.score);
@@ -2859,8 +2951,60 @@ mod tests {
             )
             .await?;
 
-        let results = index.search("testing content", &provider, 6, 0.0).await?;
+        let results = index
+            .search("testing content", &provider, 6, 0.0, None)
+            .await?;
         assert!(!results.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_with_time_range_filters_daily_chunks_by_path_date() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db, "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "memory/2026-03-01.md",
+                "# March\n\nrelease planning and sprint notes",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index
+            .index_file(
+                "memory/2026-04-01.md",
+                "# April\n\nrelease planning and sprint notes",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Long Term\n\nrelease planning principles",
+                "long_term",
+                &provider,
+            )
+            .await?;
+
+        let results = index
+            .search(
+                "release planning",
+                &provider,
+                10,
+                0.0,
+                Some(TimeRange {
+                    from: Some("2026-03".to_string()),
+                    to: Some("2026-03".to_string()),
+                }),
+            )
+            .await?;
+
+        assert!(results.iter().any(|r| r.path == "memory/2026-03-01.md"));
+        assert!(results.iter().all(|r| r.path != "memory/2026-04-01.md"));
+        assert!(results.iter().any(|r| r.path == "MEMORY.md"));
         Ok(())
     }
 }
