@@ -315,8 +315,67 @@ impl HippocampusConsolidator {
                     )
                     .await;
             }
-            Err(error) => {
-                tracing::warn!(error = %error, "Patch parsing failed, falling back to full overwrite");
+            Err(first_error) => {
+                tracing::warn!(error = %first_error, "Patch parse failed, retrying with stricter prompt");
+
+                let retry_response = self
+                    .request_consolidation(
+                        CONSOLIDATION_INCREMENTAL_SYSTEM_PROMPT,
+                        build_incremental_user_prompt(current_memory, daily_sections),
+                    )
+                    .await?;
+                let retry_output = strip_markdown_fence(&retry_response.text);
+
+                match parse_patch(&retry_output) {
+                    Ok(patch) => {
+                        if patch.keep {
+                            tracing::info!(
+                                "Consolidation retry returned [KEEP]; leaving MEMORY.md unchanged"
+                            );
+                            let facts_extracted =
+                                self.extract_facts(&self.agent_id, daily_sections).await;
+                            return Ok(ConsolidationReport {
+                                daily_files_read,
+                                memory_updated: false,
+                                reindexed: false,
+                                facts_extracted,
+                                summary: "Consolidation returned [KEEP]; MEMORY.md unchanged."
+                                    .to_string(),
+                            });
+                        }
+
+                        let updated_memory = apply_patch(current_memory, &patch);
+                        return self
+                            .finalize_updated_memory(
+                                updated_memory,
+                                current_memory,
+                                daily_sections,
+                                daily_files_read,
+                                &[],
+                            )
+                            .await;
+                    }
+                    Err(second_error) => {
+                        tracing::warn!(
+                            error = %second_error,
+                            "Retry also failed, falling back to full overwrite"
+                        );
+                        if let Some(ref store) = self.memory_store {
+                            let _ = store
+                                .record_trace(
+                                    &self.agent_id,
+                                    "consolidation_fallback",
+                                    &serde_json::json!({
+                                        "first_error": first_error.to_string(),
+                                        "second_error": second_error.to_string(),
+                                    })
+                                    .to_string(),
+                                    None,
+                                )
+                                .await;
+                        }
+                    }
+                }
             }
         }
 
@@ -1946,6 +2005,20 @@ Working on Clawhive memory safety.
     fn parse_patch_empty_returns_error() {
         let result = parse_patch("   \n\t");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_patch_retry_on_malformed_first_attempt() {
+        let malformed = r#"[UPDATE]
+[OLD]Likes tea[/OLD]
+[NEW]Likes green tea[/NEW]"#;
+        assert!(parse_patch(malformed).is_err());
+
+        let well_formed = r#"[UPDATE]
+[OLD]Likes tea[/OLD]
+[NEW]Likes green tea[/NEW]
+[/UPDATE]"#;
+        assert!(parse_patch(well_formed).is_ok());
     }
 
     #[test]
