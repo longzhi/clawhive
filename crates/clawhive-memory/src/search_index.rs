@@ -106,6 +106,7 @@ pub struct SearchResult {
     pub source: String,
     pub start_line: i64,
     pub end_line: i64,
+    pub snippet: String,
     pub text: String,
     pub score: f64,
 }
@@ -1112,6 +1113,7 @@ impl SearchIndex {
                 source: item.source,
                 start_line: item.start_line,
                 end_line: item.end_line,
+                snippet: generate_snippet(&item.text, 200),
                 text: item.text,
                 score: if use_vectors {
                     (item.vector_score * self.search_config.vector_weight)
@@ -1469,6 +1471,22 @@ fn parse_time_boundary(value: &str, is_start: bool) -> Option<chrono::NaiveDate>
     };
     let next_start = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
     Some(next_start - chrono::Duration::days(1))
+}
+
+fn generate_snippet(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let truncated: String = text.chars().take(max_chars).collect();
+    if let Some((pos, _)) = truncated
+        .char_indices()
+        .rfind(|(_, c)| matches!(*c, '.' | '。' | '!' | '?' | '\n'))
+    {
+        format!("{}...", truncated[..=pos].trim_end())
+    } else {
+        format!("{}...", truncated.trim_end())
+    }
 }
 
 fn build_safe_fts_query(query: &str) -> String {
@@ -3005,6 +3023,41 @@ mod tests {
         assert!(results.iter().any(|r| r.path == "memory/2026-03-01.md"));
         assert!(results.iter().all(|r| r.path != "memory/2026-04-01.md"));
         assert!(results.iter().any(|r| r.path == "MEMORY.md"));
+        Ok(())
+    }
+
+    #[test]
+    fn generate_snippet_truncates_at_sentence_boundary() {
+        let text =
+            "First sentence. Second sentence. Third sentence is much longer and continues beyond the limit.";
+        let snippet = generate_snippet(text, 50);
+        assert!(snippet.len() <= 55);
+        assert!(snippet.ends_with("..."));
+        assert!(snippet.contains("First sentence."));
+    }
+
+    #[test]
+    fn generate_snippet_returns_full_text_when_short() {
+        let text = "Short text.";
+        let snippet = generate_snippet(text, 200);
+        assert_eq!(snippet, "Short text.");
+    }
+
+    #[tokio::test]
+    async fn search_returns_snippet_instead_of_full_chunk_text() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(db, "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let long_text = format!("# Notes\n\n{}", "Long sentence with details. ".repeat(20));
+
+        index
+            .index_file("memory/2026-03-20.md", &long_text, "daily", &provider)
+            .await?;
+
+        let results = index.search("details", &provider, 3, 0.0, None).await?;
+        assert!(!results.is_empty());
+        assert!(results[0].snippet.len() <= 230);
+        assert!(results[0].text.len() >= results[0].snippet.len());
         Ok(())
     }
 }

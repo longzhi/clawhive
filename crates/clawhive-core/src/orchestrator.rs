@@ -5519,6 +5519,7 @@ mod tests {
             source: source.to_string(),
             start_line: 0,
             end_line: 1,
+            snippet: text.to_string(),
             text: text.to_string(),
             score,
         }

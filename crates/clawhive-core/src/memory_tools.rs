@@ -150,19 +150,14 @@ fn format_memory_hit(hit: &MemoryHit) -> String {
             )
         }
         MemoryHit::Chunk(hit) => {
-            let snippet: String = hit.text.chars().take(200).collect();
-            let truncated = if hit.text.chars().count() > 200 {
-                "..."
-            } else {
-                ""
-            };
             format!(
-                "- [{path}:{start}-{end}] [{source}] (score: {score:.2}) {snippet}{truncated}\n",
+                "- [{path}:{start}-{end}] [{source}] (score: {score:.2}) {snippet}\n",
                 path = hit.path,
                 start = hit.start_line,
                 end = hit.end_line,
                 source = source_label(classify_chunk_source(&hit.source, &hit.path)),
                 score = hit.score,
+                snippet = hit.snippet,
             )
         }
     }
@@ -507,7 +502,7 @@ mod tests {
     use clawhive_memory::embedding::StubEmbeddingProvider;
     use clawhive_memory::fact_store::FactStore;
     use clawhive_memory::memory_lineage::MemoryLineageStore;
-    use clawhive_memory::search_index::SearchIndex;
+    use clawhive_memory::search_index::{SearchIndex, SearchResult};
     use clawhive_memory::{file_store::MemoryFileStore, MemoryStore};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -573,6 +568,24 @@ mod tests {
         assert_eq!(def.name, "memory_forget");
         assert!(def.input_schema["properties"]["content"].is_object());
         assert!(def.input_schema["properties"]["reason"].is_object());
+    }
+
+    #[test]
+    fn format_memory_hit_chunk_uses_snippet_field() {
+        let chunk = SearchResult {
+            chunk_id: "chunk-1".to_string(),
+            path: "MEMORY.md".to_string(),
+            source: "long_term".to_string(),
+            start_line: 1,
+            end_line: 2,
+            snippet: "short snippet...".to_string(),
+            text: "very long full chunk text that should not be printed directly".to_string(),
+            score: 0.9,
+        };
+
+        let rendered = format_memory_hit(&MemoryHit::Chunk(chunk));
+        assert!(rendered.contains("short snippet..."));
+        assert!(!rendered.contains("very long full chunk text"));
     }
 
     #[tokio::test]
