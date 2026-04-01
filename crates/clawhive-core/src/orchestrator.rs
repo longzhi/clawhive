@@ -482,6 +482,7 @@ pub struct Orchestrator {
     skill_install_state: Arc<SkillInstallState>,
     language_prefs: LanguagePrefs,
     pending_boundary_recoveries: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    compaction_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 /// Builder for [`Orchestrator`]. Use [`OrchestratorBuilder::new`] to start,
@@ -693,7 +694,16 @@ impl Orchestrator {
             skill_install_state: Arc::new(SkillInstallState::new(900)),
             language_prefs: LanguagePrefs::new(),
             pending_boundary_recoveries: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            compaction_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    async fn session_compaction_lock(&self, session_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.compaction_locks.lock().await;
+        locks
+            .entry(session_key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Handle `/model provider/model` — validate, persist, and apply model change.
@@ -1787,6 +1797,7 @@ impl Orchestrator {
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
+                &session_result.session.session_key.0,
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt),
@@ -2173,6 +2184,7 @@ impl Orchestrator {
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
+                &session_result.session.session_key.0,
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt.clone()),
@@ -2274,6 +2286,7 @@ impl Orchestrator {
         &self,
         view: &ConfigView,
         agent_id: &str,
+        session_key: &str,
         primary: &str,
         fallbacks: &[String],
         system: Option<String>,
@@ -2350,8 +2363,38 @@ impl Orchestrator {
 
             let _ = ctx_mgr.check_context(&messages);
 
-            let (compacted_messages, compaction_result) =
-                ctx_mgr.ensure_within_limits(primary, messages).await?;
+            let compaction_lock = self.session_compaction_lock(session_key).await;
+            let guard = match compaction_lock.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    tracing::debug!(session_key = %session_key, "Compaction already in progress, skipping");
+                    continue;
+                }
+            };
+
+            let messages_before_compaction = messages.clone();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                ctx_mgr.ensure_within_limits(primary, messages),
+            )
+            .await;
+
+            drop(guard);
+
+            let (compacted_messages, compaction_result) = match result {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => {
+                    tracing::error!(session_key = %session_key, "Compaction failed: {error}");
+                    (messages_before_compaction, None)
+                }
+                Err(_) => {
+                    tracing::error!(
+                        session_key = %session_key,
+                        "Compaction timed out after 60s, skipping"
+                    );
+                    (messages_before_compaction, None)
+                }
+            };
             messages = compacted_messages;
 
             if let Some(ref result) = compaction_result {
@@ -2913,6 +2956,7 @@ impl Orchestrator {
             .tool_use_loop(
                 view,
                 agent_id,
+                &fresh_session.session_key.0,
                 &agent.model_policy.primary,
                 &agent.model_policy.fallbacks,
                 Some(system_prompt),
@@ -7067,6 +7111,15 @@ Body"#,
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn compaction_lock_prevents_concurrent_access() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = lock.try_lock().unwrap();
+        assert!(lock.try_lock().is_err());
+        drop(guard);
+        assert!(lock.try_lock().is_ok());
     }
 
     #[test]
