@@ -578,7 +578,7 @@ async fn start_bot(
 
     let router_for_consolidation = Arc::new(build_router_from_config(&config).await);
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
-    let consolidation_interval_hours = config.main.consolidation_interval_hours;
+    let consolidation_schedule = config.main.consolidation_schedule.clone();
     let archive_retention_days = config.main.archive_retention_days;
 
     let mut consolidators: Vec<Arc<HippocampusConsolidator>> = Vec::new();
@@ -591,8 +591,20 @@ async fn start_bot(
         let workspace_dir = workspace.root().to_path_buf();
         let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
         let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
-        let search_index =
-            clawhive_memory::search_index::SearchIndex::new(memory.db(), &agent_config.agent_id);
+        let search_index = clawhive_memory::search_index::SearchIndex::new_with_config(
+            memory.db(),
+            &agent_config.agent_id,
+            clawhive_memory::search_index::SearchConfig {
+                vector_weight: config.main.memory_search.vector_weight,
+                bm25_weight: config.main.memory_search.bm25_weight,
+                decay_half_life_days: config.main.memory_search.decay_half_life_days,
+                mmr_lambda: config.main.memory_search.mmr_lambda,
+                access_boost_factor: config.main.memory_search.access_boost_factor,
+                max_results: config.main.memory_search.max_results,
+                min_score: config.main.memory_search.min_score,
+                embedding_cache_ttl_days: config.main.memory_search.embedding_cache_ttl_days,
+            },
+        );
 
         {
             let idx = search_index.clone();
@@ -634,12 +646,12 @@ async fn start_bot(
 
     let scheduler = ConsolidationScheduler::new(
         consolidators,
-        consolidation_interval_hours,
+        consolidation_schedule.clone(),
         archive_retention_days,
     );
     let _consolidation_handle = scheduler.start();
     tracing::info!(
-        interval_hours = consolidation_interval_hours,
+        schedule = %consolidation_schedule,
         agent_count = config.agents.iter().filter(|a| a.enabled).count(),
         "Hippocampus consolidation scheduler started for all agents"
     );
@@ -723,7 +735,7 @@ async fn start_bot(
                     mention_target: None,
                     message_id: None,
                     attachments: vec![],
-                    message_source: None,
+                    message_source: Some("heartbeat".into()),
                 };
 
                 tracing::debug!("Sending heartbeat to agent {}", agent_id);

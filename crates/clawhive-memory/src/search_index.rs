@@ -26,6 +26,34 @@ struct SessionIndexUnit {
 pub struct SearchIndex {
     db: Arc<Mutex<Connection>>,
     agent_id: String,
+    search_config: SearchConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    pub vector_weight: f64,
+    pub bm25_weight: f64,
+    pub decay_half_life_days: u64,
+    pub mmr_lambda: f64,
+    pub access_boost_factor: f64,
+    pub max_results: usize,
+    pub min_score: f64,
+    pub embedding_cache_ttl_days: u64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            vector_weight: 0.7,
+            bm25_weight: 0.3,
+            decay_half_life_days: 30,
+            mmr_lambda: 0.7,
+            access_boost_factor: 0.2,
+            max_results: 6,
+            min_score: 0.35,
+            embedding_cache_ttl_days: 90,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,10 +69,23 @@ pub struct SearchResult {
 
 impl SearchIndex {
     pub fn new(db: Arc<Mutex<Connection>>, agent_id: impl Into<String>) -> Self {
+        Self::new_with_config(db, agent_id, SearchConfig::default())
+    }
+
+    pub fn new_with_config(
+        db: Arc<Mutex<Connection>>,
+        agent_id: impl Into<String>,
+        search_config: SearchConfig,
+    ) -> Self {
         Self {
             db,
             agent_id: agent_id.into(),
+            search_config,
         }
+    }
+
+    pub fn config(&self) -> &SearchConfig {
+        &self.search_config
     }
 
     pub fn ensure_vec_table(&self, dimensions: usize) -> Result<()> {
@@ -722,7 +763,11 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
 
-        let target_results = if max_results == 0 { 6 } else { max_results };
+        let target_results = if max_results == 0 {
+            self.search_config.max_results
+        } else {
+            max_results
+        };
         let candidate_limit = (target_results.saturating_mul(4)).max(1);
         let use_vectors = provider.is_semantic();
 
@@ -985,7 +1030,8 @@ impl SearchIndex {
                 end_line: item.end_line,
                 text: item.text,
                 score: if use_vectors {
-                    (item.vector_score * 0.7) + (item.bm25_score * 0.3)
+                    (item.vector_score * self.search_config.vector_weight)
+                        + (item.bm25_score * self.search_config.bm25_weight)
                 } else {
                     item.bm25_score // BM25-only mode
                 },
@@ -995,7 +1041,7 @@ impl SearchIndex {
 
         // --- Temporal Decay ---
         // Boost recent memories, decay older ones (half-life = 30 days)
-        let half_life_days = 30.0_f64;
+        let half_life_days = self.search_config.decay_half_life_days as f64;
         let decay_lambda = (2.0_f64).ln() / half_life_days;
         let today = chrono::Utc::now().date_naive();
 
@@ -1042,7 +1088,9 @@ impl SearchIndex {
                     for result in &mut results {
                         let count = counts.get(&result.chunk_id).copied().unwrap_or(0);
                         if count > 0 {
-                            result.score *= 1.0 + (1.0 + count as f64).ln() * 0.2;
+                            result.score *= 1.0
+                                + (1.0 + count as f64).ln()
+                                    * self.search_config.access_boost_factor;
                         }
                     }
                 }
@@ -1053,7 +1101,7 @@ impl SearchIndex {
 
         // --- MMR (Maximal Marginal Relevance) ---
         // Re-rank to reduce redundancy (lambda=0.7: balance relevance + diversity)
-        let mmr_lambda = 0.7_f64;
+        let mmr_lambda = self.search_config.mmr_lambda;
         let mmr_results = mmr_rerank(&results, mmr_lambda, target_results);
 
         // Bump access_count for returned chunks (fire-and-forget)
@@ -1369,6 +1417,39 @@ mod tests {
         value: f32,
     }
 
+    #[derive(Clone)]
+    struct KeywordVectorProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for KeywordVectorProvider {
+        async fn embed(&self, texts: &[String]) -> Result<EmbeddingResult> {
+            let embeddings = texts
+                .iter()
+                .map(|text| {
+                    if text.trim() == "keyword" || text.contains("vector-target") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect();
+
+            Ok(EmbeddingResult {
+                embeddings,
+                model: "keyword-vector".to_string(),
+                dimensions: 2,
+            })
+        }
+
+        fn model_id(&self) -> &str {
+            "keyword-vector"
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
     impl NamedStubEmbeddingProvider {
         fn new(dims: usize, model: &str, value: f32) -> Self {
             Self {
@@ -1675,6 +1756,77 @@ mod tests {
 
         let results = index.search("keyword", &provider, 3, 0.0).await?;
         assert!(results.len() <= 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_uses_configured_weights_not_hardcoded() -> Result<()> {
+        let provider = KeywordVectorProvider;
+
+        let db_bm25 = test_db()?;
+        let index_bm25 = SearchIndex::new_with_config(
+            Arc::clone(&db_bm25),
+            "test-agent",
+            SearchConfig {
+                vector_weight: 0.0,
+                bm25_weight: 1.0,
+                min_score: 0.0,
+                ..SearchConfig::default()
+            },
+        );
+
+        index_bm25
+            .index_file(
+                "memory/bm25-wins.md",
+                "# Repeated\n\nkeyword keyword keyword",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index_bm25
+            .index_file(
+                "memory/vector-wins.md",
+                "# Vector\n\nvector-target",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let bm25_results = index_bm25.search("keyword", &provider, 2, 0.0).await?;
+        assert_eq!(bm25_results[0].path, "memory/bm25-wins.md");
+
+        let db_vector = test_db()?;
+        let index_vector = SearchIndex::new_with_config(
+            Arc::clone(&db_vector),
+            "test-agent",
+            SearchConfig {
+                vector_weight: 1.0,
+                bm25_weight: 0.0,
+                min_score: 0.0,
+                ..SearchConfig::default()
+            },
+        );
+
+        index_vector
+            .index_file(
+                "memory/bm25-wins.md",
+                "# Repeated\n\nkeyword keyword keyword",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index_vector
+            .index_file(
+                "memory/vector-wins.md",
+                "# Vector\n\nvector-target",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let vector_results = index_vector.search("keyword", &provider, 2, 0.0).await?;
+        assert_eq!(vector_results[0].path, "memory/vector-wins.md");
+
         Ok(())
     }
 

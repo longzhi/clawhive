@@ -27,8 +27,20 @@ pub(crate) async fn run(root: &Path, agent_id_override: Option<&str>) -> Result<
     let workspace_dir = consolidation_workspace.root().to_path_buf();
     let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
     let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
-    let consolidation_search_index =
-        clawhive_memory::search_index::SearchIndex::new(memory.db(), &consolidation_agent_id);
+    let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new_with_config(
+        memory.db(),
+        &consolidation_agent_id,
+        clawhive_memory::search_index::SearchConfig {
+            vector_weight: config.main.memory_search.vector_weight,
+            bm25_weight: config.main.memory_search.bm25_weight,
+            decay_half_life_days: config.main.memory_search.decay_half_life_days,
+            mmr_lambda: config.main.memory_search.mmr_lambda,
+            access_boost_factor: config.main.memory_search.access_boost_factor,
+            max_results: config.main.memory_search.max_results,
+            min_score: config.main.memory_search.min_score,
+            embedding_cache_ttl_days: config.main.memory_search.embedding_cache_ttl_days,
+        },
+    );
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
     let consolidator = Arc::new(
         HippocampusConsolidator::new(
@@ -47,7 +59,7 @@ pub(crate) async fn run(root: &Path, agent_id_override: Option<&str>) -> Result<
 
     let scheduler = ConsolidationScheduler::new(
         vec![consolidator],
-        config.main.consolidation_interval_hours,
+        config.main.consolidation_schedule.clone(),
         config.main.archive_retention_days,
     );
     println!("Running hippocampus consolidation...");

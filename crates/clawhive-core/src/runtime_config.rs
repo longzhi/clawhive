@@ -17,7 +17,7 @@ use clawhive_memory::embedding::{
     StubEmbeddingProvider,
 };
 use clawhive_memory::file_store::MemoryFileStore;
-use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::search_index::{SearchConfig, SearchIndex};
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
     custom, minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
@@ -26,7 +26,7 @@ use clawhive_provider::{
 };
 use futures_core::Stream;
 
-use crate::config::{ClawhiveConfig, ProviderConfig};
+use crate::config::{ClawhiveConfig, MemorySearchConfig, ProviderConfig};
 use crate::config_view::ConfigView;
 use crate::orchestrator::build_tool_registry;
 use crate::persona::{load_persona_from_workspace, Persona};
@@ -39,6 +39,19 @@ fn build_http_client(timeout_secs: u64) -> reqwest::Client {
         .timeout(Duration::from_secs(timeout_secs))
         .build()
         .unwrap_or_default()
+}
+
+fn to_search_config(config: &MemorySearchConfig) -> SearchConfig {
+    SearchConfig {
+        vector_weight: config.vector_weight,
+        bm25_weight: config.bm25_weight,
+        decay_half_life_days: config.decay_half_life_days,
+        mmr_lambda: config.mmr_lambda,
+        access_boost_factor: config.access_boost_factor,
+        max_results: config.max_results,
+        min_score: config.min_score,
+        embedding_cache_ttl_days: config.embedding_cache_ttl_days,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -658,7 +671,11 @@ pub async fn build_config_view(
     let personas = build_personas_from_config(root, config).await;
     let embedding_provider = build_embedding_provider(config).await;
     let file_store = MemoryFileStore::new(root);
-    let search_index = SearchIndex::new(memory.db(), "");
+    let search_index = SearchIndex::new_with_config(
+        memory.db(),
+        "",
+        to_search_config(&config.main.memory_search),
+    );
     let brave_api_key = config
         .main
         .tools

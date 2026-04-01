@@ -626,6 +626,7 @@ impl Orchestrator {
         project_root: Option<std::path::PathBuf>,
     ) -> Self {
         let router = Arc::new(config_view.router.clone());
+        let search_config = search_index.config().clone();
 
         // Build per-agent workspace states
         let effective_project_root = project_root.unwrap_or_else(|| workspace_root.clone());
@@ -643,7 +644,11 @@ impl Orchestrator {
                 file_store: MemoryFileStore::new(&ws_root),
                 session_writer: SessionWriter::new(&ws_root),
                 session_reader: SessionReader::new(&ws_root),
-                search_index: SearchIndex::new(memory.db(), agent_id),
+                search_index: SearchIndex::new_with_config(
+                    memory.db(),
+                    agent_id,
+                    search_config.clone(),
+                ),
                 access_gate: gate,
             };
             agent_workspace_map.insert(agent_id.clone(), state);
@@ -1603,7 +1608,12 @@ impl Orchestrator {
 
         let system_prompt = view
             .persona(agent_id)
-            .map(|persona| persona.assembled_system_prompt())
+            .map(|persona| {
+                let mode = super::persona::PromptMode::from_message_source(
+                    inbound.message_source.as_deref(),
+                );
+                persona.assembled_system_prompt_for_mode(mode)
+            })
             .unwrap_or_default();
         let active_skills = self.active_skill_registry();
         let skill_summary = active_skills.summary_prompt();
@@ -1997,7 +2007,12 @@ impl Orchestrator {
 
         let system_prompt = view
             .persona(agent_id)
-            .map(|p| p.assembled_system_prompt())
+            .map(|p| {
+                let mode = super::persona::PromptMode::from_message_source(
+                    inbound.message_source.as_deref(),
+                );
+                p.assembled_system_prompt_for_mode(mode)
+            })
             .unwrap_or_default();
         let active_skills = self.active_skill_registry();
         let skill_summary = active_skills.summary_prompt();
@@ -3831,16 +3846,18 @@ impl Orchestrator {
                 &agent.model_policy.fallbacks,
                 Some(system),
                 llm_messages,
-                512,
+                1024,
             )
             .await
         {
             Ok(resp) => {
                 let Some(candidates) = parse_candidates(&resp.text) else {
+                    let parse_error = crate::memory_summary::parse_candidates_error(&resp.text);
                     tracing::warn!(
                         source,
                         raw_len = resp.text.len(),
                         raw_preview = %resp.text.chars().take(300).collect::<String>(),
+                        %parse_error,
                         "Failed to parse structured session summary JSON"
                     );
                     return false;
@@ -4689,28 +4706,20 @@ pub fn detect_skill_install_intent(text: &str) -> Option<String> {
 /// Filter NO_REPLY responses.
 /// Returns empty string if the response is just "NO_REPLY" (with optional whitespace).
 /// Also strips leading/trailing "NO_REPLY" from responses.
+/// Note: HEARTBEAT_OK is NOT filtered here — it's a meaningful ack signal
+/// handled by the heartbeat caller (start.rs) via is_heartbeat_ack().
 fn filter_no_reply(text: &str) -> String {
     let trimmed = text.trim();
 
-    // Exact match
-    if trimmed == "NO_REPLY" || trimmed == "HEARTBEAT_OK" {
+    if trimmed == "NO_REPLY" {
         return String::new();
     }
 
-    // Strip from beginning or end
     let text = trimmed
         .strip_prefix("NO_REPLY")
         .unwrap_or(trimmed)
         .strip_suffix("NO_REPLY")
         .unwrap_or(trimmed)
-        .trim();
-
-    // Also handle HEARTBEAT_OK
-    let text = text
-        .strip_prefix("HEARTBEAT_OK")
-        .unwrap_or(text)
-        .strip_suffix("HEARTBEAT_OK")
-        .unwrap_or(text)
         .trim();
 
     text.to_string()

@@ -12,7 +12,7 @@ use clawhive_memory::fact_store::FactStore;
 use clawhive_memory::file_audit::{audit_memory_file, cleanup_memory_file, MemoryFileKind};
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::memory_lineage::MemoryLineageStore;
-use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::search_index::{SearchConfig, SearchIndex};
 use clawhive_memory::SessionReader;
 
 use crate::runtime::bootstrap::{bootstrap, build_embedding_provider};
@@ -270,7 +270,23 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
 
                 if !dirty_sources.is_empty() {
                     let session_reader = SessionReader::new(&workspace_dir);
-                    let search_index = SearchIndex::new(memory.db(), &agent_id);
+                    let search_index = SearchIndex::new_with_config(
+                        memory.db(),
+                        &agent_id,
+                        SearchConfig {
+                            vector_weight: config.main.memory_search.vector_weight,
+                            bm25_weight: config.main.memory_search.bm25_weight,
+                            decay_half_life_days: config.main.memory_search.decay_half_life_days,
+                            mmr_lambda: config.main.memory_search.mmr_lambda,
+                            access_boost_factor: config.main.memory_search.access_boost_factor,
+                            max_results: config.main.memory_search.max_results,
+                            min_score: config.main.memory_search.min_score,
+                            embedding_cache_ttl_days: config
+                                .main
+                                .memory_search
+                                .embedding_cache_ttl_days,
+                        },
+                    );
                     let embedding_provider = build_embedding_provider(&config).await;
                     search_index
                         .index_dirty(
@@ -290,7 +306,20 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
             let workspace_dir = root.join("workspaces").join(&agent_id);
             let file_store = MemoryFileStore::new(&workspace_dir);
             let session_reader = SessionReader::new(&workspace_dir);
-            let search_index = SearchIndex::new(memory.db(), &agent_id);
+            let search_index = SearchIndex::new_with_config(
+                memory.db(),
+                &agent_id,
+                SearchConfig {
+                    vector_weight: config.main.memory_search.vector_weight,
+                    bm25_weight: config.main.memory_search.bm25_weight,
+                    decay_half_life_days: config.main.memory_search.decay_half_life_days,
+                    mmr_lambda: config.main.memory_search.mmr_lambda,
+                    access_boost_factor: config.main.memory_search.access_boost_factor,
+                    max_results: config.main.memory_search.max_results,
+                    min_score: config.main.memory_search.min_score,
+                    embedding_cache_ttl_days: config.main.memory_search.embedding_cache_ttl_days,
+                },
+            );
             let embedding_provider = build_embedding_provider(&config).await;
 
             println!("Rebuilding session index for agent '{agent_id}'...");
@@ -433,7 +462,20 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
             let workspace_dir = root.to_path_buf();
             let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
             let session_reader = clawhive_memory::session::SessionReader::new(&workspace_dir);
-            let search_index = clawhive_memory::search_index::SearchIndex::new(memory.db(), "");
+            let search_index = clawhive_memory::search_index::SearchIndex::new_with_config(
+                memory.db(),
+                "",
+                clawhive_memory::search_index::SearchConfig {
+                    vector_weight: config.main.memory_search.vector_weight,
+                    bm25_weight: config.main.memory_search.bm25_weight,
+                    decay_half_life_days: config.main.memory_search.decay_half_life_days,
+                    mmr_lambda: config.main.memory_search.mmr_lambda,
+                    access_boost_factor: config.main.memory_search.access_boost_factor,
+                    max_results: config.main.memory_search.max_results,
+                    min_score: config.main.memory_search.min_score,
+                    embedding_cache_ttl_days: config.main.memory_search.embedding_cache_ttl_days,
+                },
+            );
 
             let embedding_provider = build_embedding_provider(&config).await;
             println!("Rebuilding search index...");

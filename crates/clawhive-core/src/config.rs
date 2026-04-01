@@ -337,6 +337,10 @@ fn default_consolidation_interval_hours() -> u64 {
     24
 }
 
+fn default_consolidation_schedule() -> String {
+    "0 4 * * *".to_string()
+}
+
 fn default_archive_retention_days() -> u64 {
     30
 }
@@ -351,8 +355,12 @@ pub struct MainConfig {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub memory_search: MemorySearchConfig,
     #[serde(default = "default_consolidation_interval_hours")]
     pub consolidation_interval_hours: u64,
+    #[serde(default = "default_consolidation_schedule")]
+    pub consolidation_schedule: String,
     #[serde(default = "default_archive_retention_days")]
     pub archive_retention_days: u64,
     #[serde(default = "default_log_level")]
@@ -388,7 +396,9 @@ impl Default for MainConfig {
             },
             embedding: EmbeddingConfig::default(),
             tools: ToolsConfig::default(),
+            memory_search: MemorySearchConfig::default(),
             consolidation_interval_hours: default_consolidation_interval_hours(),
+            consolidation_schedule: default_consolidation_schedule(),
             archive_retention_days: default_archive_retention_days(),
             log_level: default_log_level(),
             web_password_hash: None,
@@ -671,6 +681,73 @@ pub struct MemoryPolicyConfig {
     pub max_injected_chars: usize,
     #[serde(default = "default_daily_summary_interval")]
     pub daily_summary_interval: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySearchConfig {
+    #[serde(default = "default_vector_weight")]
+    pub vector_weight: f64,
+    #[serde(default = "default_bm25_weight")]
+    pub bm25_weight: f64,
+    #[serde(default = "default_decay_half_life_days")]
+    pub decay_half_life_days: u64,
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f64,
+    #[serde(default = "default_access_boost_factor")]
+    pub access_boost_factor: f64,
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    #[serde(default = "default_min_score")]
+    pub min_score: f64,
+    #[serde(default = "default_embedding_cache_ttl_days")]
+    pub embedding_cache_ttl_days: u64,
+}
+
+fn default_vector_weight() -> f64 {
+    0.7
+}
+
+fn default_bm25_weight() -> f64 {
+    0.3
+}
+
+fn default_decay_half_life_days() -> u64 {
+    30
+}
+
+fn default_mmr_lambda() -> f64 {
+    0.7
+}
+
+fn default_access_boost_factor() -> f64 {
+    0.2
+}
+
+fn default_max_results() -> usize {
+    6
+}
+
+fn default_min_score() -> f64 {
+    0.35
+}
+
+fn default_embedding_cache_ttl_days() -> u64 {
+    90
+}
+
+impl Default for MemorySearchConfig {
+    fn default() -> Self {
+        Self {
+            vector_weight: default_vector_weight(),
+            bm25_weight: default_bm25_weight(),
+            decay_half_life_days: default_decay_half_life_days(),
+            mmr_lambda: default_mmr_lambda(),
+            access_boost_factor: default_access_boost_factor(),
+            max_results: default_max_results(),
+            min_score: default_min_score(),
+            embedding_cache_ttl_days: default_embedding_cache_ttl_days(),
+        }
+    }
 }
 
 fn default_max_injected_chars() -> usize {
@@ -1108,6 +1185,32 @@ channels: {}
     }
 
     #[test]
+    fn memory_search_config_deserializes_with_all_defaults() {
+        let yaml = r#"
+app:
+  name: test
+runtime:
+  max_concurrent: 2
+features:
+  multi_agent: false
+  sub_agent: false
+  tui: false
+  cli: false
+channels: {}
+"#;
+        let config: MainConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.memory_search.vector_weight, 0.7);
+        assert_eq!(config.memory_search.bm25_weight, 0.3);
+        assert_eq!(config.memory_search.decay_half_life_days, 30);
+        assert_eq!(config.memory_search.mmr_lambda, 0.7);
+        assert_eq!(config.memory_search.access_boost_factor, 0.2);
+        assert_eq!(config.memory_search.max_results, 6);
+        assert_eq!(config.memory_search.min_score, 0.35);
+        assert_eq!(config.memory_search.embedding_cache_ttl_days, 90);
+    }
+
+    #[test]
     fn memory_policy_config_defaults_max_injected_chars() {
         let yaml = r#"
 mode: session
@@ -1293,7 +1396,9 @@ auth:
                 },
                 embedding: EmbeddingConfig::default(),
                 tools: ToolsConfig::default(),
+                memory_search: MemorySearchConfig::default(),
                 consolidation_interval_hours: 24,
+                consolidation_schedule: default_consolidation_schedule(),
                 archive_retention_days: 30,
                 log_level: default_log_level(),
                 web_password_hash: None,
