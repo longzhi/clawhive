@@ -401,6 +401,14 @@ fn migrations() -> Vec<Migration> {
             ALTER TABLE chunks ADD COLUMN last_accessed TEXT;
             "#,
         ),
+        (
+            22,
+            r#"
+            UPDATE chunks
+            SET last_accessed = updated_at
+            WHERE last_accessed IS NULL;
+            "#,
+        ),
     ]
 }
 
@@ -436,4 +444,72 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_22_backfills_null_last_accessed_from_updated_at() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                embedding TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT NOT NULL DEFAULT '',
+                last_accessed TEXT
+            );
+
+            CREATE TABLE __schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            WITH RECURSIVE versions(v) AS (
+                SELECT 1
+                UNION ALL
+                SELECT v + 1 FROM versions WHERE v < 21
+            )
+            INSERT INTO __schema_version(version, applied_at)
+            SELECT v, datetime('now') FROM versions;
+            "#,
+        )?;
+
+        conn.execute(
+            "INSERT INTO chunks(id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, access_count, agent_id, last_accessed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, '', ?8, 0, '', NULL)",
+            rusqlite::params![
+                "c1",
+                "MEMORY.md",
+                "long_term",
+                1,
+                2,
+                "h1",
+                "text",
+                "2026-04-01T10:00:00Z"
+            ],
+        )?;
+
+        run_migrations(&conn)?;
+
+        let last_accessed: String = conn.query_row(
+            "SELECT last_accessed FROM chunks WHERE id = 'c1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(last_accessed, "2026-04-01T10:00:00Z");
+
+        Ok(())
+    }
 }

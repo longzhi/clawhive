@@ -81,8 +81,12 @@ fn classify_temperature(
 ) -> Temperature {
     let days_since = last_accessed
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|time| (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_days())
-        .unwrap_or(i64::MAX);
+        .map(|time| (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_days());
+
+    let days_since = match days_since {
+        Some(days_since) => days_since,
+        None => return Temperature::Warm,
+    };
 
     if access_count >= access_protect_count as i64 {
         if days_since <= hot_days as i64 {
@@ -784,7 +788,6 @@ impl SearchIndex {
             match result {
                 Ok(count) => {
                     total += count;
-                    dirty_store.mark_processed(&item.id).await?;
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -794,6 +797,7 @@ impl SearchIndex {
                         %error,
                         "failed to index dirty source"
                     );
+                    return Err(error);
                 }
             }
         }
@@ -815,22 +819,34 @@ impl SearchIndex {
             return Ok(0);
         }
 
-        let count = self
+        match self
             .index_dirty(file_store, reader, provider, batch_limit)
-            .await?;
+            .await
+        {
+            Ok(count) => {
+                for item in &pending {
+                    dirty_store.mark_processed(&item.id).await?;
+                }
 
-        for item in &pending {
-            dirty_store.mark_processed(&item.id).await?;
+                tracing::info!(
+                    agent_id = %agent_id,
+                    pending = pending.len(),
+                    indexed = count,
+                    "Processed dirty sources"
+                );
+
+                Ok(count)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    pending = pending.len(),
+                    %error,
+                    "Dirty source indexing failed, items kept pending for retry"
+                );
+                Err(error)
+            }
         }
-
-        tracing::info!(
-            agent_id = %agent_id,
-            pending = pending.len(),
-            indexed = count,
-            "Processed dirty sources"
-        );
-
-        Ok(count)
     }
 
     pub fn needs_reindex(&self, provider: &dyn EmbeddingProvider) -> Result<bool> {
@@ -2045,7 +2061,11 @@ mod tests {
             classify_temperature(Some(old.as_str()), 0, 7, 30, 5),
             Temperature::Cold
         );
-        assert_eq!(classify_temperature(None, 0, 7, 30, 5), Temperature::Cold);
+        assert_eq!(classify_temperature(None, 0, 7, 30, 5), Temperature::Warm);
+        assert_eq!(
+            classify_temperature(Some("not-a-timestamp"), 0, 7, 30, 5),
+            Temperature::Warm
+        );
         assert_eq!(
             classify_temperature(Some(old.as_str()), 10, 7, 30, 5),
             Temperature::Warm
@@ -2641,6 +2661,42 @@ mod tests {
         assert!(indexed > 0);
         assert_eq!(dirty.pending_count("test-agent").await?, 0);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_dirty_sources_keeps_pending_on_index_failure() -> Result<()> {
+        let dir = TempDir::new()?;
+        let file_store = MemoryFileStore::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
+
+        let db = test_db()?;
+        let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                "unsupported_kind",
+                "bad-ref",
+                "forced_failure",
+            )
+            .await?;
+
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        let result = index
+            .process_dirty_sources(
+                &dirty,
+                "test-agent",
+                &file_store,
+                &session_reader,
+                &provider,
+                10,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(dirty.pending_count("test-agent").await?, 1);
         Ok(())
     }
 
