@@ -8,8 +8,8 @@ use tokio::task;
 
 use crate::chunker::{chunk_markdown, ChunkerConfig};
 use crate::dirty_sources::{
-    DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_EMBEDDING_MODEL, DIRTY_KIND_FACT,
-    DIRTY_KIND_MEMORY_FILE, DIRTY_KIND_SCHEMA, DIRTY_KIND_SESSION,
+    DirtySource, DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_EMBEDDING_MODEL,
+    DIRTY_KIND_FACT, DIRTY_KIND_MEMORY_FILE, DIRTY_KIND_SCHEMA, DIRTY_KIND_SESSION,
 };
 use crate::embedding::EmbeddingProvider;
 use crate::session::{SessionEntry, SessionReader};
@@ -749,47 +749,10 @@ impl SearchIndex {
         let mut total = 0;
 
         for item in pending {
-            let result: Result<usize> = match item.source_kind.as_str() {
-                DIRTY_KIND_MEMORY_FILE => {
-                    let content = file_store.read_long_term().await?;
-                    self.index_file("MEMORY.md", &content, "long_term", provider)
-                        .await
-                }
-                DIRTY_KIND_DAILY_FILE => {
-                    let path = file_store.workspace_dir().join(&item.source_ref);
-                    match tokio::fs::read_to_string(&path).await {
-                        Ok(content) => {
-                            self.index_file(&item.source_ref, &content, "daily", provider)
-                                .await
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            self.delete_indexed_path(&item.source_ref).await?;
-                            Ok(0)
-                        }
-                        Err(error) => Err(error.into()),
-                    }
-                }
-                DIRTY_KIND_SESSION => {
-                    if reader.session_exists(&item.source_ref).await {
-                        self.index_session(&item.source_ref, reader, provider).await
-                    } else {
-                        self.cleanup_stale_session_paths(&item.source_ref, &[])
-                            .await?;
-                        Ok(0)
-                    }
-                }
-                DIRTY_KIND_FACT => Ok(0),
-                DIRTY_KIND_SCHEMA | DIRTY_KIND_EMBEDDING_MODEL => {
-                    self.index_all(file_store, reader, provider).await
-                }
-                other => Err(anyhow!("unsupported dirty source kind: {other}")),
-            };
-
-            match result {
-                Ok(count) => {
-                    total += count;
-                }
-                Err(error) => {
+            let count = self
+                .index_single_dirty_item(&item, file_store, reader, provider)
+                .await
+                .inspect_err(|error| {
                     tracing::warn!(
                         agent_id = %self.agent_id,
                         source_kind = %item.source_kind,
@@ -797,12 +760,55 @@ impl SearchIndex {
                         %error,
                         "failed to index dirty source"
                     );
-                    return Err(error);
-                }
-            }
+                })?;
+            total += count;
         }
 
         Ok(total)
+    }
+
+    async fn index_single_dirty_item(
+        &self,
+        item: &DirtySource,
+        file_store: &crate::file_store::MemoryFileStore,
+        reader: &SessionReader,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<usize> {
+        match item.source_kind.as_str() {
+            DIRTY_KIND_MEMORY_FILE => {
+                let content = file_store.read_long_term().await?;
+                self.index_file("MEMORY.md", &content, "long_term", provider)
+                    .await
+            }
+            DIRTY_KIND_DAILY_FILE => {
+                let path = file_store.workspace_dir().join(&item.source_ref);
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(content) => {
+                        self.index_file(&item.source_ref, &content, "daily", provider)
+                            .await
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        self.delete_indexed_path(&item.source_ref).await?;
+                        Ok(0)
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            }
+            DIRTY_KIND_SESSION => {
+                if reader.session_exists(&item.source_ref).await {
+                    self.index_session(&item.source_ref, reader, provider).await
+                } else {
+                    self.cleanup_stale_session_paths(&item.source_ref, &[])
+                        .await?;
+                    Ok(0)
+                }
+            }
+            DIRTY_KIND_FACT => Ok(0),
+            DIRTY_KIND_SCHEMA | DIRTY_KIND_EMBEDDING_MODEL => {
+                self.index_all(file_store, reader, provider).await
+            }
+            other => Err(anyhow!("unsupported dirty source kind: {other}")),
+        }
     }
 
     pub async fn process_dirty_sources(
@@ -819,34 +825,43 @@ impl SearchIndex {
             return Ok(0);
         }
 
-        match self
-            .index_dirty(file_store, reader, provider, batch_limit)
-            .await
-        {
-            Ok(count) => {
-                for item in &pending {
+        let mut total = 0;
+        let mut succeeded = 0;
+        let mut failed = 0;
+
+        for item in &pending {
+            match self
+                .index_single_dirty_item(item, file_store, reader, provider)
+                .await
+            {
+                Ok(count) => {
                     dirty_store.mark_processed(&item.id).await?;
+                    total += count;
+                    succeeded += 1;
                 }
-
-                tracing::info!(
-                    agent_id = %agent_id,
-                    pending = pending.len(),
-                    indexed = count,
-                    "Processed dirty sources"
-                );
-
-                Ok(count)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    pending = pending.len(),
-                    %error,
-                    "Dirty source indexing failed, items kept pending for retry"
-                );
-                Err(error)
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        source_kind = %item.source_kind,
+                        source_ref = %item.source_ref,
+                        %error,
+                        "Skipping failed dirty source, will retry next cycle"
+                    );
+                    failed += 1;
+                }
             }
         }
+
+        tracing::info!(
+            agent_id = %agent_id,
+            pending = pending.len(),
+            succeeded,
+            failed,
+            indexed = total,
+            "Processed dirty sources"
+        );
+
+        Ok(total)
     }
 
     pub fn needs_reindex(&self, provider: &dyn EmbeddingProvider) -> Result<bool> {
@@ -2669,9 +2684,20 @@ mod tests {
         let dir = TempDir::new()?;
         let file_store = MemoryFileStore::new(dir.path());
         let session_reader = SessionReader::new(dir.path());
+        file_store
+            .write_long_term("# Long\n\nrecoverable item")
+            .await?;
 
         let db = test_db()?;
         let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_MEMORY_FILE,
+                "MEMORY.md",
+                "memory_written",
+            )
+            .await?;
         dirty
             .enqueue(
                 "test-agent",
@@ -2684,7 +2710,7 @@ mod tests {
         let index = SearchIndex::new(Arc::clone(&db), "test-agent");
         let provider = StubEmbeddingProvider::new(8);
 
-        let result = index
+        let indexed = index
             .process_dirty_sources(
                 &dirty,
                 "test-agent",
@@ -2693,10 +2719,88 @@ mod tests {
                 &provider,
                 10,
             )
-            .await;
+            .await?;
 
-        assert!(result.is_err());
+        assert!(indexed > 0);
         assert_eq!(dirty.pending_count("test-agent").await?, 1);
+        let pending = dirty.list_pending("test-agent", 10).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_kind, "unsupported_kind");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_dirty_sources_continues_past_failed_item() -> Result<()> {
+        let dir = TempDir::new()?;
+        let file_store = MemoryFileStore::new(dir.path());
+        let session_writer = SessionWriter::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
+        file_store.write_long_term("# Long\n\nitem a").await?;
+        session_writer.start_session("s1", "main").await?;
+        session_writer
+            .append_message("s1", "user", "item c")
+            .await?;
+
+        let db = test_db()?;
+        let dirty = crate::dirty_sources::DirtySourceStore::new(Arc::clone(&db));
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_MEMORY_FILE,
+                "MEMORY.md",
+                "memory_written",
+            )
+            .await?;
+        dirty
+            .enqueue(
+                "test-agent",
+                "unsupported_kind",
+                "bad-ref",
+                "forced_failure",
+            )
+            .await?;
+        dirty
+            .enqueue(
+                "test-agent",
+                crate::dirty_sources::DIRTY_KIND_SESSION,
+                "s1",
+                "session_appended",
+            )
+            .await?;
+
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let indexed = index
+            .process_dirty_sources(
+                &dirty,
+                "test-agent",
+                &file_store,
+                &session_reader,
+                &provider,
+                10,
+            )
+            .await?;
+
+        assert_eq!(dirty.pending_count("test-agent").await?, 1);
+        let pending = dirty.list_pending("test-agent", 10).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_kind, "unsupported_kind");
+
+        let conn = db.lock().expect("lock");
+        let memory_chunks: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE agent_id = 'test-agent' AND path = 'MEMORY.md'",
+            [],
+            |r| r.get(0),
+        )?;
+        let session_chunks: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE agent_id = 'test-agent' AND path LIKE 'sessions/s1#turn:%'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(memory_chunks > 0);
+        assert!(session_chunks > 0);
+        assert_eq!(indexed as i64, memory_chunks + session_chunks);
+
         Ok(())
     }
 
