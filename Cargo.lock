@@ -629,7 +629,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "clawhive-auth"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "axum",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-bus"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "chrono",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-channels"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "aes",
  "anyhow",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-cli"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-core"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-gateway"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-memory"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-provider"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-runtime"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-scheduler"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "chrono",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-schema"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "chrono",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-server"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "clawhive-tui"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 dependencies = [
  "anyhow",
  "chrono",
