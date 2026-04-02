@@ -276,7 +276,9 @@ pub async fn run(cmd: MemoryCommands, root: &Path) -> Result<()> {
                     );
                     let embedding_provider = build_embedding_provider(&config).await;
                     search_index
-                        .index_dirty(
+                        .process_dirty_sources(
+                            &dirty_store,
+                            &agent_id,
                             &file_store,
                             &session_reader,
                             embedding_provider.as_ref(),

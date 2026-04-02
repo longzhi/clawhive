@@ -735,7 +735,11 @@ impl SearchIndex {
         Ok(total)
     }
 
-    pub async fn index_dirty(
+    /// Internal helper: reindex all pending dirty sources. Fails fast on first error.
+    /// **Do NOT use for queue consumption** — use `process_dirty_sources()` instead,
+    /// which handles per-item marking and continues past failures.
+    #[allow(dead_code)] // Used in tests; kept as internal building block
+    pub(crate) async fn index_dirty(
         &self,
         file_store: &crate::file_store::MemoryFileStore,
         reader: &SessionReader,
