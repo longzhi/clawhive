@@ -80,6 +80,40 @@ pub fn parse_candidates(raw: &str) -> Option<Vec<SummaryCandidate>> {
     parse_list_fallback(&stripped)
 }
 
+/// Return a diagnostic string describing why `parse_candidates` would fail.
+/// Useful for structured logging when the parse returns `None`.
+pub fn parse_candidates_error(raw: &str) -> String {
+    let stripped = strip_json_fence(raw);
+
+    let strict_err = match serde_json::from_str::<Vec<SummaryCandidate>>(&stripped) {
+        Ok(_) => return "no error (strict JSON parsed successfully)".to_string(),
+        Err(e) => e,
+    };
+
+    let embedded_err = if let Some(start) = stripped.find('[') {
+        if let Some(end) = stripped.rfind(']') {
+            if end > start {
+                let slice = &stripped[start..=end];
+                match serde_json::from_str::<Vec<SummaryCandidate>>(slice) {
+                    Ok(_) => return "no error (embedded JSON parsed successfully)".to_string(),
+                    Err(e) => Some(e),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match embedded_err {
+        Some(emb) => format!("strict: {strict_err}; embedded: {emb}",),
+        None => format!("strict: {strict_err}; no embedded JSON array found",),
+    }
+}
+
 pub fn retain_daily_candidates(candidates: Vec<SummaryCandidate>) -> Vec<SummaryCandidate> {
     retain_summary_candidates(candidates).daily
 }

@@ -797,11 +797,11 @@ fn default_max_injected_chars() -> usize {
 }
 
 fn default_idle_reset_minutes() -> Option<u64> {
-    Some(30)
+    None
 }
 
 fn default_daily_reset_hour() -> Option<u8> {
-    Some(4)
+    None
 }
 
 fn default_daily_summary_interval() -> u64 {
@@ -1264,8 +1264,8 @@ write_scope: session
 "#;
         let config: MemoryPolicyConfig = serde_yaml::from_str(yaml).unwrap();
 
-        assert_eq!(config.idle_minutes, Some(30));
-        assert_eq!(config.daily_at_hour, Some(4));
+        assert_eq!(config.idle_minutes, None);
+        assert_eq!(config.daily_at_hour, None);
         assert_eq!(config.max_injected_chars, 6000);
         assert_eq!(config.daily_summary_interval, 0);
     }

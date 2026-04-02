@@ -1573,11 +1573,11 @@ fn generate_snippet(text: &str, max_chars: usize) -> String {
     }
 
     let truncated: String = text.chars().take(max_chars).collect();
-    if let Some((pos, _)) = truncated
+    if let Some((pos, ch)) = truncated
         .char_indices()
         .rfind(|(_, c)| matches!(*c, '.' | '。' | '!' | '?' | '\n'))
     {
-        format!("{}...", truncated[..=pos].trim_end())
+        format!("{}...", truncated[..pos + ch.len_utf8()].trim_end())
     } else {
         format!("{}...", truncated.trim_end())
     }
@@ -3264,6 +3264,14 @@ mod tests {
         let text = "Short text.";
         let snippet = generate_snippet(text, 200);
         assert_eq!(snippet, "Short text.");
+    }
+
+    #[test]
+    fn generate_snippet_truncates_at_multibyte_sentence_boundary() {
+        let text = "这是第一句话。这是第二句话。这是第三句话，内容更长一些超出限制。";
+        let snippet = generate_snippet(text, 10);
+        assert!(snippet.ends_with("..."));
+        assert!(snippet.contains("这是第一句话。"));
     }
 
     #[tokio::test]

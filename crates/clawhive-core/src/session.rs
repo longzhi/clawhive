@@ -6,19 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionResetPolicy {
     pub idle_minutes: Option<u64>,
     pub daily_at_hour: Option<u8>,
-}
-
-impl Default for SessionResetPolicy {
-    fn default() -> Self {
-        Self {
-            idle_minutes: Some(30),
-            daily_at_hour: Some(4),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

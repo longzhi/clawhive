@@ -254,11 +254,24 @@ pub async fn start_whatsapp(
                                 );
                                 format!("{phone}@s.whatsapp.net")
                             } else {
-                                tracing::info!(
-                                    lid = %lid_user,
-                                    "LID not found in cache, using raw sender_jid"
-                                );
-                                sender_jid.clone()
+                                // LID cache may not be populated yet — retry once after a short delay
+                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                if let Some(phone) =
+                                    client.get_phone_number_from_lid(&lid_user).await
+                                {
+                                    tracing::info!(
+                                        lid = %lid_user,
+                                        resolved_phone = %phone,
+                                        "LID resolved to phone number (retry)"
+                                    );
+                                    format!("{phone}@s.whatsapp.net")
+                                } else {
+                                    tracing::warn!(
+                                        lid = %lid_user,
+                                        "LID not found in cache after retry, using raw sender_jid"
+                                    );
+                                    sender_jid.clone()
+                                }
                             }
                         } else {
                             sender_jid.clone()
@@ -710,9 +723,9 @@ fn build_attachment_message(
             image_message: Some(Box::new(ImageMessage {
                 url: Some(upload.url),
                 direct_path: Some(upload.direct_path),
-                media_key: Some(upload.media_key),
-                file_enc_sha256: Some(upload.file_enc_sha256),
-                file_sha256: Some(upload.file_sha256),
+                media_key: Some(upload.media_key.to_vec()),
+                file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                file_sha256: Some(upload.file_sha256.to_vec()),
                 file_length: Some(upload.file_length),
                 mimetype: att.mime_type.clone(),
                 caption: caption.map(ToString::to_string),
@@ -734,9 +747,9 @@ fn build_attachment_message(
                 document_message: Some(Box::new(DocumentMessage {
                     url: Some(upload.url),
                     direct_path: Some(upload.direct_path),
-                    media_key: Some(upload.media_key),
-                    file_enc_sha256: Some(upload.file_enc_sha256),
-                    file_sha256: Some(upload.file_sha256),
+                    media_key: Some(upload.media_key.to_vec()),
+                    file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                    file_sha256: Some(upload.file_sha256.to_vec()),
                     file_length: Some(upload.file_length),
                     mimetype: att.mime_type.clone(),
                     file_name: Some(file_name),
@@ -780,9 +793,9 @@ mod tests {
         UploadResponse {
             url: "https://example.com/media".to_string(),
             direct_path: "/v/t62/example".to_string(),
-            media_key: vec![1, 2, 3],
-            file_enc_sha256: vec![4, 5, 6],
-            file_sha256: vec![7, 8, 9],
+            media_key: [1u8; 32],
+            file_enc_sha256: [4u8; 32],
+            file_sha256: [7u8; 32],
             file_length: 42,
             media_key_timestamp: 0,
         }

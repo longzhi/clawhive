@@ -1325,12 +1325,21 @@ fn is_memory_section_heading(line: &str) -> bool {
 
 fn strip_markdown_fence(text: &str) -> String {
     let trimmed = text.trim();
-    let without_prefix = trimmed
-        .strip_prefix("```markdown")
-        .or_else(|| trimmed.strip_prefix("```md"))
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed)
-        .trim_start();
+    let without_prefix = if let Some(rest) = trimmed.strip_prefix("```") {
+        // Strip optional language tag (e.g. "json", "markdown") up to the first newline
+        match rest.find('\n') {
+            Some(pos)
+                if rest[..pos]
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_') =>
+            {
+                &rest[pos + 1..]
+            }
+            _ => rest.trim_start(),
+        }
+    } else {
+        trimmed
+    };
     without_prefix
         .strip_suffix("```")
         .unwrap_or(without_prefix)

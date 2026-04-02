@@ -1,6 +1,7 @@
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use clawhive_auth::oauth::{
     extract_chatgpt_account_id, profile_from_setup_token, prompt_setup_token, run_openai_pkce_flow,
@@ -19,6 +20,8 @@ pub enum AuthCommands {
     Status,
     #[command(about = "Clear auth profiles")]
     Logout,
+    #[command(about = "Reset web console password")]
+    ResetPassword,
 }
 
 #[derive(Subcommand)]
@@ -29,7 +32,7 @@ pub enum AuthLoginProvider {
     Anthropic,
 }
 
-pub async fn handle_auth_command(cmd: AuthCommands) -> Result<()> {
+pub async fn handle_auth_command(cmd: AuthCommands, config_root: &Path) -> Result<()> {
     let manager = TokenManager::new()?;
 
     match cmd {
@@ -81,6 +84,12 @@ pub async fn handle_auth_command(cmd: AuthCommands) -> Result<()> {
             manager.save_store(&AuthStore::default())?;
             println!("All auth profiles removed.");
         }
+        AuthCommands::ResetPassword => {
+            clear_web_password_hash(config_root)?;
+            println!(
+                "Web console password has been reset. You can set a new one at the login page."
+            );
+        }
     }
 
     Ok(())
@@ -111,4 +120,17 @@ fn now_unix_ts() -> Result<i64> {
         .duration_since(UNIX_EPOCH)
         .map_err(|e| anyhow!("system clock before unix epoch: {e}"))?;
     Ok(now.as_secs() as i64)
+}
+
+fn clear_web_password_hash(root: &Path) -> Result<()> {
+    let path = root.join("config/main.yaml");
+    let content = std::fs::read_to_string(&path).context("failed to read config/main.yaml")?;
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(&content).context("failed to parse main.yaml")?;
+    if let serde_yaml::Value::Mapping(ref mut map) = doc {
+        map.remove(serde_yaml::Value::String("web_password_hash".to_string()));
+    }
+    let yaml = serde_yaml::to_string(&doc).context("failed to serialize main.yaml")?;
+    std::fs::write(&path, yaml).context("failed to write main.yaml")?;
+    Ok(())
 }

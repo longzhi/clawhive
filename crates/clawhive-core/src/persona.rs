@@ -1,48 +1,70 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-/// Persona holds all workspace context files that define an agent's identity and behavior.
-/// Follows OpenClaw-style workspace structure.
+/// Controls which context files are included in the assembled system prompt.
+///
+/// | Mode      | AGENTS | SOUL | TOOLS | IDENTITY | USER | HEARTBEAT | BOOTSTRAP | MEMORY |
+/// |-----------|--------|------|-------|----------|------|-----------|-----------|--------|
+/// | Full      |   ✓    |  ✓   |   ✓   |    ✓     |  ✓   |     ✓     |     ✓     |   ✓    |
+/// | Minimal   |   ✓    |  ✓   |   ✓   |    ✓     |  ✓   |           |           |        |
+/// | Scheduled |   ✓    |  ✓   |   ✓   |    ✓     |  ✓   |           |           |   ✓    |
+/// | Heartbeat |   ✓    |      |       |          |      |     ✓     |           |        |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMode {
+    Full,
+    Minimal,
+    Scheduled,
+    Heartbeat,
+}
+
+impl PromptMode {
+    pub fn from_message_source(source: Option<&str>) -> Self {
+        match source {
+            Some("heartbeat") => Self::Heartbeat,
+            Some("scheduled_task") => Self::Scheduled,
+            _ => Self::Full,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Persona {
     pub agent_id: String,
     pub name: String,
     pub emoji: Option<String>,
-    /// AGENTS.md - Operating instructions, memory rules, behavior guidelines
+    pub creature: Option<String>,
+    pub vibe: Option<String>,
+    pub role: Option<String>,
     pub agents_md: String,
-    /// SOUL.md - Personality, vibe, boundaries
     pub soul_md: String,
-    /// USER.md - Information about the human user
     pub user_md: String,
-    /// IDENTITY.md - Agent's own identity (name, creature, emoji)
     pub identity_md: String,
-    /// TOOLS.md - Local environment notes (SSH hosts, device names, etc.)
     pub tools_md: String,
-    /// HEARTBEAT.md - Periodic task checklist
     pub heartbeat_md: String,
-    /// BOOTSTRAP.md - First-run onboarding instructions (cleared after setup)
     pub bootstrap_md: String,
-    /// MEMORY.md - Long-term curated knowledge
     pub memory_md: String,
 }
 
 impl Persona {
-    /// Assembles all context files into a single system prompt (full mode).
-    /// Includes all workspace files: AGENTS, SOUL, TOOLS, IDENTITY, USER, HEARTBEAT, BOOTSTRAP.
     pub fn assembled_system_prompt(&self) -> String {
-        self.assembled_system_prompt_for_mode(false)
+        self.assembled_system_prompt_for_mode(PromptMode::Full)
     }
 
-    /// Assembles a minimal system prompt for sub-agents.
-    /// Excludes HEARTBEAT and BOOTSTRAP (matches OpenClaw MINIMAL_BOOTSTRAP_ALLOWLIST).
     pub fn assembled_system_prompt_minimal(&self) -> String {
-        self.assembled_system_prompt_for_mode(true)
+        self.assembled_system_prompt_for_mode(PromptMode::Minimal)
     }
 
-    fn assembled_system_prompt_for_mode(&self, minimal: bool) -> String {
+    pub fn assembled_system_prompt_heartbeat(&self) -> String {
+        self.assembled_system_prompt_for_mode(PromptMode::Heartbeat)
+    }
+
+    pub fn assembled_system_prompt_scheduled(&self) -> String {
+        self.assembled_system_prompt_for_mode(PromptMode::Scheduled)
+    }
+
+    pub fn assembled_system_prompt_for_mode(&self, mode: PromptMode) -> String {
         let mut parts = Vec::new();
 
-        // Core operating instructions (AGENTS.md is always the base, with truncation protection)
         if !self.agents_md.is_empty() {
             parts.push(truncate_context_file(
                 &self.agents_md,
@@ -51,38 +73,10 @@ impl Persona {
             ));
         }
 
-        // --- # Project Context (OpenClaw style) ---
         let mut context_files: Vec<(&str, String)> = Vec::new();
 
-        // Order matches OpenClaw loadWorkspaceBootstrapFiles:
-        // SOUL, TOOLS, IDENTITY, USER, HEARTBEAT, BOOTSTRAP, MEMORY
-        if !self.soul_md.is_empty() {
-            context_files.push((
-                "SOUL.md",
-                truncate_context_file(&self.soul_md, "SOUL.md", MAX_CONTEXT_FILE_CHARS),
-            ));
-        }
-        if !self.tools_md.is_empty() {
-            context_files.push((
-                "TOOLS.md",
-                truncate_context_file(&self.tools_md, "TOOLS.md", MAX_CONTEXT_FILE_CHARS),
-            ));
-        }
-        if !self.identity_md.is_empty() {
-            context_files.push((
-                "IDENTITY.md",
-                truncate_context_file(&self.identity_md, "IDENTITY.md", MAX_CONTEXT_FILE_CHARS),
-            ));
-        }
-        if !self.user_md.is_empty() {
-            context_files.push((
-                "USER.md",
-                truncate_context_file(&self.user_md, "USER.md", MAX_CONTEXT_FILE_CHARS),
-            ));
-        }
-
-        // HEARTBEAT, BOOTSTRAP, MEMORY only in full mode (matches MINIMAL_BOOTSTRAP_ALLOWLIST)
-        if !minimal {
+        // Heartbeat mode: only HEARTBEAT.md (lightweight, saves tokens)
+        if mode == PromptMode::Heartbeat {
             if !self.heartbeat_md.is_empty() {
                 context_files.push((
                     "HEARTBEAT.md",
@@ -93,17 +87,59 @@ impl Persona {
                     ),
                 ));
             }
-            if !self.bootstrap_md.is_empty() {
+        } else {
+            // All other modes include core context files: SOUL, TOOLS, IDENTITY, USER
+            if !self.soul_md.is_empty() {
                 context_files.push((
-                    "BOOTSTRAP.md",
-                    truncate_context_file(
-                        &self.bootstrap_md,
-                        "BOOTSTRAP.md",
-                        MAX_CONTEXT_FILE_CHARS,
-                    ),
+                    "SOUL.md",
+                    truncate_context_file(&self.soul_md, "SOUL.md", MAX_CONTEXT_FILE_CHARS),
                 ));
             }
-            if !self.memory_md.is_empty() {
+            if !self.tools_md.is_empty() {
+                context_files.push((
+                    "TOOLS.md",
+                    truncate_context_file(&self.tools_md, "TOOLS.md", MAX_CONTEXT_FILE_CHARS),
+                ));
+            }
+            if !self.identity_md.is_empty() {
+                context_files.push((
+                    "IDENTITY.md",
+                    truncate_context_file(&self.identity_md, "IDENTITY.md", MAX_CONTEXT_FILE_CHARS),
+                ));
+            }
+            if !self.user_md.is_empty() {
+                context_files.push((
+                    "USER.md",
+                    truncate_context_file(&self.user_md, "USER.md", MAX_CONTEXT_FILE_CHARS),
+                ));
+            }
+
+            // Full mode: all files; Scheduled: skip HEARTBEAT + BOOTSTRAP; Minimal: skip HEARTBEAT + BOOTSTRAP + MEMORY
+            if mode == PromptMode::Full {
+                if !self.heartbeat_md.is_empty() {
+                    context_files.push((
+                        "HEARTBEAT.md",
+                        truncate_context_file(
+                            &self.heartbeat_md,
+                            "HEARTBEAT.md",
+                            MAX_CONTEXT_FILE_CHARS,
+                        ),
+                    ));
+                }
+                if !self.bootstrap_md.is_empty() {
+                    context_files.push((
+                        "BOOTSTRAP.md",
+                        truncate_context_file(
+                            &self.bootstrap_md,
+                            "BOOTSTRAP.md",
+                            MAX_CONTEXT_FILE_CHARS,
+                        ),
+                    ));
+                }
+            }
+            if matches!(mode, PromptMode::Full | PromptMode::Scheduled)
+                && !self.memory_md.is_empty()
+            {
                 context_files.push((
                     "MEMORY.md",
                     truncate_context_file(&self.memory_md, "MEMORY.md", MAX_CONTEXT_FILE_CHARS),
@@ -113,10 +149,12 @@ impl Persona {
 
         if !context_files.is_empty() {
             let has_soul = context_files.iter().any(|(name, _)| *name == "SOUL.md");
+            let has_tools = context_files.iter().any(|(name, _)| *name == "TOOLS.md");
 
             parts.push(
-                "\n# Project Context\n\nThe following project context files have been loaded from `prompts/` in your workspace. \
-                 To update them, use write_file with the path `prompts/<filename>` (e.g. `prompts/IDENTITY.md`):"
+                "\n# Project Context\n\nThe following project context files have been loaded. \
+                 Most live in `prompts/` (update via `write_file` with path `prompts/<filename>`). \
+                 MEMORY.md lives at the workspace root."
                     .to_string(),
             );
 
@@ -127,8 +165,14 @@ impl Persona {
                         .to_string(),
                 );
             }
+            if has_tools {
+                parts.push(
+                    "Note: TOOLS.md does not control tool availability; \
+                     it is user-written guidance for how to use local environment resources."
+                        .to_string(),
+                );
+            }
 
-            // Apply total chars limit across all context files (with clamp-to-budget)
             let mut total_chars = 0;
             for (name, content) in &context_files {
                 let remaining = TOTAL_MAX_CONTEXT_CHARS.saturating_sub(total_chars);
@@ -138,7 +182,6 @@ impl Persona {
                     ));
                     continue;
                 }
-                // Clamp to remaining budget (second-pass truncation like OpenClaw clampToBudget)
                 let clamped = if content.len() > remaining {
                     clamp_to_budget(content, remaining)
                 } else {
@@ -147,6 +190,20 @@ impl Persona {
                 total_chars += clamped.len();
                 parts.push(format!("\n## {name}\n\n{clamped}"));
             }
+        }
+
+        // Heartbeat response rules (Full + Heartbeat modes, when HEARTBEAT.md has content)
+        if matches!(mode, PromptMode::Full | PromptMode::Heartbeat)
+            && !self.heartbeat_md.is_empty()
+            && self.has_heartbeat_tasks()
+        {
+            parts.push(
+                "\n## Heartbeats\n\
+                 When you receive a heartbeat poll, read HEARTBEAT.md and follow it strictly.\n\
+                 If nothing needs attention, reply exactly: HEARTBEAT_OK\n\
+                 Do not include \"HEARTBEAT_OK\" in actual alert responses."
+                    .to_string(),
+            );
         }
 
         parts.join("\n")
@@ -166,8 +223,9 @@ impl Persona {
     }
 }
 
-/// Load persona from workspace's prompts directory (OpenClaw-style).
-/// Reads: {workspace}/prompts/AGENTS.md, SOUL.md, USER.md, IDENTITY.md, TOOLS.md, HEARTBEAT.md, MEMORY.md
+/// Load persona from workspace (OpenClaw-style).
+/// Reads: {workspace}/prompts/AGENTS.md, SOUL.md, USER.md, IDENTITY.md, TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md
+/// and {workspace}/MEMORY.md (root, matching consolidation write path)
 pub fn load_persona_from_workspace(
     workspace_root: &Path,
     agent_id: &str,
@@ -192,15 +250,26 @@ pub fn load_persona_from_workspace(
 
     let bootstrap_md = read_optional_md(&prompts_dir.join("BOOTSTRAP.md"))?.unwrap_or_default();
 
-    // Support both MEMORY.md and memory.md (OpenClaw convention)
-    let memory_md = read_optional_md(&prompts_dir.join("MEMORY.md"))?
-        .or(read_optional_md(&prompts_dir.join("memory.md"))?)
+    // MEMORY.md lives at workspace root (written by consolidation), not in prompts/
+    let memory_md = read_optional_md(&workspace_root.join("MEMORY.md"))?
+        .or(read_optional_md(&workspace_root.join("memory.md"))?)
         .unwrap_or_default();
+
+    // Parse IDENTITY.md for structured fields; values override YAML config fallbacks.
+    // Changes take effect on config reload or restart, not on next session.
+    let parsed_identity = crate::identity_parser::parse_identity_md(&identity_md);
+    let resolved_name = parsed_identity.name.unwrap_or_else(|| name.to_string());
+    let resolved_emoji = parsed_identity
+        .emoji
+        .or_else(|| emoji.map(|s| s.to_string()));
 
     Ok(Persona {
         agent_id: agent_id.to_string(),
-        name: name.to_string(),
-        emoji: emoji.map(|s| s.to_string()),
+        name: resolved_name,
+        emoji: resolved_emoji,
+        creature: parsed_identity.creature,
+        vibe: parsed_identity.vibe,
+        role: parsed_identity.role,
         agents_md,
         soul_md,
         user_md,
@@ -242,6 +311,9 @@ pub fn load_persona(
         agent_id: agent_id.to_string(),
         name: name.to_string(),
         emoji: emoji.map(|s| s.to_string()),
+        creature: None,
+        vibe: None,
+        role: None,
         agents_md,
         soul_md: String::new(),
         user_md: String::new(),
@@ -369,6 +441,9 @@ mod tests {
             agent_id: "test".into(),
             name: "Test".into(),
             emoji: None,
+            creature: None,
+            vibe: None,
+            role: None,
             agents_md: String::new(),
             soul_md: String::new(),
             user_md: String::new(),
@@ -427,7 +502,7 @@ mod tests {
 
         let assembled = persona.assembled_system_prompt();
         assert!(assembled.contains("# Project Context"));
-        assert!(assembled.contains("project context files have been loaded from `prompts/`"));
+        assert!(assembled.contains("project context files have been loaded"));
         assert!(assembled.contains("## SOUL.md"));
         assert!(assembled.contains("## TOOLS.md"));
     }
@@ -620,7 +695,7 @@ mod tests {
 
         let minimal = persona.assembled_system_prompt_minimal();
         assert!(minimal.contains("## SOUL.md"));
-        assert!(!minimal.contains("MEMORY.md"));
+        assert!(!minimal.contains("## MEMORY.md"));
     }
 
     #[test]
@@ -630,7 +705,8 @@ mod tests {
         let prompts_dir = root.join("prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
 
-        std::fs::write(prompts_dir.join("MEMORY.md"), "Long-term knowledge.").unwrap();
+        // MEMORY.md lives at workspace root (same as consolidation write path)
+        std::fs::write(root.join("MEMORY.md"), "Long-term knowledge.").unwrap();
 
         let persona = load_persona_from_workspace(root, "test", "Test", None).unwrap();
         assert!(persona.memory_md.contains("Long-term knowledge"));
@@ -643,7 +719,8 @@ mod tests {
         let prompts_dir = root.join("prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
 
-        std::fs::write(prompts_dir.join("memory.md"), "Lowercase memory file.").unwrap();
+        // Fallback: memory.md at workspace root
+        std::fs::write(root.join("memory.md"), "Lowercase memory file.").unwrap();
 
         let persona = load_persona_from_workspace(root, "test", "Test", None).unwrap();
         assert!(persona.memory_md.contains("Lowercase memory"));
@@ -658,7 +735,161 @@ mod tests {
         };
 
         let assembled = persona.assembled_system_prompt();
-        // AGENTS.md should be truncated, not included verbatim
         assert!(assembled.contains("truncated, read AGENTS.md for full content"));
+    }
+
+    #[test]
+    fn heartbeat_mode_only_agents_and_heartbeat() {
+        let persona = Persona {
+            agents_md: "Core instructions.".into(),
+            soul_md: "Be warm.".into(),
+            tools_md: "SSH info.".into(),
+            identity_md: "Name: Kuro".into(),
+            user_md: "User info.".into(),
+            heartbeat_md: "- Check email".into(),
+            bootstrap_md: "Welcome!".into(),
+            memory_md: "Long-term memory.".into(),
+            ..make_persona()
+        };
+
+        let hb = persona.assembled_system_prompt_heartbeat();
+        assert!(hb.contains("Core instructions."));
+        assert!(hb.contains("## HEARTBEAT.md"));
+        assert!(hb.contains("Check email"));
+        assert!(!hb.contains("## SOUL.md"));
+        assert!(!hb.contains("## TOOLS.md"));
+        assert!(!hb.contains("## IDENTITY.md"));
+        assert!(!hb.contains("## USER.md"));
+        assert!(!hb.contains("## BOOTSTRAP.md"));
+        assert!(!hb.contains("## MEMORY.md"));
+    }
+
+    #[test]
+    fn scheduled_mode_excludes_heartbeat_and_bootstrap_includes_memory() {
+        let persona = Persona {
+            soul_md: "Be warm.".into(),
+            tools_md: "SSH info.".into(),
+            heartbeat_md: "- Check email".into(),
+            bootstrap_md: "Welcome!".into(),
+            memory_md: "Long-term memory.".into(),
+            ..make_persona()
+        };
+
+        let sched = persona.assembled_system_prompt_scheduled();
+        assert!(sched.contains("## SOUL.md"));
+        assert!(sched.contains("## TOOLS.md"));
+        assert!(sched.contains("## MEMORY.md"));
+        assert!(!sched.contains("## HEARTBEAT.md"));
+        assert!(!sched.contains("## BOOTSTRAP.md"));
+    }
+
+    #[test]
+    fn heartbeat_response_rules_in_full_mode() {
+        let persona = Persona {
+            heartbeat_md: "- Check email".into(),
+            ..make_persona()
+        };
+
+        let full = persona.assembled_system_prompt();
+        assert!(full.contains("## Heartbeats"));
+        assert!(full.contains("reply exactly: HEARTBEAT_OK"));
+    }
+
+    #[test]
+    fn heartbeat_response_rules_in_heartbeat_mode() {
+        let persona = Persona {
+            heartbeat_md: "- Check email".into(),
+            ..make_persona()
+        };
+
+        let hb = persona.assembled_system_prompt_heartbeat();
+        assert!(hb.contains("## Heartbeats"));
+        assert!(hb.contains("reply exactly: HEARTBEAT_OK"));
+    }
+
+    #[test]
+    fn no_heartbeat_rules_when_heartbeat_empty() {
+        let persona = Persona {
+            heartbeat_md: "# HEARTBEAT.md\n# Just comments".into(),
+            ..make_persona()
+        };
+
+        let full = persona.assembled_system_prompt();
+        assert!(!full.contains("## Heartbeats"));
+    }
+
+    #[test]
+    fn no_heartbeat_rules_in_minimal_mode() {
+        let persona = Persona {
+            heartbeat_md: "- Check email".into(),
+            ..make_persona()
+        };
+
+        let minimal = persona.assembled_system_prompt_minimal();
+        assert!(!minimal.contains("## Heartbeats"));
+    }
+
+    #[test]
+    fn tools_disclaimer_present_when_tools_md_set() {
+        let persona = Persona {
+            tools_md: "SSH info.".into(),
+            ..make_persona()
+        };
+
+        let assembled = persona.assembled_system_prompt();
+        assert!(assembled.contains("does not control tool availability"));
+    }
+
+    #[test]
+    fn tools_disclaimer_absent_when_no_tools_md() {
+        let persona = Persona {
+            soul_md: "Be warm.".into(),
+            ..make_persona()
+        };
+
+        let assembled = persona.assembled_system_prompt();
+        assert!(!assembled.contains("does not control tool availability"));
+    }
+
+    #[test]
+    fn identity_parsing_overrides_yaml_name_and_emoji() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let prompts_dir = root.join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+
+        std::fs::write(
+            prompts_dir.join("IDENTITY.md"),
+            "- **Name:** Kuro\n- **Emoji:** 🐾\n- **Creature:** shadow cat\n- **Vibe:** sharp\n",
+        )
+        .unwrap();
+
+        let persona =
+            load_persona_from_workspace(root, "test", "YamlFallbackName", Some("⚙️")).unwrap();
+
+        assert_eq!(persona.name, "Kuro");
+        assert_eq!(persona.emoji.as_deref(), Some("🐾"));
+        assert_eq!(persona.creature.as_deref(), Some("shadow cat"));
+        assert_eq!(persona.vibe.as_deref(), Some("sharp"));
+    }
+
+    #[test]
+    fn identity_parsing_falls_back_to_yaml_when_not_filled() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let prompts_dir = root.join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+
+        std::fs::write(
+            prompts_dir.join("IDENTITY.md"),
+            "- **Name:**\n  _(pick something you like)_\n- **Emoji:**\n  _(your signature)_\n",
+        )
+        .unwrap();
+
+        let persona = load_persona_from_workspace(root, "test", "YamlName", Some("⚙️")).unwrap();
+
+        assert_eq!(persona.name, "YamlName");
+        assert_eq!(persona.emoji.as_deref(), Some("⚙️"));
+        assert!(persona.creature.is_none());
     }
 }

@@ -10,6 +10,7 @@ pub mod dotenv;
 pub mod file_tools;
 pub mod heartbeat;
 pub mod hooks;
+pub mod identity_parser;
 pub mod image_tool;
 mod language_prefs;
 pub mod memory_document;

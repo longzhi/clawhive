@@ -309,7 +309,7 @@ async fn main() -> Result<()> {
             commands::task::run(cmd, &cli.config_root).await?;
         }
         Commands::Auth(cmd) => {
-            handle_auth_command(cmd).await?;
+            handle_auth_command(cmd, &cli.config_root).await?;
         }
         Commands::Schedule(cmd) => {
             commands::schedule::run(cmd, &cli.config_root).await?;
