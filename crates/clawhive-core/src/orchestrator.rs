@@ -140,6 +140,124 @@ fn normalized_candidate_fact_type(
     }
 }
 
+fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
+    let tokens_a = a
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.len() > 1)
+        .filter(|word| {
+            !matches!(
+                *word,
+                "an" | "and" | "all" | "for" | "in" | "of" | "on" | "the" | "their" | "to"
+            )
+        })
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+    let tokens_b = b
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.len() > 1)
+        .filter(|word| {
+            !matches!(
+                *word,
+                "an" | "and" | "all" | "for" | "in" | "of" | "on" | "the" | "their" | "to"
+            )
+        })
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+
+    let intersection = tokens_a.intersection(&tokens_b).count();
+    let union = tokens_a.union(&tokens_b).count();
+    if union == 0 {
+        return 0.0;
+    }
+
+    intersection as f64 / union as f64
+}
+
+fn boundary_flush_conflict_passes_two_step(
+    new_content: &str,
+    new_fact_type: &str,
+    existing: &clawhive_memory::fact_store::Fact,
+    embedding_similarity: Option<f64>,
+) -> bool {
+    let Some(similarity) = embedding_similarity else {
+        return false;
+    };
+    if similarity <= 0.85 {
+        return false;
+    }
+    if existing.fact_type != new_fact_type {
+        return false;
+    }
+
+    fact_token_overlap_ratio(new_content, &existing.content) > 0.6
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    if len == 0 {
+        return 0.0;
+    }
+
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for idx in 0..len {
+        dot += a[idx] * b[idx];
+        norm_a += a[idx] * a[idx];
+        norm_b += b[idx] * b[idx];
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+
+    dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+async fn find_boundary_flush_conflict(
+    embedding_provider: &Arc<dyn EmbeddingProvider>,
+    new_content: &str,
+    new_fact_type: &str,
+    active_facts: &[clawhive_memory::fact_store::Fact],
+) -> Result<Option<clawhive_memory::fact_store::Fact>> {
+    if active_facts.is_empty() {
+        return Ok(None);
+    }
+
+    let mut texts = Vec::with_capacity(active_facts.len() + 1);
+    texts.push(new_content.to_string());
+    texts.extend(active_facts.iter().map(|fact| fact.content.clone()));
+
+    let embeddings = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        embedding_provider.embed(&texts),
+    )
+    .await
+    .map_err(|_| anyhow!("boundary flush conflict embedding timed out"))??
+    .embeddings;
+    if embeddings.len() != texts.len() {
+        return Ok(None);
+    }
+
+    let new_embedding = &embeddings[0];
+    let conflict = active_facts
+        .iter()
+        .zip(embeddings.iter().skip(1))
+        .find(|(existing, embedding)| {
+            let similarity = f64::from(cosine_similarity(new_embedding, embedding));
+            boundary_flush_conflict_passes_two_step(
+                new_content,
+                new_fact_type,
+                existing,
+                Some(similarity),
+            )
+        })
+        .map(|(fact, _)| fact.clone());
+
+    Ok(conflict)
+}
+
 fn boundary_flush_topic_tokens(messages: &[SessionMessage]) -> std::collections::HashSet<String> {
     messages
         .iter()
@@ -4073,6 +4191,57 @@ impl Orchestrator {
                         created_at: now.clone(),
                         updated_at: now,
                     };
+                    let conflict = match find_boundary_flush_conflict(
+                        embedding_provider,
+                        &fact.content,
+                        &fact.fact_type,
+                        &active_facts,
+                    )
+                    .await
+                    {
+                        Ok(conflict) => conflict,
+                        Err(error) => {
+                            tracing::warn!(
+                                source,
+                                content = %candidate.content,
+                                error = %error,
+                                "Boundary flush conflict check failed; proceeding with insert fallback"
+                            );
+                            None
+                        }
+                    };
+
+                    if let Some(old_fact) = conflict {
+                        let new_fact_id = fact.id.clone();
+                        match fact_store
+                            .supersede(&old_fact.id, &fact, "auto_boundary_flush")
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = fact_store.record_add(&fact).await;
+                                active_facts.retain(|existing| existing.id != old_fact.id);
+                                active_facts.push(fact);
+                                tracing::info!(
+                                    source,
+                                    old_fact_id = %old_fact.id,
+                                    new_fact_id = %new_fact_id,
+                                    reason = "auto_boundary_flush",
+                                    "Auto-superseded conflicting boundary fact"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    source,
+                                    content = %candidate.content,
+                                    old_fact_id = %old_fact.id,
+                                    error = %error,
+                                    "Failed to auto-supersede boundary fact candidate"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
                     match fact_store
                         .insert_fact_with_canonical_key(&fact, duplicate_key.as_deref())
                         .await
@@ -5409,6 +5578,8 @@ mod tests {
 
     struct CompactionOnlyProvider;
 
+    struct FailingEmbeddingProvider;
+
     #[async_trait]
     impl LlmProvider for CompactionOnlyProvider {
         async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
@@ -5429,6 +5600,24 @@ mod tests {
                 output_tokens: None,
                 stop_reason: Some("end_turn".into()),
             })
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for FailingEmbeddingProvider {
+        async fn embed(
+            &self,
+            _texts: &[String],
+        ) -> anyhow::Result<clawhive_memory::embedding::EmbeddingResult> {
+            Err(anyhow!("embedding unavailable"))
+        }
+
+        fn model_id(&self) -> &str {
+            "failing"
+        }
+
+        fn dimensions(&self) -> usize {
+            0
         }
     }
 
@@ -6385,6 +6574,104 @@ Body"#,
             decision.boundary,
             EpisodeBoundaryDecision::CloseCurrentAndOpenNext
         );
+    }
+
+    #[test]
+    fn fact_token_overlap_requires_high_similarity() {
+        let overlap = fact_token_overlap_ratio(
+            "User prefers Rust for backend services",
+            "User prefers Rust for backend systems",
+        );
+        assert!(overlap > 0.6);
+
+        let low_overlap = fact_token_overlap_ratio(
+            "User prefers Rust for backend services",
+            "User moved to Tokyo last month",
+        );
+        assert!(low_overlap < 0.6);
+    }
+
+    #[test]
+    fn boundary_flush_conflict_requires_same_type_and_embedding_signal() {
+        let old_fact = clawhive_memory::fact_store::Fact {
+            id: "old".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "User prefers Rust for backend services".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.7,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "boundary_flush".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let different_type = clawhive_memory::fact_store::Fact {
+            fact_type: "decision".to_string(),
+            ..old_fact.clone()
+        };
+
+        assert!(boundary_flush_conflict_passes_two_step(
+            "User prefers Rust for backend systems",
+            "preference",
+            &old_fact,
+            Some(0.9)
+        ));
+        assert!(!boundary_flush_conflict_passes_two_step(
+            "User prefers Rust for backend systems",
+            "preference",
+            &different_type,
+            Some(0.9)
+        ));
+        assert!(!boundary_flush_conflict_passes_two_step(
+            "User prefers Rust for backend systems",
+            "preference",
+            &old_fact,
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn boundary_flush_conflict_check_fallbacks_to_insert_on_embedding_failure() {
+        let old_fact = clawhive_memory::fact_store::Fact {
+            id: "old".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "User prefers Rust for backend services".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.7,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "boundary_flush".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(FailingEmbeddingProvider);
+        let conflict = find_boundary_flush_conflict(
+            &provider,
+            "User prefers Rust for backend systems",
+            "preference",
+            &[old_fact],
+        )
+        .await
+        .unwrap_or_default();
+
+        assert!(conflict.is_none());
     }
 
     #[tokio::test]

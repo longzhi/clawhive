@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use clawhive_memory::dirty_sources::{DirtySourceStore, DIRTY_KIND_MEMORY_FILE};
 use clawhive_memory::embedding::EmbeddingProvider;
-use clawhive_memory::fact_store::{self, Fact, FactStore};
+use clawhive_memory::fact_store::{Fact, FactStore};
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::memory_lineage::MemoryLineageStore;
 use clawhive_memory::search_index::SearchIndex;
@@ -47,28 +47,6 @@ Rules:
 - Be concise - only keep information that is useful for future conversations
 - Output the COMPLETE updated MEMORY.md content (not a diff)"#;
 
-const FACT_EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a fact extraction system. Extract key facts from the conversation summaries below.
-
-Return a JSON array of facts. Each fact should have:
-- "content": A clear, concise statement of the fact (e.g., "User prefers Rust over Go")
-- "fact_type": One of: "preference", "decision", "event", "person", "rule", "procedure"
-- "importance": 0.0 to 1.0 (how important this fact is for future interactions)
-- "occurred_at": ISO date string if the fact has a specific date, null otherwise
-
-Rules:
-- Extract only concrete, actionable facts. Skip pleasantries and transient details.
-- Each fact should be self-contained and understandable without context.
-- Deduplicate: if the same fact appears multiple times, include it only once.
-- Return valid JSON only. No markdown fencing, no explanation.
-
-Example output:
-[
-  {"content": "User prefers Rust over Go", "fact_type": "preference", "importance": 0.8, "occurred_at": null},
-  {"content": "User moved to Tokyo", "fact_type": "event", "importance": 0.7, "occurred_at": "2026-03"}
-]
-
-If no facts can be extracted, return an empty array: []"#;
-
 const PROMOTION_CANDIDATE_SYSTEM_PROMPT: &str = r#"You classify daily observations for memory promotion.
 
 Return a JSON array only. Each item must contain:
@@ -95,15 +73,6 @@ Rules:
 - Preserve useful durable context
 - Integrate the candidate items into coherent markdown bullet points or short paragraphs
 - Do not repeat what is already captured in the section unless needed for clarity"#;
-
-#[derive(Debug, serde::Deserialize)]
-struct ExtractedFact {
-    content: String,
-    fact_type: String,
-    #[serde(default = "default_importance")]
-    importance: f64,
-    occurred_at: Option<String>,
-}
 
 fn default_importance() -> f64 {
     0.5
@@ -251,14 +220,16 @@ impl HippocampusConsolidator {
             .await?;
 
         if recent_daily.is_empty() {
-            return Ok(ConsolidationReport {
+            let report = ConsolidationReport {
                 daily_files_read: 0,
                 memory_updated: false,
                 reindexed: false,
                 facts_extracted: 0,
                 summary: "No daily files found in lookback window; skipped consolidation."
                     .to_string(),
-            });
+            };
+            self.reconcile_recent_fact_conflicts().await;
+            return Ok(report);
         }
 
         let mut daily_sections = String::new();
@@ -266,21 +237,23 @@ impl HippocampusConsolidator {
             daily_sections.push_str(&format!("### {}\n{}\n\n", date.format("%Y-%m-%d"), content));
         }
 
-        match self
+        let report = match self
             .consolidate_by_section(&current_memory, &daily_sections, recent_daily.len())
             .await
         {
-            Ok(report) => return Ok(report),
+            Ok(report) => report,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     "Section-based consolidation failed, falling back to legacy consolidation"
                 );
+                self.legacy_consolidate(&current_memory, &daily_sections, recent_daily.len())
+                    .await?
             }
-        }
+        };
 
-        self.legacy_consolidate(&current_memory, &daily_sections, recent_daily.len())
-            .await
+        self.reconcile_recent_fact_conflicts().await;
+        Ok(report)
     }
 
     async fn legacy_consolidate(
@@ -301,25 +274,18 @@ impl HippocampusConsolidator {
             Ok(patch) => {
                 if patch.keep {
                     tracing::info!("Consolidation returned [KEEP]; leaving MEMORY.md unchanged");
-                    let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
                     return Ok(ConsolidationReport {
                         daily_files_read,
                         memory_updated: false,
                         reindexed: false,
-                        facts_extracted,
+                        facts_extracted: 0,
                         summary: "Consolidation returned [KEEP]; MEMORY.md unchanged.".to_string(),
                     });
                 }
 
                 let updated_memory = apply_patch(current_memory, &patch);
                 return self
-                    .finalize_updated_memory(
-                        updated_memory,
-                        current_memory,
-                        daily_sections,
-                        daily_files_read,
-                        &[],
-                    )
+                    .finalize_updated_memory(updated_memory, current_memory, daily_files_read, &[])
                     .await;
             }
             Err(first_error) => {
@@ -339,13 +305,11 @@ impl HippocampusConsolidator {
                             tracing::info!(
                                 "Consolidation retry returned [KEEP]; leaving MEMORY.md unchanged"
                             );
-                            let facts_extracted =
-                                self.extract_facts(&self.agent_id, daily_sections).await;
                             return Ok(ConsolidationReport {
                                 daily_files_read,
                                 memory_updated: false,
                                 reindexed: false,
-                                facts_extracted,
+                                facts_extracted: 0,
                                 summary: "Consolidation returned [KEEP]; MEMORY.md unchanged."
                                     .to_string(),
                             });
@@ -356,7 +320,6 @@ impl HippocampusConsolidator {
                             .finalize_updated_memory(
                                 updated_memory,
                                 current_memory,
-                                daily_sections,
                                 daily_files_read,
                                 &[],
                             )
@@ -396,24 +359,17 @@ impl HippocampusConsolidator {
         let updated_memory = strip_markdown_fence(&response.text);
         if updated_memory.trim() == "[KEEP]" {
             tracing::info!("Consolidation returned [KEEP]; leaving MEMORY.md unchanged");
-            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
             return Ok(ConsolidationReport {
                 daily_files_read,
                 memory_updated: false,
                 reindexed: false,
-                facts_extracted,
+                facts_extracted: 0,
                 summary: "Consolidation returned [KEEP]; MEMORY.md unchanged.".to_string(),
             });
         }
 
-        self.finalize_updated_memory(
-            updated_memory,
-            current_memory,
-            daily_sections,
-            daily_files_read,
-            &[],
-        )
-        .await
+        self.finalize_updated_memory(updated_memory, current_memory, daily_files_read, &[])
+            .await
     }
 
     async fn consolidate_by_section(
@@ -426,12 +382,11 @@ impl HippocampusConsolidator {
         let memory_candidates = dedup_memory_candidates(candidates);
 
         if memory_candidates.is_empty() {
-            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
             return Ok(ConsolidationReport {
                 daily_files_read,
                 memory_updated: false,
                 reindexed: false,
-                facts_extracted,
+                facts_extracted: 0,
                 summary: "No long-term memory candidates retained.".to_string(),
             });
         }
@@ -477,12 +432,11 @@ impl HippocampusConsolidator {
         }
 
         if touched_sections == 0 {
-            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
             return Ok(ConsolidationReport {
                 daily_files_read,
                 memory_updated: false,
                 reindexed: false,
-                facts_extracted,
+                facts_extracted: 0,
                 summary: "No MEMORY.md sections were updated.".to_string(),
             });
         }
@@ -490,7 +444,6 @@ impl HippocampusConsolidator {
         self.finalize_updated_memory(
             doc.render(),
             current_memory,
-            daily_sections,
             daily_files_read,
             &memory_candidates,
         )
@@ -547,7 +500,6 @@ impl HippocampusConsolidator {
         &self,
         updated_memory: String,
         current_memory: &str,
-        daily_sections: &str,
         daily_files_read: usize,
         memory_candidates: &[PromotionCandidate],
     ) -> Result<ConsolidationReport> {
@@ -564,12 +516,11 @@ impl HippocampusConsolidator {
 
         if updated_memory == current_memory {
             tracing::info!("Consolidation patch produced no effective MEMORY.md changes");
-            let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
             return Ok(ConsolidationReport {
                 daily_files_read,
                 memory_updated: false,
                 reindexed: false,
-                facts_extracted,
+                facts_extracted: 0,
                 summary: "Consolidation produced no MEMORY.md changes.".to_string(),
             });
         }
@@ -654,7 +605,6 @@ impl HippocampusConsolidator {
             false
         };
 
-        let facts_extracted = self.extract_facts(&self.agent_id, daily_sections).await;
         self.record_fact_memory_alignment(&cleanup_result.content)
             .await;
 
@@ -666,7 +616,7 @@ impl HippocampusConsolidator {
                     &serde_json::json!({
                         "daily_files_read": daily_files_read,
                         "reindexed": reindexed,
-                        "facts_extracted": facts_extracted,
+                        "facts_extracted": 0,
                         "memory_chars": updated_memory.len(),
                     })
                     .to_string(),
@@ -679,7 +629,7 @@ impl HippocampusConsolidator {
             daily_files_read,
             memory_updated: true,
             reindexed,
-            facts_extracted,
+            facts_extracted: 0,
             summary: format!("Consolidated {daily_files_read} daily files into MEMORY.md."),
         })
     }
@@ -943,97 +893,150 @@ impl HippocampusConsolidator {
         }
     }
 
-    async fn extract_facts(&self, agent_id: &str, daily_sections: &str) -> usize {
+    async fn reconcile_recent_fact_conflicts(&self) {
         let Some(memory_store) = &self.memory_store else {
-            return 0;
+            return;
         };
 
         let fact_store = FactStore::new(memory_store.db());
-
-        match self
-            .extract_facts_inner(agent_id, daily_sections, &fact_store)
-            .await
-        {
-            Ok(count) => count,
+        let mut active_facts = match fact_store.get_active_facts(&self.agent_id).await {
+            Ok(facts) => facts,
             Err(error) => {
-                tracing::warn!(agent_id, error = %error, "Fact extraction failed after consolidation");
-                0
+                tracing::warn!(agent_id = %self.agent_id, error = %error, "failed to load active facts for consolidation reconciliation");
+                return;
             }
+        };
+
+        if active_facts.len() < 2 {
+            return;
+        }
+
+        let cutoff = (Utc::now() - Duration::hours(24)).to_rfc3339();
+        let recent_facts = active_facts
+            .iter()
+            .filter(|fact| fact.created_at > cutoff)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for recent in recent_facts {
+            if active_facts.iter().all(|fact| fact.id != recent.id) {
+                continue;
+            }
+
+            let others = active_facts
+                .iter()
+                .filter(|fact| fact.id != recent.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if others.is_empty() {
+                continue;
+            }
+
+            let (step_a, step_a_failed) = match self.find_conflicting_fact(&recent, &others).await {
+                Ok(conflict) => (conflict, false),
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        recent_fact_id = %recent.id,
+                        error = %error,
+                        "embedding-based conflict check failed during consolidation reconciliation; falling back to step-B"
+                    );
+                    (None, true)
+                }
+            };
+
+            let conflict = if self.embedding_provider.is_some() && !step_a_failed {
+                step_a.filter(|candidate| fact_conflict_step_b_passes(&recent, candidate))
+            } else {
+                others
+                    .into_iter()
+                    .find(|candidate| fact_conflict_step_b_passes(&recent, candidate))
+            };
+
+            let Some(conflict) = conflict else {
+                continue;
+            };
+
+            if let Err(error) = self
+                .supersede_with_existing_fact(&conflict, &recent, "auto_consolidation_reconcile")
+                .await
+            {
+                tracing::warn!(
+                    agent_id = %self.agent_id,
+                    old_fact_id = %conflict.id,
+                    replacement_fact_id = %recent.id,
+                    error = %error,
+                    "failed to auto-supersede fact during consolidation reconciliation"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                agent_id = %self.agent_id,
+                old_fact_id = %conflict.id,
+                replacement_fact_id = %recent.id,
+                reason = "auto_consolidation_reconcile",
+                "auto-superseded conflicting fact during 04:00 reconciliation"
+            );
+
+            active_facts.retain(|fact| fact.id != conflict.id);
         }
     }
 
-    async fn extract_facts_inner(
+    async fn supersede_with_existing_fact(
         &self,
-        agent_id: &str,
-        daily_sections: &str,
-        fact_store: &FactStore,
-    ) -> Result<usize> {
-        let response = self
-            .request_consolidation(FACT_EXTRACTION_SYSTEM_PROMPT, daily_sections.to_string())
-            .await?;
-        let extracted =
-            serde_json::from_str::<Vec<ExtractedFact>>(&strip_markdown_fence(&response.text))?;
-        if extracted.is_empty() {
-            return Ok(0);
-        }
+        old_fact: &Fact,
+        replacement_fact: &Fact,
+        reason: &str,
+    ) -> Result<()> {
+        let Some(memory_store) = &self.memory_store else {
+            return Err(anyhow!("memory store unavailable for fact reconciliation"));
+        };
 
-        let now = Utc::now().to_rfc3339();
-        let mut active_facts = fact_store.get_active_facts(agent_id).await?;
+        let db = memory_store.db();
+        let old_fact_id = old_fact.id.clone();
+        let old_content = old_fact.content.clone();
+        let replacement_id = replacement_fact.id.clone();
+        let replacement_content = replacement_fact.content.clone();
+        let reason = reason.to_string();
 
-        for extracted_fact in &extracted {
-            let content = extracted_fact.content.trim();
-            if content.is_empty() {
-                continue;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let tx = conn.transaction()?;
+            let now = Utc::now().to_rfc3339();
+            let updated = tx.execute(
+                "UPDATE facts SET status = 'superseded', superseded_by = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'active'",
+                [&replacement_id, &now, &old_fact_id],
+            )?;
+            if updated == 0 {
+                tx.rollback()?;
+                return Ok(());
             }
 
-            let fact = Fact {
-                id: fact_store::generate_fact_id(agent_id, content),
-                agent_id: agent_id.to_string(),
-                content: content.to_string(),
-                fact_type: extracted_fact.fact_type.trim().to_string(),
-                importance: extracted_fact.importance.clamp(0.0, 1.0),
-                confidence: 1.0,
-                status: "active".to_string(),
-                occurred_at: extracted_fact.occurred_at.clone(),
-                recorded_at: now.clone(),
-                source_type: "consolidation".to_string(),
-                source_session: None,
-                access_count: 0,
-                last_accessed: None,
-                superseded_by: None,
-                salience: 50,
-                supersede_reason: None,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            };
+            tx.execute(
+                "INSERT INTO fact_history (id, fact_id, event, old_content, new_content, reason, created_at) VALUES (?1, ?2, 'SUPERSEDE', ?3, ?4, ?5, ?6)",
+                [
+                    &format!(
+                        "reconcile-{}-{}",
+                        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                        replacement_id
+                    ),
+                    &old_fact_id,
+                    &old_content,
+                    &replacement_content,
+                    &reason,
+                    &now,
+                ],
+            )?;
 
-            if fact_store
-                .find_by_content(agent_id, &fact.content)
-                .await?
-                .is_some()
-            {
-                continue;
-            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await??;
 
-            if let Some(conflict) = self
-                .find_conflicting_fact(&fact, &active_facts)
-                .await?
-                .filter(|existing| existing.agent_id == agent_id)
-            {
-                fact_store
-                    .supersede(&conflict.id, &fact, "Updated by consolidation")
-                    .await?;
-                active_facts.retain(|existing| existing.id != conflict.id);
-                active_facts.push(fact);
-                continue;
-            }
-
-            fact_store.insert_fact(&fact).await?;
-            fact_store.record_add(&fact).await?;
-            active_facts.push(fact);
-        }
-
-        Ok(extracted.len())
+        Ok(())
     }
 
     async fn find_conflicting_fact(
@@ -1868,6 +1871,16 @@ fn jaccard_similarity(
     intersection as f64 / union as f64
 }
 
+fn fact_conflict_step_b_passes(new_fact: &Fact, existing: &Fact) -> bool {
+    if new_fact.fact_type != existing.fact_type {
+        return false;
+    }
+
+    let new_tokens = normalized_word_set(&new_fact.content);
+    let existing_tokens = normalized_word_set(&existing.content);
+    jaccard_similarity(&new_tokens, &existing_tokens) > 0.6
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2463,7 +2476,8 @@ Working on Clawhive memory safety.
     }
 
     #[tokio::test]
-    async fn consolidation_extracts_and_supersedes_conflicting_facts() -> Result<()> {
+    async fn consolidation_reconciles_recent_conflicting_facts_without_creating_new_ones(
+    ) -> Result<()> {
         use chrono::{Local, Utc};
 
         let (_dir, file_store) = build_file_store()?;
@@ -2476,17 +2490,18 @@ Working on Clawhive memory safety.
 
         let memory_store = Arc::new(MemoryStore::open_in_memory()?);
         let fact_store = FactStore::new(memory_store.db());
-        let now = Utc::now().to_rfc3339();
+        let old_created = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        let recent_created = Utc::now().to_rfc3339();
         let old_fact = Fact {
-            id: generate_fact_id("agent-1", "User lives in Berlin"),
+            id: generate_fact_id("agent-1", "User lives in Tokyo city"),
             agent_id: "agent-1".to_string(),
-            content: "User lives in Berlin".to_string(),
+            content: "User lives in Tokyo city".to_string(),
             fact_type: "event".to_string(),
             importance: 0.6,
             confidence: 1.0,
             status: "active".to_string(),
             occurred_at: None,
-            recorded_at: now.clone(),
+            recorded_at: old_created.clone(),
             source_type: "consolidation".to_string(),
             source_session: None,
             access_count: 0,
@@ -2494,16 +2509,36 @@ Working on Clawhive memory safety.
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
-            created_at: now.clone(),
-            updated_at: now,
+            created_at: old_created.clone(),
+            updated_at: old_created,
         };
         fact_store.insert_fact(&old_fact).await?;
         fact_store.record_add(&old_fact).await?;
 
-        let router = build_router_with_provider(SequenceProvider::new(vec![
-            "[]".to_string(),
-            r#"[{"content":"User lives in Tokyo","fact_type":"event","importance":0.9,"occurred_at":null}]"#.to_string(),
-        ]));
+        let recent_fact = Fact {
+            id: generate_fact_id("agent-1", "User lives in Tokyo city center"),
+            agent_id: "agent-1".to_string(),
+            content: "User lives in Tokyo city center".to_string(),
+            fact_type: "event".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: recent_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-1".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            created_at: recent_created.clone(),
+            updated_at: recent_created,
+        };
+        fact_store.insert_fact(&recent_fact).await?;
+        fact_store.record_add(&recent_fact).await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec!["[]".to_string()]));
 
         let consolidator = HippocampusConsolidator::new(
             "agent-1".to_string(),
@@ -2517,19 +2552,98 @@ Working on Clawhive memory safety.
 
         let report = consolidator.consolidate().await?;
 
-        assert_eq!(report.facts_extracted, 1);
+        assert_eq!(report.facts_extracted, 0);
         let facts = fact_store.get_active_facts("agent-1").await?;
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].content, "User lives in Tokyo");
-
-        let lineage_store = MemoryLineageStore::new(memory_store.db());
-        let links = lineage_store
-            .get_links_for_source("agent-1", "fact", &facts[0].id)
-            .await?;
-        assert_eq!(links.len(), 1);
+        assert_eq!(facts[0].id, recent_fact.id);
 
         let history = fact_store.get_history(&old_fact.id).await?;
         assert_eq!(history[0].event, "SUPERSEDE");
+        assert_eq!(
+            history[0].new_content.as_deref(),
+            Some(recent_fact.content.as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_reconcile_falls_back_to_step_b_when_embedding_unavailable() -> Result<()>
+    {
+        use chrono::{Local, Utc};
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# Memory\n\nExisting").await?;
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Observations\n\nUser preference updated.")
+            .await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let fact_store = FactStore::new(memory_store.db());
+        let old_created = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        let recent_created = Utc::now().to_rfc3339();
+
+        let old_fact = Fact {
+            id: generate_fact_id("agent-1", "User prefers Rust for backend services"),
+            agent_id: "agent-1".to_string(),
+            content: "User prefers Rust for backend services".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.6,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: old_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-old".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            created_at: old_created.clone(),
+            updated_at: old_created,
+        };
+        fact_store.insert_fact(&old_fact).await?;
+        fact_store.record_add(&old_fact).await?;
+
+        let recent_fact = Fact {
+            id: generate_fact_id("agent-1", "User prefers Rust for backend systems"),
+            agent_id: "agent-1".to_string(),
+            content: "User prefers Rust for backend systems".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: recent_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-recent".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            created_at: recent_created.clone(),
+            updated_at: recent_created,
+        };
+        fact_store.insert_fact(&recent_fact).await?;
+        fact_store.record_add(&recent_fact).await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec!["[]".to_string()]));
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert_eq!(report.facts_extracted, 0);
+        let facts = fact_store.get_active_facts("agent-1").await?;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].id, recent_fact.id);
         Ok(())
     }
 
@@ -2946,7 +3060,7 @@ Working on Clawhive memory safety.
     }
 
     #[tokio::test]
-    async fn section_based_consolidation_aligns_fact_to_memory_canonical() -> Result<()> {
+    async fn section_based_consolidation_aligns_existing_fact_to_memory_canonical() -> Result<()> {
         use chrono::Local;
 
         let (_dir, file_store) = build_file_store()?;
@@ -2968,10 +3082,34 @@ Working on Clawhive memory safety.
                 today.format("%Y-%m-%d")
             ),
             "- Existing project note\n- Use section-based consolidation for memory".to_string(),
-            r#"[{"content":"Use section-based consolidation for memory","fact_type":"decision","importance":0.9,"occurred_at":null}]"#.to_string(),
         ]));
 
         let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let fact_store = FactStore::new(memory_store.db());
+        let now = Utc::now().to_rfc3339();
+        let fact = Fact {
+            id: generate_fact_id("agent-1", "Use section-based consolidation for memory"),
+            agent_id: "agent-1".to_string(),
+            content: "Use section-based consolidation for memory".to_string(),
+            fact_type: "decision".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: now.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-1".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        fact_store.insert_fact(&fact).await?;
+        fact_store.record_add(&fact).await?;
+
         let consolidator = HippocampusConsolidator::new(
             "agent-1".to_string(),
             file_store,
@@ -2983,16 +3121,15 @@ Working on Clawhive memory safety.
 
         let report = consolidator.consolidate().await?;
         assert!(report.memory_updated);
-        assert_eq!(report.facts_extracted, 1);
+        assert_eq!(report.facts_extracted, 0);
 
-        let fact_store = FactStore::new(memory_store.db());
-        let fact = fact_store
-            .find_by_content("agent-1", "Use section-based consolidation for memory")
-            .await?
-            .expect("fact should exist");
         let lineage_store = MemoryLineageStore::new(memory_store.db());
         let links = lineage_store
-            .get_links_for_source("agent-1", "fact", &fact.id)
+            .get_links_for_source(
+                "agent-1",
+                "fact",
+                &generate_fact_id("agent-1", "Use section-based consolidation for memory"),
+            )
             .await?;
 
         let mut has_memory_canonical = false;
@@ -3012,7 +3149,8 @@ Working on Clawhive memory safety.
     }
 
     #[tokio::test]
-    async fn section_based_consolidation_can_skip_memory_update_but_extract_facts() -> Result<()> {
+    async fn section_based_consolidation_does_not_extract_facts_when_memory_is_unchanged(
+    ) -> Result<()> {
         use chrono::Local;
 
         let (_dir, file_store) = build_file_store()?;
@@ -3035,12 +3173,14 @@ Working on Clawhive memory safety.
             "sonnet".to_string(),
             vec![],
         )
-        .with_memory_store(memory_store);
+        .with_memory_store(Arc::clone(&memory_store));
 
         let report = consolidator.consolidate().await?;
 
         assert!(!report.memory_updated);
-        assert_eq!(report.facts_extracted, 1);
+        assert_eq!(report.facts_extracted, 0);
+        let fact_store = FactStore::new(memory_store.db());
+        assert!(fact_store.get_active_facts("agent-1").await?.is_empty());
         Ok(())
     }
 
@@ -3086,12 +3226,12 @@ Working on Clawhive memory safety.
 
         let report = consolidator.consolidate().await?;
         assert!(report.memory_updated);
-        assert_eq!(report.facts_extracted, 1);
+        assert_eq!(report.facts_extracted, 0);
 
         let after_memory = file_store.read_long_term().await?;
         let after_facts = fact_store.get_active_facts("agent-1").await?;
         assert!(after_memory.contains("Use section-based consolidation for memory"));
-        assert_eq!(after_facts.len(), 1);
+        assert!(after_facts.is_empty());
         Ok(())
     }
 
