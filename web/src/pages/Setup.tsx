@@ -285,7 +285,7 @@ export default function SetupPage() {
   const handleAddChannel = async () => {
     if (!channelKind || !channelConnectorId) return;
     const isChineseChannel = ["feishu", "dingtalk", "wecom"].includes(channelKind);
-    const isQrChannel = channelKind === "weixin";
+    const isQrChannel = channelKind === "weixin" || channelKind === "whatsapp" || channelKind === "imessage";
     if (!isChineseChannel && !isQrChannel && !channelToken) return;
     const groups = channelGroups
       .split(",")
