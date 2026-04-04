@@ -1221,7 +1221,9 @@ async fn fallback_summary_links_session_chunk_to_daily_canonical() {
 
     assert_eq!(daily_links.len(), 1);
 
-    wait_until(Duration::from_secs(3), || {
+    // Session-end-only flush is async — allow up to 10s for the full
+    // flush pipeline (summary → daily write → chunk linkage) to complete.
+    wait_until(Duration::from_secs(10), || {
         let lineage_store = lineage_store.clone();
         let chunk_ids = chunk_ids.clone();
         let canonical_id = canonical_id.clone();
