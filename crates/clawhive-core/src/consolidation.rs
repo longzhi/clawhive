@@ -1949,7 +1949,18 @@ impl ConsolidationScheduler {
                     let old_path = format!("memory/{}.md", date.format("%Y-%m-%d"));
                     let new_path = format!("memory/archive/{}.md", date.format("%Y-%m-%d"));
                     let chunks_updated = if let Some(search_index) = consolidator.search_index() {
-                        search_index.update_chunk_path(&old_path, &new_path).await?
+                        match search_index.update_chunk_path(&old_path, &new_path).await {
+                            Ok(count) => count,
+                            Err(error) => {
+                                tracing::warn!(
+                                    agent_id = %consolidator.agent_id(),
+                                    date = %date,
+                                    %error,
+                                    "chunk path update failed after archive, orphan detection will catch inconsistency"
+                                );
+                                0
+                            }
+                        }
                     } else {
                         0
                     };
@@ -2004,7 +2015,14 @@ impl ConsolidationScheduler {
             if total_access == 0 {
                 consolidator.file_store.delete_archived_daily(date).await?;
                 if let Some(search_index) = consolidator.search_index() {
-                    search_index.delete_indexed_path(&archived_rel_path).await?;
+                    if let Err(error) = search_index.delete_indexed_path(&archived_rel_path).await {
+                        tracing::warn!(
+                            agent_id = %consolidator.agent_id(),
+                            date = %date,
+                            %error,
+                            "chunk deletion failed after archive file removal"
+                        );
+                    }
                 }
                 tracing::info!(
                     agent_id = %consolidator.agent_id(),

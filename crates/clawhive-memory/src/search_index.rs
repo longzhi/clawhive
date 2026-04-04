@@ -179,7 +179,7 @@ impl SearchIndex {
                 FROM chunks
                 WHERE agent_id = ?1
                   AND path = ?2
-                  AND text LIKE '%' || ?3 || '%'
+                  AND INSTR(text, ?3) > 0
                 "#,
                 params![agent_id, path, section_text],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -789,6 +789,13 @@ impl SearchIndex {
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let tx = conn.unchecked_transaction()?;
+
+            // FTS5 UNINDEXED columns cannot be UPDATEd in-place; delete + reinsert.
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = ?2)",
+                params![&old_path, &agent_id],
+            )?;
+
             let chunks_updated = tx.execute(
                 "UPDATE chunks SET path = ?2, updated_at = ?3 WHERE path = ?1 AND agent_id = ?4",
                 params![&old_path, &new_path, &updated_at, &agent_id],
@@ -797,6 +804,17 @@ impl SearchIndex {
                 "UPDATE files SET path = ?2 WHERE path = ?1 AND agent_id = ?3",
                 params![&old_path, &new_path, &agent_id],
             )?;
+
+            tx.execute(
+                r#"
+                INSERT INTO chunks_fts(text, id, path, source, model, start_line, end_line)
+                SELECT text, id, path, source, model, start_line, end_line
+                FROM chunks
+                WHERE path = ?1 AND agent_id = ?2
+                "#,
+                params![&new_path, &agent_id],
+            )?;
+
             tx.commit()?;
 
             Ok::<usize, anyhow::Error>(chunks_updated)
