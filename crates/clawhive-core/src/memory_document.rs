@@ -78,6 +78,10 @@ impl MemoryDocument {
         }
     }
 
+    pub fn remove_section(&mut self, heading: &str) {
+        self.replace_section(heading, "");
+    }
+
     pub fn render(&self) -> String {
         let mut out = Vec::new();
 
@@ -234,5 +238,17 @@ mod tests {
                 "Paragraph item".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn remove_section_clears_target_section_content() {
+        let mut doc = MemoryDocument::parse(
+            "# MEMORY.md\n\n## 长期项目主线\n\n- old\n\n## 持续性背景脉络\n\n- keep\n",
+        );
+
+        doc.remove_section("长期项目主线");
+
+        assert!(doc.section_content("长期项目主线").is_empty());
+        assert_eq!(doc.section_content("持续性背景脉络"), "- keep");
     }
 }

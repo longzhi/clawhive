@@ -155,6 +155,40 @@ impl SearchIndex {
         &self.search_config
     }
 
+    pub async fn query_section_access_stats(
+        &self,
+        path: &str,
+        section_text: &str,
+    ) -> Result<(i64, Option<String>)> {
+        if section_text.trim().is_empty() {
+            return Ok((0, None));
+        }
+
+        let db = Arc::clone(&self.db);
+        let agent_id = self.agent_id.clone();
+        let path = path.to_string();
+        let section_text = section_text.to_string();
+
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let (total_access_count, max_last_accessed): (i64, Option<String>) = conn.query_row(
+                r#"
+                SELECT COALESCE(SUM(access_count), 0), MAX(last_accessed)
+                FROM chunks
+                WHERE agent_id = ?1
+                  AND path = ?2
+                  AND text LIKE '%' || ?3 || '%'
+                "#,
+                params![agent_id, path, section_text],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            Ok::<(i64, Option<String>), anyhow::Error>((total_access_count, max_last_accessed))
+        })
+        .await?
+    }
+
     pub fn ensure_vec_table(&self, dimensions: usize) -> Result<()> {
         let db = self
             .db
@@ -3572,6 +3606,39 @@ mod tests {
         assert!((breakdown.final_score - expected_final).abs() < 1e-6);
         assert!((results[0].score - breakdown.final_score).abs() < 1e-6);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_section_access_stats_returns_sum_and_latest_access_for_matching_chunks(
+    ) -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# MEMORY.md\n\n## 长期项目主线\n\n- stale memory marker\n\n## 持续性背景脉络\n\n- keep\n",
+                "long_term",
+                &provider,
+            )
+            .await?;
+
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET access_count = 3, last_accessed = '2026-01-01T00:00:00Z' WHERE agent_id = 'test-agent' AND path = 'MEMORY.md' AND text LIKE '%stale memory marker%'",
+                [],
+            )?;
+        }
+
+        let (total_access, last_accessed) = index
+            .query_section_access_stats("MEMORY.md", "stale memory marker")
+            .await?;
+
+        assert_eq!(total_access, 3);
+        assert_eq!(last_accessed.as_deref(), Some("2026-01-01T00:00:00Z"));
         Ok(())
     }
 }
