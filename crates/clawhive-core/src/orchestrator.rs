@@ -44,7 +44,9 @@ use super::memory_retrieval::{
     filter_duplicate_chunks_against_facts, infer_memory_routing_bias, is_matching_memory_content,
     search_memory, MemoryHit, MemoryRoutingBias, MemorySearchParams, MemorySourceKind,
 };
-use super::memory_tools::{MemoryForgetTool, MemoryGetTool, MemorySearchTool, MemoryWriteTool};
+use super::memory_tools::{
+    MemoryForgetTool, MemoryGetTool, MemorySearchTool, MemorySupersedeToolDef, MemoryWriteTool,
+};
 use super::persona::Persona;
 use super::router::LlmRouter;
 use super::schedule_tool::ScheduleTool;
@@ -1229,6 +1231,12 @@ impl Orchestrator {
             "memory_forget" => {
                 let fact_store = clawhive_memory::fact_store::FactStore::new(self.memory.db());
                 MemoryForgetTool::new(fact_store, agent_id.to_string())
+                    .execute(input, ctx)
+                    .await
+            }
+            "memory_supersede" => {
+                let fact_store = clawhive_memory::fact_store::FactStore::new(self.memory.db());
+                MemorySupersedeToolDef::new(fact_store, agent_id.to_string())
                     .execute(input, ctx)
                     .await
             }
@@ -4532,6 +4540,10 @@ pub fn build_tool_registry(
         fact_store.clone(),
         file_store.clone(),
         Arc::clone(memory),
+        "default".to_string(),
+    )));
+    registry.register(Box::new(MemorySupersedeToolDef::new(
+        fact_store.clone(),
         "default".to_string(),
     )));
     registry.register(Box::new(MemoryForgetTool::new(

@@ -333,8 +333,20 @@ impl ToolExecutor for MemoryWriteTool {
                     },
                     "fact_type": {
                         "type": "string",
-                        "enum": ["preference", "decision", "event", "person", "rule"],
+                        "enum": ["preference", "decision", "event", "person", "rule", "procedure"],
                         "description": "Type of fact"
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "Importance score (0.0-1.0). Defaults to 0.7"
+                    },
+                    "salience": {
+                        "type": "integer",
+                        "description": "Salience level (0-100). Defaults based on fact_type"
+                    },
+                    "occurred_at": {
+                        "type": "string",
+                        "description": "When this fact occurred (ISO 8601). Defaults to now"
                     }
                 },
                 "required": ["content", "fact_type"]
@@ -349,6 +361,12 @@ impl ToolExecutor for MemoryWriteTool {
         let fact_type = input["fact_type"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'fact_type' field"))?;
+        let importance = input["importance"].as_f64().unwrap_or(0.7);
+        let salience = input["salience"]
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or_else(|| fact_store::default_salience_for_type(fact_type));
+        let occurred_at = input["occurred_at"].as_str().map(String::from);
 
         let active_facts = self.fact_store.get_active_facts(&self.agent_id).await?;
         if let Some(existing) = find_matching_fact(&active_facts, content) {
@@ -379,10 +397,10 @@ impl ToolExecutor for MemoryWriteTool {
             agent_id: self.agent_id.clone(),
             content: content.to_owned(),
             fact_type: fact_type.to_owned(),
-            importance: 0.5,
+            importance,
             confidence: 1.0,
             status: "active".to_owned(),
-            occurred_at: None,
+            occurred_at,
             recorded_at: now.clone(),
             source_type: "explicit_user_memory".to_owned(),
             source_session: self
@@ -393,7 +411,7 @@ impl ToolExecutor for MemoryWriteTool {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
-            salience: 50,
+            salience,
             supersede_reason: None,
             created_at: now.clone(),
             updated_at: now,
@@ -501,6 +519,145 @@ impl ToolExecutor for MemoryForgetTool {
     }
 }
 
+pub struct MemorySupersedeToolDef {
+    fact_store: FactStore,
+    agent_id: String,
+}
+
+impl MemorySupersedeToolDef {
+    pub fn new(fact_store: FactStore, agent_id: String) -> Self {
+        Self {
+            fact_store,
+            agent_id,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for MemorySupersedeToolDef {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "memory_supersede".into(),
+            description: "Replace an outdated fact with a new one. Use when a previously remembered fact has changed (e.g., user changed preference, decision was updated).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "old_fact_content": {
+                        "type": "string",
+                        "description": "Content of the fact to replace (must match existing active fact)"
+                    },
+                    "new_fact_content": {
+                        "type": "string",
+                        "description": "The updated fact content"
+                    },
+                    "fact_type": {
+                        "type": "string",
+                        "enum": ["preference", "decision", "event", "person", "rule", "procedure"],
+                        "description": "Type of the new fact"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "enum": ["correction", "update", "preference_change"],
+                        "description": "Why the old fact is being replaced"
+                    }
+                },
+                "required": ["old_fact_content", "new_fact_content", "fact_type", "reason"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        let old_fact_content = input["old_fact_content"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'old_fact_content' field"))?;
+        let new_fact_content = input["new_fact_content"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'new_fact_content' field"))?;
+        let fact_type = input["fact_type"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'fact_type' field"))?;
+        let reason = input["reason"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'reason' field"))?;
+
+        let old_fact = match self
+            .fact_store
+            .find_by_content(&self.agent_id, old_fact_content)
+            .await
+        {
+            Ok(Some(fact)) => fact,
+            Ok(None) => {
+                return Ok(ToolOutput {
+                    content: format!("No active fact found matching: {old_fact_content}"),
+                    is_error: true,
+                });
+            }
+            Err(e) => {
+                return Ok(ToolOutput {
+                    content: format!("Failed to look up fact: {e}"),
+                    is_error: true,
+                });
+            }
+        };
+
+        if old_fact.status != "active" {
+            return Ok(ToolOutput {
+                content: format!(
+                    "Fact is not active and cannot be superseded: {old_fact_content} (status: {})",
+                    old_fact.status
+                ),
+                is_error: true,
+            });
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let new_fact = Fact {
+            id: fact_store::generate_fact_id(&self.agent_id, new_fact_content),
+            agent_id: self.agent_id.clone(),
+            content: new_fact_content.to_owned(),
+            fact_type: fact_type.to_owned(),
+            importance: 0.7,
+            confidence: 1.0,
+            status: "active".to_owned(),
+            occurred_at: None,
+            recorded_at: now.clone(),
+            source_type: "explicit_user_memory".to_owned(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: fact_store::default_salience_for_type(fact_type),
+            supersede_reason: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        match self
+            .fact_store
+            .supersede(&old_fact.id, &new_fact, reason)
+            .await
+        {
+            Ok(()) => {
+                if let Err(e) = self.fact_store.record_add(&new_fact).await {
+                    return Ok(ToolOutput {
+                        content: format!("Fact superseded but failed to record add history: {e}"),
+                        is_error: true,
+                    });
+                }
+
+                Ok(ToolOutput {
+                    content: format!("Superseded: '{old_fact_content}' → '{new_fact_content}'"),
+                    is_error: false,
+                })
+            }
+            Err(e) => Ok(ToolOutput {
+                content: format!("Failed to supersede fact: {e}"),
+                is_error: true,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +718,14 @@ mod tests {
         assert_eq!(def.name, "memory_write");
         assert!(def.input_schema["properties"]["content"].is_object());
         assert!(def.input_schema["properties"]["fact_type"].is_object());
+        assert!(def.input_schema["properties"]["importance"].is_object());
+        assert!(def.input_schema["properties"]["salience"].is_object());
+        assert!(def.input_schema["properties"]["occurred_at"].is_object());
+        assert!(def.input_schema["properties"]["fact_type"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "procedure"));
     }
 
     #[test]
@@ -572,6 +737,20 @@ mod tests {
 
         assert_eq!(def.name, "memory_forget");
         assert!(def.input_schema["properties"]["content"].is_object());
+        assert!(def.input_schema["properties"]["reason"].is_object());
+    }
+
+    #[test]
+    fn memory_supersede_tool_definition() {
+        let (_tmp, memory, _, _) = setup();
+        let tool = MemorySupersedeToolDef::new(FactStore::new(memory.db()), "agent-1".to_string());
+
+        let def = tool.definition();
+
+        assert_eq!(def.name, "memory_supersede");
+        assert!(def.input_schema["properties"]["old_fact_content"].is_object());
+        assert!(def.input_schema["properties"]["new_fact_content"].is_object());
+        assert!(def.input_schema["properties"]["fact_type"].is_object());
         assert!(def.input_schema["properties"]["reason"].is_object());
     }
 
@@ -735,6 +914,12 @@ mod tests {
             .expect("fact should be stored");
         assert_eq!(fact.status, "active");
         assert_eq!(fact.fact_type, "preference");
+        assert_eq!(fact.importance, 0.7);
+        assert_eq!(
+            fact.salience,
+            fact_store::default_salience_for_type("preference")
+        );
+        assert_eq!(fact.occurred_at, None);
 
         let links = lineage_store
             .get_links_for_source("agent-1", "fact", &fact.id)
@@ -742,6 +927,45 @@ mod tests {
             .unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(fact.source_type, "explicit_user_memory");
+    }
+
+    #[tokio::test]
+    async fn memory_write_supports_explicit_importance_salience_occurred_at_and_procedure() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "Procedure for on-call handoff is documented",
+                    "fact_type": "procedure",
+                    "importance": 0.9,
+                    "salience": 80,
+                    "occurred_at": "2026-04-01T10:00:00Z"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+
+        let fact = fact_store
+            .find_by_content("agent-1", "Procedure for on-call handoff is documented")
+            .await
+            .unwrap()
+            .expect("fact should be stored");
+        assert_eq!(fact.fact_type, "procedure");
+        assert_eq!(fact.importance, 0.9);
+        assert_eq!(fact.salience, 80);
+        assert_eq!(fact.occurred_at.as_deref(), Some("2026-04-01T10:00:00Z"));
     }
 
     #[tokio::test]
@@ -952,5 +1176,248 @@ mod tests {
             .unwrap()
             .expect("fact should still exist with updated status");
         assert_eq!(fact.status, "retracted");
+    }
+
+    #[tokio::test]
+    async fn memory_supersede_replaces_active_fact() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let write_tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+        let supersede_tool = MemorySupersedeToolDef::new(fact_store.clone(), "agent-1".to_string());
+
+        write_tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers dark mode",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let result = supersede_tool
+            .execute(
+                serde_json::json!({
+                    "old_fact_content": "User prefers dark mode",
+                    "new_fact_content": "User prefers light mode",
+                    "fact_type": "preference",
+                    "reason": "preference_change"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content,
+            "Superseded: 'User prefers dark mode' → 'User prefers light mode'"
+        );
+
+        let old_fact = fact_store
+            .find_by_content("agent-1", "User prefers dark mode")
+            .await
+            .unwrap()
+            .expect("old fact should exist");
+        let new_fact = fact_store
+            .find_by_content("agent-1", "User prefers light mode")
+            .await
+            .unwrap()
+            .expect("new fact should exist");
+
+        assert_eq!(old_fact.status, "superseded");
+        assert_eq!(
+            old_fact.superseded_by.as_deref(),
+            Some(new_fact.id.as_str())
+        );
+        assert_eq!(new_fact.status, "active");
+    }
+
+    #[tokio::test]
+    async fn memory_supersede_records_reason_history() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let write_tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+        let supersede_tool = MemorySupersedeToolDef::new(fact_store.clone(), "agent-1".to_string());
+
+        write_tool
+            .execute(
+                serde_json::json!({
+                    "content": "Project deadline is Friday",
+                    "fact_type": "decision"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        supersede_tool
+            .execute(
+                serde_json::json!({
+                    "old_fact_content": "Project deadline is Friday",
+                    "new_fact_content": "Project deadline is Monday",
+                    "fact_type": "decision",
+                    "reason": "correction"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let old_fact = fact_store
+            .find_by_content("agent-1", "Project deadline is Friday")
+            .await
+            .unwrap()
+            .expect("old fact should exist");
+        let new_fact = fact_store
+            .find_by_content("agent-1", "Project deadline is Monday")
+            .await
+            .unwrap()
+            .expect("new fact should exist");
+
+        let old_history = fact_store.get_history(&old_fact.id).await.unwrap();
+        assert!(old_history
+            .iter()
+            .any(|h| h.event == "SUPERSEDE" && h.reason.as_deref() == Some("correction")));
+        assert_eq!(new_fact.supersede_reason.as_deref(), Some("correction"));
+    }
+
+    #[tokio::test]
+    async fn memory_supersede_errors_for_missing_fact() {
+        let (_tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let supersede_tool = MemorySupersedeToolDef::new(fact_store.clone(), "agent-1".to_string());
+
+        let result = supersede_tool
+            .execute(
+                serde_json::json!({
+                    "old_fact_content": "Non-existent fact",
+                    "new_fact_content": "Replacement fact",
+                    "fact_type": "event",
+                    "reason": "update"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("No active fact found matching"));
+    }
+
+    #[tokio::test]
+    async fn memory_supersede_errors_for_non_active_old_fact() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let write_tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+        let supersede_tool = MemorySupersedeToolDef::new(fact_store.clone(), "agent-1".to_string());
+
+        write_tool
+            .execute(
+                serde_json::json!({
+                    "content": "User works remotely",
+                    "fact_type": "event"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        supersede_tool
+            .execute(
+                serde_json::json!({
+                    "old_fact_content": "User works remotely",
+                    "new_fact_content": "User works onsite",
+                    "fact_type": "event",
+                    "reason": "update"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let second = supersede_tool
+            .execute(
+                serde_json::json!({
+                    "old_fact_content": "User works remotely",
+                    "new_fact_content": "User works hybrid",
+                    "fact_type": "event",
+                    "reason": "update"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(second.is_error);
+        assert!(second.content.contains("Fact is not active"));
+    }
+
+    #[tokio::test]
+    async fn memory_supersede_assigns_default_salience_for_fact_type() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let write_tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+        let supersede_tool = MemorySupersedeToolDef::new(fact_store.clone(), "agent-1".to_string());
+
+        write_tool
+            .execute(
+                serde_json::json!({
+                    "content": "Team standup is at 9am",
+                    "fact_type": "event"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        supersede_tool
+            .execute(
+                serde_json::json!({
+                    "old_fact_content": "Team standup is at 9am",
+                    "new_fact_content": "Team standup is at 10am",
+                    "fact_type": "event",
+                    "reason": "update"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let new_fact = fact_store
+            .find_by_content("agent-1", "Team standup is at 10am")
+            .await
+            .unwrap()
+            .expect("new fact should exist");
+        assert_eq!(
+            new_fact.salience,
+            fact_store::default_salience_for_type("event")
+        );
     }
 }
