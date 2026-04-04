@@ -162,9 +162,7 @@ mod tests {
     async fn generate_reports_expected_counts_with_seeded_data() {
         let db = setup_db().expect("setup db");
         {
-            let conn = db
-                .lock()
-                .expect("lock sqlite connection");
+            let conn = db.lock().expect("lock sqlite connection");
 
             conn.execute(
                 "INSERT INTO facts (
