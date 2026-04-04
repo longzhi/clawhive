@@ -507,8 +507,9 @@ fn score_facts(
             if fact_type_match {
                 score += 0.1;
             }
-            score += fact.importance.clamp(0.0, 1.0) * 0.1;
-            score += fact.confidence.clamp(0.0, 1.0) * 0.05;
+            score += fact.importance.clamp(0.0, 1.0) * 0.15;
+            score += fact.confidence.clamp(0.0, 1.0) * 0.1;
+            score += (fact.salience as f64 / 100.0) * 0.05;
             score *= source_weight(MemorySourceKind::Fact, bias);
 
             if score < min_score {
@@ -729,6 +730,76 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert!(hits[0].score > 0.2);
+    }
+
+    #[test]
+    fn score_facts_includes_salience_signal_in_score() {
+        let fact = Fact {
+            id: "fact-salience".to_string(),
+            agent_id: "agent".to_string(),
+            content: "User likes ramen".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.5,
+            confidence: 0.5,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: "2026-03-29T00:00:00Z".to_string(),
+            source_type: "agent_write".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 100,
+            supersede_reason: None,
+            created_at: "2026-03-29T00:00:00Z".to_string(),
+            updated_at: "2026-03-29T00:00:00Z".to_string(),
+        };
+
+        let hits = score_facts(&[fact], "likes ramen", 0.0, MemoryRoutingBias::Neutral);
+
+        assert_eq!(hits.len(), 1);
+        let expected = 1.53125;
+        assert!((hits[0].score - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn score_facts_ranks_high_salience_above_low_salience_when_relevance_is_equal() {
+        let low_salience = Fact {
+            id: "fact-low".to_string(),
+            agent_id: "agent".to_string(),
+            content: "User likes ramen".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.6,
+            confidence: 0.9,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: "2026-03-29T00:00:00Z".to_string(),
+            source_type: "agent_write".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 10,
+            supersede_reason: None,
+            created_at: "2026-03-29T00:00:00Z".to_string(),
+            updated_at: "2026-03-29T00:00:00Z".to_string(),
+        };
+        let high_salience = Fact {
+            id: "fact-high".to_string(),
+            salience: 95,
+            ..low_salience.clone()
+        };
+
+        let hits = score_facts(
+            &[low_salience, high_salience],
+            "likes ramen",
+            0.0,
+            MemoryRoutingBias::Neutral,
+        );
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].fact.id, "fact-high");
+        assert!(hits[0].score > hits[1].score);
     }
 
     #[test]
