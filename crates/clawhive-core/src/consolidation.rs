@@ -1175,6 +1175,8 @@ impl HippocampusConsolidator {
             candidate.content, candidate.fact_type, recent.content, recent.fact_type
         );
 
+        // TODO: use a dedicated compaction/cheap model instead of model_primary
+        // to reduce cost for this simple yes/no classification
         let response = self
             .router
             .chat(

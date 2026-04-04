@@ -4147,9 +4147,9 @@ impl Orchestrator {
                         .clone()
                         .unwrap_or_else(|| "neutral".to_string());
                     let affect_intensity = f64::from(candidate.affect_intensity.unwrap_or(0.0));
-                    let salience = (50.0_f64 * (1.0 + affect_intensity.clamp(0.0, 1.0) * 0.2))
-                        .min(100.0)
-                        .round() as u8;
+                    // Salience boost is applied once inside record_add via
+                    // apply_affect_salience_boost; pass raw default here.
+                    let salience = 50_u8;
                     let fact = clawhive_memory::fact_store::Fact {
                         id: clawhive_memory::fact_store::generate_fact_id(
                             agent_id,
