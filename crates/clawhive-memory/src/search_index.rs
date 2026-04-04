@@ -299,6 +299,51 @@ impl SearchIndex {
             return Ok(0);
         }
 
+        #[derive(Debug, Clone)]
+        struct InheritedChunkMetadata {
+            access_count: i64,
+            last_accessed: Option<String>,
+            created_at: Option<String>,
+        }
+
+        let db = Arc::clone(&self.db);
+        let path_for_inheritance = path.to_owned();
+        let agent_id_for_inheritance = self.agent_id.clone();
+        let inherited_by_hash = task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT
+                    hash,
+                    MAX(access_count) AS access_count,
+                    MAX(last_accessed) AS last_accessed,
+                    MIN(CASE WHEN trim(created_at) = '' THEN updated_at ELSE created_at END) AS created_at
+                FROM chunks
+                WHERE path = ?1 AND agent_id = ?2
+                GROUP BY hash
+                "#,
+            )?;
+            let mut map = std::collections::HashMap::new();
+            let rows = stmt.query_map(params![path_for_inheritance, agent_id_for_inheritance], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    InheritedChunkMetadata {
+                        access_count: row.get(1)?,
+                        last_accessed: row.get(2)?,
+                        created_at: row.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (hash, metadata) = row?;
+                map.insert(hash, metadata);
+            }
+            Ok::<std::collections::HashMap<String, InheritedChunkMetadata>, anyhow::Error>(map)
+        })
+        .await??;
+
         let hash_list = text_chunks
             .iter()
             .map(|chunk| chunk.hash.clone())
@@ -425,8 +470,8 @@ impl SearchIndex {
                 tx.execute(
                     r#"
                     INSERT INTO chunks(
-                        id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, last_accessed, agent_id
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                        id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, created_at, last_accessed, agent_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                     "#,
                     params![
                         chunk_id,
@@ -438,6 +483,7 @@ impl SearchIndex {
                         model,
                         text,
                         embedding,
+                        now_rfc,
                         now_rfc,
                         now_rfc,
                         agent_id
@@ -461,6 +507,26 @@ impl SearchIndex {
                 tx.execute(
                     "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
                     params![chunk_id, embedding],
+                )?;
+            }
+
+            for (hash, metadata) in inherited_by_hash {
+                tx.execute(
+                    r#"
+                    UPDATE chunks
+                    SET access_count = ?1,
+                        last_accessed = ?2,
+                        created_at = COALESCE(NULLIF(?3, ''), created_at)
+                    WHERE path = ?4 AND agent_id = ?5 AND hash = ?6
+                    "#,
+                    params![
+                        metadata.access_count,
+                        metadata.last_accessed,
+                        metadata.created_at,
+                        path_owned,
+                        agent_id,
+                        hash
+                    ],
                 )?;
             }
 
@@ -1869,6 +1935,186 @@ mod tests {
             |r| r.get(0),
         )?;
         assert!(has_new > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_file_sets_created_at_as_iso8601_for_new_chunks() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "memory/2026-04-04.md",
+                "# Daily\n\nnew chunk content",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let conn = db.lock().expect("lock");
+        let timestamps: Vec<String> = conn
+            .prepare("SELECT created_at FROM chunks WHERE path = 'memory/2026-04-04.md'")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        assert!(!timestamps.is_empty());
+        assert!(timestamps.iter().all(|value| !value.is_empty()));
+        assert!(timestamps
+            .iter()
+            .all(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reindex_preserves_access_metadata_for_unchanged_content_hash() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let content = "## Keep\n\nshared content\n\n## Also\n\nsame hash section";
+        let last_accessed = "2026-04-01T10:00:00Z";
+        let created_at = "2026-03-01T10:00:00Z";
+
+        index
+            .index_file("memory/2026-04-01.md", content, "daily", &provider)
+            .await?;
+
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks
+                 SET access_count = 7, last_accessed = ?1, created_at = ?2
+                 WHERE path = 'memory/2026-04-01.md'",
+                params![last_accessed, created_at],
+            )?;
+            conn.execute(
+                "UPDATE files SET hash = 'force-reindex-hash' WHERE agent_id = 'test-agent' AND path = 'memory/2026-04-01.md'",
+                [],
+            )?;
+        }
+
+        index
+            .index_file("memory/2026-04-01.md", content, "daily", &provider)
+            .await?;
+
+        let conn = db.lock().expect("lock");
+        let rows: Vec<(i64, String, String)> = conn
+            .prepare(
+                "SELECT access_count, last_accessed, created_at
+                 FROM chunks
+                 WHERE path = 'memory/2026-04-01.md'",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<(i64, String, String)>, _>>()?;
+
+        assert!(!rows.is_empty());
+        for (count, last, created) in rows {
+            assert_eq!(count, 7);
+            assert_eq!(last, last_accessed);
+            assert_eq!(created, created_at);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reindex_with_changed_boundaries_does_not_inherit_access_count() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "memory/2026-04-02.md",
+                "# Title\n\nalpha beta gamma",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET access_count = 9 WHERE path = 'memory/2026-04-02.md'",
+                [],
+            )?;
+        }
+
+        index
+            .index_file(
+                "memory/2026-04-02.md",
+                "# Title\n\nalpha beta gamma\n\n## New Section\n\nthis changes chunk boundaries",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let conn = db.lock().expect("lock");
+        let max_access_count: i64 = conn.query_row(
+            "SELECT MAX(access_count) FROM chunks WHERE path = 'memory/2026-04-02.md'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(max_access_count, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn daily_file_reindex_preserves_metadata_for_matching_hash_and_resets_new_chunks(
+    ) -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let path = "memory/2026-04-03.md";
+
+        let v1 = "## Keep\n\nstable text\n\n## Change\n\nold text";
+        let v2 = "## Keep\n\nstable text\n\n## Change\n\nnew text";
+
+        index.index_file(path, v1, "daily", &provider).await?;
+
+        let preserved_created_at = "2026-03-20T01:00:00Z";
+        let preserved_last_accessed = "2026-04-01T02:00:00Z";
+
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks
+                 SET access_count = 11,
+                     last_accessed = ?1,
+                     created_at = ?2
+                 WHERE path = ?3 AND text LIKE '%stable text%'",
+                params![preserved_last_accessed, preserved_created_at, path],
+            )?;
+        }
+
+        index.index_file(path, v2, "daily", &provider).await?;
+
+        let conn = db.lock().expect("lock");
+        let keep_row: (i64, String, String) = conn.query_row(
+            "SELECT access_count, last_accessed, created_at
+             FROM chunks
+             WHERE path = ?1 AND text LIKE '%stable text%'
+             LIMIT 1",
+            params![path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(keep_row.0, 11);
+        assert_eq!(keep_row.1, preserved_last_accessed);
+        assert_eq!(keep_row.2, preserved_created_at);
+
+        let changed_access_count: i64 = conn.query_row(
+            "SELECT access_count
+             FROM chunks
+             WHERE path = ?1 AND text LIKE '%new text%'
+             LIMIT 1",
+            params![path],
+            |row| row.get(0),
+        )?;
+        assert_eq!(changed_access_count, 0);
+
         Ok(())
     }
 

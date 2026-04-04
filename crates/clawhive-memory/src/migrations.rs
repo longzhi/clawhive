@@ -427,6 +427,30 @@ fn migrations() -> Vec<Migration> {
             WHERE flush_phase IS NULL OR flush_phase = '';
             "#,
         ),
+        (
+            25,
+            r#"
+            ALTER TABLE chunks ADD COLUMN created_at TEXT NOT NULL DEFAULT '';
+
+            UPDATE chunks
+            SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', CAST(updated_at AS INTEGER), 'unixepoch')
+            WHERE typeof(updated_at) = 'integer'
+               OR (
+                    trim(updated_at) <> ''
+                    AND trim(updated_at) GLOB '[0-9]*'
+                    AND instr(trim(updated_at), 'T') = 0
+               );
+
+            UPDATE chunks
+            SET created_at = CASE
+                WHEN trim(updated_at) = '' THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHEN trim(updated_at) GLOB '[0-9]*' AND instr(trim(updated_at), 'T') = 0
+                    THEN strftime('%Y-%m-%dT%H:%M:%SZ', CAST(updated_at AS INTEGER), 'unixepoch')
+                ELSE updated_at
+            END
+            WHERE trim(created_at) = '';
+            "#,
+        ),
     ]
 }
 
@@ -467,6 +491,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::store::MemoryStore;
 
     #[test]
     fn migration_22_backfills_null_last_accessed_from_updated_at() -> Result<()> {
@@ -602,6 +628,22 @@ mod tests {
                 PRIMARY KEY (agent_id, session_id)
             );
 
+            CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                embedding TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT NOT NULL DEFAULT '',
+                last_accessed TEXT
+            );
+
             CREATE TABLE __schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -662,6 +704,22 @@ mod tests {
                 PRIMARY KEY (agent_id, session_id)
             );
 
+            CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                embedding TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT NOT NULL DEFAULT '',
+                last_accessed TEXT
+            );
+
             CREATE TABLE __schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -697,6 +755,158 @@ mod tests {
         assert_eq!(flush_phase, "idle");
         assert_eq!(updated_at, None);
         assert_eq!(summary_cache, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migration_25_adds_created_at_column_for_chunks() -> Result<()> {
+        let store = MemoryStore::open_in_memory()?;
+        let db = store.db();
+        let conn = db.lock().expect("lock");
+
+        let has_created_at: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name = 'created_at'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(has_created_at, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_25_backfills_empty_created_at_from_updated_at_with_legacy_epoch() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                embedding TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT NOT NULL DEFAULT '',
+                last_accessed TEXT
+            );
+
+            CREATE TABLE facts (
+                id             TEXT PRIMARY KEY,
+                agent_id       TEXT NOT NULL,
+                content        TEXT NOT NULL,
+                fact_type      TEXT NOT NULL,
+                importance     REAL NOT NULL DEFAULT 0.5,
+                confidence     REAL NOT NULL DEFAULT 1.0,
+                status         TEXT NOT NULL DEFAULT 'active',
+                occurred_at    TEXT,
+                recorded_at    TEXT NOT NULL,
+                source_type    TEXT NOT NULL,
+                source_session TEXT,
+                access_count   INTEGER NOT NULL DEFAULT 0,
+                last_accessed  TEXT,
+                superseded_by  TEXT,
+                salience       INTEGER NOT NULL DEFAULT 50,
+                supersede_reason TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE session_memory_state (
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                last_flushed_turn INTEGER NOT NULL DEFAULT 0,
+                last_boundary_flush_at TEXT,
+                pending_flush INTEGER NOT NULL DEFAULT 0,
+                recent_explicit_writes TEXT NOT NULL DEFAULT '[]',
+                open_episodes TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                flush_phase TEXT NOT NULL DEFAULT 'idle',
+                flush_phase_updated_at TEXT DEFAULT NULL,
+                flush_summary_cache TEXT DEFAULT NULL,
+                PRIMARY KEY (agent_id, session_id)
+            );
+
+            CREATE TABLE embedding_cache (
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                provider_key TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                embedding TEXT NOT NULL,
+                dims INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, model, provider_key, hash)
+            );
+
+            CREATE TABLE __schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            WITH RECURSIVE versions(v) AS (
+                SELECT 1
+                UNION ALL
+                SELECT v + 1 FROM versions WHERE v < 24
+            )
+            INSERT INTO __schema_version(version, applied_at)
+            SELECT v, datetime('now') FROM versions;
+            "#,
+        )?;
+
+        conn.execute(
+            "INSERT INTO chunks(id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, access_count, agent_id, last_accessed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, '', ?8, 0, ?9, NULL)",
+            rusqlite::params![
+                "c1",
+                "memory/2026-04-04.md",
+                "daily",
+                1_i64,
+                3_i64,
+                "h1",
+                "hello",
+                "1712217600",
+                "agent-1"
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO chunks(id, path, source, start_line, end_line, hash, model, text, embedding, updated_at, access_count, agent_id, last_accessed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, '', ?8, 0, ?9, NULL)",
+            rusqlite::params![
+                "c2",
+                "memory/2026-04-04.md",
+                "daily",
+                4_i64,
+                7_i64,
+                "h2",
+                "world",
+                "",
+                "agent-1"
+            ],
+        )?;
+
+        run_migrations(&conn)?;
+
+        let (created_1, updated_1): (String, String) = conn.query_row(
+            "SELECT created_at, updated_at FROM chunks WHERE id = 'c1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(created_1, "2024-04-04T08:00:00Z");
+        assert_eq!(updated_1, "2024-04-04T08:00:00Z");
+
+        let created_2: String =
+            conn.query_row("SELECT created_at FROM chunks WHERE id = 'c2'", [], |row| {
+                row.get(0)
+            })?;
+        assert!(!created_2.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&created_2).is_ok());
 
         Ok(())
     }
