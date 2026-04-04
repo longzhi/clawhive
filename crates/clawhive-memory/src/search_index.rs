@@ -777,7 +777,34 @@ impl SearchIndex {
         Ok(())
     }
 
-    async fn delete_indexed_path(&self, path: &str) -> Result<()> {
+    pub async fn update_chunk_path(&self, old_path: &str, new_path: &str) -> Result<usize> {
+        let db = Arc::clone(&self.db);
+        let old_path = old_path.to_owned();
+        let new_path = new_path.to_owned();
+        let agent_id = self.agent_id.clone();
+        let updated_at = chrono::Utc::now().to_rfc3339();
+
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let tx = conn.unchecked_transaction()?;
+            let chunks_updated = tx.execute(
+                "UPDATE chunks SET path = ?2, updated_at = ?3 WHERE path = ?1 AND agent_id = ?4",
+                params![&old_path, &new_path, &updated_at, &agent_id],
+            )?;
+            tx.execute(
+                "UPDATE files SET path = ?2 WHERE path = ?1 AND agent_id = ?3",
+                params![&old_path, &new_path, &agent_id],
+            )?;
+            tx.commit()?;
+
+            Ok::<usize, anyhow::Error>(chunks_updated)
+        })
+        .await?
+    }
+
+    pub async fn delete_indexed_path(&self, path: &str) -> Result<()> {
         let db = Arc::clone(&self.db);
         let path = path.to_owned();
         let agent_id = self.agent_id.clone();
@@ -807,6 +834,31 @@ impl SearchIndex {
         })
         .await??;
         Ok(())
+    }
+
+    pub async fn detect_orphan_chunks(&self, known_paths: &[String]) -> Result<Vec<String>> {
+        let db = Arc::clone(&self.db);
+        let agent_id = self.agent_id.clone();
+        let known_paths = known_paths.to_vec();
+
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let known_set = known_paths
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            let mut stmt = conn.prepare("SELECT DISTINCT path FROM chunks WHERE agent_id = ?1")?;
+            let mut orphans = stmt
+                .query_map(params![&agent_id], |row| row.get::<_, String>(0))?
+                .filter_map(|row| row.ok())
+                .filter(|path| !known_set.contains(path))
+                .collect::<Vec<_>>();
+            orphans.sort();
+
+            Ok::<Vec<String>, anyhow::Error>(orphans)
+        })
+        .await?
     }
 
     pub async fn index_all(
@@ -1969,6 +2021,134 @@ mod tests {
             |r| r.get(0),
         )?;
         assert!(has_new > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_chunk_path_updates_chunk_and_file_paths_with_fresh_timestamp() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let old_path = "memory/2026-03-01.md";
+        let new_path = "memory/archive/2026-03-01.md";
+
+        index
+            .index_file(old_path, "# Daily\n\nchunk to move", "daily", &provider)
+            .await?;
+
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET updated_at = '2000-01-01T00:00:00Z' WHERE path = ?1",
+                params![old_path],
+            )?;
+        }
+
+        let updated = index.update_chunk_path(old_path, new_path).await?;
+        assert!(updated > 0);
+
+        let conn = db.lock().expect("lock");
+        let old_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = ?1 AND agent_id = 'test-agent'",
+            params![old_path],
+            |row| row.get(0),
+        )?;
+        let new_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = ?1 AND agent_id = 'test-agent'",
+            params![new_path],
+            |row| row.get(0),
+        )?;
+        let file_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE path = ?1 AND agent_id = 'test-agent'",
+            params![new_path],
+            |row| row.get(0),
+        )?;
+        let updated_ats: Vec<String> = conn
+            .prepare("SELECT updated_at FROM chunks WHERE path = ?1 AND agent_id = 'test-agent'")?
+            .query_map(params![new_path], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        assert_eq!(old_count, 0);
+        assert_eq!(new_count as usize, updated);
+        assert_eq!(file_count, 1);
+        assert!(!updated_ats.is_empty());
+        assert!(updated_ats
+            .iter()
+            .all(|value| value != "2000-01-01T00:00:00Z"));
+        assert!(updated_ats
+            .iter()
+            .all(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_indexed_path_removes_chunks_and_file_records_for_target_path() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+        let path = "memory/archive/2026-01-01.md";
+
+        index
+            .index_file(path, "# Archive\n\nremove me", "daily", &provider)
+            .await?;
+        index.delete_indexed_path(path).await?;
+
+        let conn = db.lock().expect("lock");
+        let chunk_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = ?1 AND agent_id = 'test-agent'",
+            params![path],
+            |row| row.get(0),
+        )?;
+        let file_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE path = ?1 AND agent_id = 'test-agent'",
+            params![path],
+            |row| row.get(0),
+        )?;
+        let vec_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = 'test-agent')",
+            params![path],
+            |row| row.get(0),
+        )?;
+        let fts_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks_fts WHERE id IN (SELECT id FROM chunks WHERE path = ?1 AND agent_id = 'test-agent')",
+            params![path],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(chunk_count, 0);
+        assert_eq!(file_count, 0);
+        assert_eq!(vec_count, 0);
+        assert_eq!(fts_count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn detect_orphan_chunks_returns_paths_missing_from_known_paths() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new(Arc::clone(&db), "test-agent");
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "memory/2026-04-05.md",
+                "# Daily\n\nknown",
+                "daily",
+                &provider,
+            )
+            .await?;
+        index
+            .index_file(
+                "memory/archive/2026-01-10.md",
+                "# Archive\n\norphan",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        let known_paths = vec!["memory/2026-04-05.md".to_string()];
+        let orphans = index.detect_orphan_chunks(&known_paths).await?;
+
+        assert_eq!(orphans, vec!["memory/archive/2026-01-10.md".to_string()]);
         Ok(())
     }
 

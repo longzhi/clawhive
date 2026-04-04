@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -216,6 +217,10 @@ impl HippocampusConsolidator {
 
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    pub(crate) fn search_index(&self) -> Option<&SearchIndex> {
+        self.search_index.as_ref()
     }
 
     pub async fn consolidate(&self) -> Result<ConsolidationReport> {
@@ -1940,13 +1945,24 @@ impl ConsolidationScheduler {
             }
 
             match consolidator.file_store.archive_daily(date).await {
-                Ok(path) => tracing::info!(
-                    agent_id = %consolidator.agent_id(),
-                    date = %date,
-                    action = "archive",
-                    archived_path = %path.display(),
-                    "Daily file lifecycle action"
-                ),
+                Ok(_) => {
+                    let old_path = format!("memory/{}.md", date.format("%Y-%m-%d"));
+                    let new_path = format!("memory/archive/{}.md", date.format("%Y-%m-%d"));
+                    let chunks_updated = if let Some(search_index) = consolidator.search_index() {
+                        search_index.update_chunk_path(&old_path, &new_path).await?
+                    } else {
+                        0
+                    };
+
+                    tracing::info!(
+                        agent_id = %consolidator.agent_id(),
+                        date = %date,
+                        old_path = %old_path,
+                        new_path = %new_path,
+                        chunks_updated,
+                        "archived daily file and updated chunk paths"
+                    );
+                }
                 Err(error) => tracing::warn!(
                     agent_id = %consolidator.agent_id(),
                     date = %date,
@@ -1987,11 +2003,14 @@ impl ConsolidationScheduler {
 
             if total_access == 0 {
                 consolidator.file_store.delete_archived_daily(date).await?;
+                if let Some(search_index) = consolidator.search_index() {
+                    search_index.delete_indexed_path(&archived_rel_path).await?;
+                }
                 tracing::info!(
                     agent_id = %consolidator.agent_id(),
                     date = %date,
-                    action = "delete",
-                    "Daily file lifecycle action"
+                    path = %archived_rel_path,
+                    "deleted archived daily file and associated chunks"
                 );
                 continue;
             }
@@ -2005,7 +2024,71 @@ impl ConsolidationScheduler {
             );
         }
 
+        if let Some(search_index) = consolidator.search_index() {
+            let known_paths = Self::collect_known_chunk_paths(consolidator).await?;
+            let orphan_paths = search_index.detect_orphan_chunks(&known_paths).await?;
+            if !orphan_paths.is_empty() {
+                tracing::warn!(
+                    agent_id = %consolidator.agent_id(),
+                    orphan_paths = ?orphan_paths,
+                    "detected orphan chunk paths"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    async fn collect_known_chunk_paths(
+        consolidator: &Arc<HippocampusConsolidator>,
+    ) -> Result<Vec<String>> {
+        let mut paths: HashSet<String> =
+            HashSet::from(["MEMORY.md".to_string(), "MEMORY_ARCHIVED.md".to_string()]);
+
+        for (date, _) in consolidator.file_store.list_daily_files().await? {
+            paths.insert(format!("memory/{}.md", date.format("%Y-%m-%d")));
+        }
+
+        for (date, _) in consolidator.file_store.list_archived_files().await? {
+            paths.insert(format!("memory/archive/{}.md", date.format("%Y-%m-%d")));
+        }
+
+        if let Some(reader) = &consolidator.reindex_session_reader {
+            for session_id in reader.list_sessions().await? {
+                paths.insert(format!("sessions/{session_id}"));
+            }
+        }
+
+        if let Some(store) = &consolidator.memory_store {
+            for path in Self::list_indexed_session_paths(store, consolidator.agent_id()).await? {
+                paths.insert(path);
+            }
+        }
+
+        let mut known_paths = paths.into_iter().collect::<Vec<_>>();
+        known_paths.sort();
+        Ok(known_paths)
+    }
+
+    async fn list_indexed_session_paths(
+        store: &Arc<MemoryStore>,
+        agent_id: &str,
+    ) -> Result<Vec<String>> {
+        let db = store.db();
+        let agent_id = agent_id.to_string();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT path FROM files WHERE agent_id = ?1 AND source = 'session'",
+            )?;
+            let paths = stmt
+                .query_map([&agent_id], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<String>, _>>()?;
+            Ok::<Vec<String>, anyhow::Error>(paths)
+        })
+        .await?
     }
 
     async fn query_archived_chunk_access_count(
@@ -2839,6 +2922,157 @@ Working on Clawhive memory safety.
                 .await
                 .is_ok()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn daily_file_lifecycle_updates_chunk_paths_after_archive() -> Result<()> {
+        use clawhive_memory::search_index::SearchIndex;
+
+        let (_dir, file_store) = build_file_store()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let search_index = SearchIndex::new(memory_store.db(), "agent-1");
+        let provider = StubEmbeddingProvider;
+        let now = Utc::now();
+        let old_date = (now - chrono::Duration::days(35)).date_naive();
+        let old_path = format!("memory/{}.md", old_date.format("%Y-%m-%d"));
+        let archived_path = format!("memory/archive/{}.md", old_date.format("%Y-%m-%d"));
+
+        file_store.write_daily(old_date, "old").await?;
+        search_index
+            .index_file(&old_path, "# Daily\n\nold", "daily", &provider)
+            .await?;
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store,
+                build_router(),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_memory_store(memory_store)
+            .with_search_index(search_index),
+        );
+
+        ConsolidationScheduler::run_daily_file_lifecycle(&consolidator, 30, now).await?;
+
+        let db = consolidator
+            .memory_store
+            .as_ref()
+            .expect("memory store")
+            .db();
+        let conn = db.lock().expect("lock");
+        let old_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = ?1 AND agent_id = 'agent-1'",
+            [&old_path],
+            |row| row.get(0),
+        )?;
+        let archived_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = ?1 AND agent_id = 'agent-1'",
+            [&archived_path],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(old_count, 0);
+        assert!(archived_count > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn daily_file_lifecycle_deletes_indexed_chunks_when_archived_file_is_deleted(
+    ) -> Result<()> {
+        use clawhive_memory::search_index::SearchIndex;
+
+        let (_dir, file_store) = build_file_store()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let search_index = SearchIndex::new(memory_store.db(), "agent-1");
+        let provider = StubEmbeddingProvider;
+        let now = Utc::now();
+        let archived_date = (now - chrono::Duration::days(95)).date_naive();
+        let archived_path = format!("memory/archive/{}.md", archived_date.format("%Y-%m-%d"));
+
+        file_store.write_daily(archived_date, "old").await?;
+        file_store.archive_daily(archived_date).await?;
+        search_index
+            .index_file(&archived_path, "# Archive\n\nold", "daily", &provider)
+            .await?;
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store.clone(),
+                build_router(),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_memory_store(memory_store)
+            .with_search_index(search_index),
+        );
+
+        ConsolidationScheduler::run_daily_file_lifecycle(&consolidator, 30, now).await?;
+
+        assert!(
+            fs::metadata(file_store.workspace_dir().join(&archived_path))
+                .await
+                .is_err()
+        );
+
+        let db = consolidator
+            .memory_store
+            .as_ref()
+            .expect("memory store")
+            .db();
+        let conn = db.lock().expect("lock");
+        let chunk_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE path = ?1 AND agent_id = 'agent-1'",
+            [&archived_path],
+            |row| row.get(0),
+        )?;
+        assert_eq!(chunk_count, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collect_known_chunk_paths_includes_memory_daily_archive_and_session_paths(
+    ) -> Result<()> {
+        let (dir, file_store) = build_file_store()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let session_writer = clawhive_memory::session::SessionWriter::new(dir.path());
+        let session_reader = SessionReader::new(dir.path());
+        let now = Utc::now();
+        let daily_date = (now - chrono::Duration::days(1)).date_naive();
+        let archived_date = (now - chrono::Duration::days(40)).date_naive();
+
+        file_store.write_daily(daily_date, "recent").await?;
+        file_store.write_daily(archived_date, "old").await?;
+        file_store.archive_daily(archived_date).await?;
+        session_writer.start_session("session-1", "agent-1").await?;
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store,
+                build_router(),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_memory_store(memory_store)
+            .with_session_reader_for_reindex(session_reader),
+        );
+
+        let known_paths = ConsolidationScheduler::collect_known_chunk_paths(&consolidator).await?;
+
+        assert!(known_paths.contains(&"MEMORY.md".to_string()));
+        assert!(known_paths.contains(&"MEMORY_ARCHIVED.md".to_string()));
+        assert!(known_paths.contains(&format!("memory/{}.md", daily_date.format("%Y-%m-%d"))));
+        assert!(known_paths.contains(&format!(
+            "memory/archive/{}.md",
+            archived_date.format("%Y-%m-%d")
+        )));
+        assert!(known_paths.contains(&"sessions/session-1".to_string()));
+
         Ok(())
     }
 
