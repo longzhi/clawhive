@@ -661,6 +661,13 @@ async fn start_bot(
             .with_file_store_for_reindex(file_store)
             .with_session_reader_for_reindex(session_reader)
             .with_memory_store(Arc::clone(&memory))
+            .with_session_idle_minutes(
+                agent_config
+                    .memory_policy
+                    .as_ref()
+                    .and_then(|policy| policy.idle_minutes)
+                    .unwrap_or(30) as i64,
+            )
             .with_embedding_cache_ttl_days(embedding_cache_ttl_days),
         );
         consolidators.push(consolidator);

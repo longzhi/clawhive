@@ -9,7 +9,7 @@ use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::memory_lineage::MemoryLineageStore;
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::session::SessionReader;
-use clawhive_memory::MemoryStore;
+use clawhive_memory::{EpisodeStatusRecord, FlushPhase, MemoryStore, SessionMemoryStateRecord};
 use clawhive_provider::LlmMessage;
 
 use super::memory_document::{MemoryDocument, MEMORY_SECTION_ORDER};
@@ -153,6 +153,7 @@ pub struct HippocampusConsolidator {
     reindex_session_reader: Option<SessionReader>,
     memory_store: Option<Arc<MemoryStore>>,
     embedding_cache_ttl_days: u64,
+    session_idle_minutes: i64,
 }
 
 #[derive(Debug)]
@@ -185,6 +186,7 @@ impl HippocampusConsolidator {
             reindex_session_reader: None,
             memory_store: None,
             embedding_cache_ttl_days: 90,
+            session_idle_minutes: 30,
         }
     }
 
@@ -215,6 +217,11 @@ impl HippocampusConsolidator {
 
     pub fn with_embedding_cache_ttl_days(mut self, ttl_days: u64) -> Self {
         self.embedding_cache_ttl_days = ttl_days;
+        self
+    }
+
+    pub fn with_session_idle_minutes(mut self, idle_minutes: i64) -> Self {
+        self.session_idle_minutes = idle_minutes.max(1);
         self
     }
 
@@ -1640,6 +1647,17 @@ impl ConsolidationScheduler {
                         }
                     }
                 }
+                for consolidator in &self.consolidators {
+                    if let Err(error) =
+                        Self::scan_stale_sessions_and_trigger_boundary_flush(consolidator).await
+                    {
+                        tracing::warn!(
+                            agent_id = %consolidator.agent_id(),
+                            %error,
+                            "Stale session boundary flush scan failed"
+                        );
+                    }
+                }
             }
         })
     }
@@ -1652,6 +1670,89 @@ impl ConsolidationScheduler {
             results.push((agent_id, result));
         }
         results
+    }
+
+    async fn scan_stale_sessions_and_trigger_boundary_flush(
+        consolidator: &Arc<HippocampusConsolidator>,
+    ) -> Result<()> {
+        let Some(store) = &consolidator.memory_store else {
+            return Ok(());
+        };
+
+        const MAX_STALE_SESSIONS_PER_SCAN: usize = 5;
+        const DEAD_FLUSH_TIMEOUT_MINUTES: i64 = 10;
+
+        let mut candidates = Vec::new();
+        let dead = store.find_dead_flushes(DEAD_FLUSH_TIMEOUT_MINUTES).await?;
+        candidates.extend(
+            dead.into_iter()
+                .filter(|state| state.agent_id == consolidator.agent_id)
+                .take(MAX_STALE_SESSIONS_PER_SCAN),
+        );
+
+        if candidates.len() < MAX_STALE_SESSIONS_PER_SCAN {
+            let open_episode_stale = Self::find_stale_open_episode_states(
+                store,
+                consolidator.agent_id(),
+                consolidator.session_idle_minutes,
+                MAX_STALE_SESSIONS_PER_SCAN - candidates.len(),
+            )
+            .await?;
+            for state in open_episode_stale {
+                if candidates
+                    .iter()
+                    .any(|existing| existing.session_id == state.session_id)
+                {
+                    continue;
+                }
+                candidates.push(state);
+                if candidates.len() >= MAX_STALE_SESSIONS_PER_SCAN {
+                    break;
+                }
+            }
+        }
+
+        for state in candidates {
+            if let Err(error) = Self::trigger_stale_boundary_flush(store, state).await {
+                tracing::warn!(
+                    agent_id = %consolidator.agent_id(),
+                    %error,
+                    "Failed to trigger stale boundary flush"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn trigger_stale_boundary_flush(
+        store: &Arc<MemoryStore>,
+        mut state: SessionMemoryStateRecord,
+    ) -> Result<()> {
+        let now = Utc::now();
+        for episode in &mut state.open_episodes {
+            if episode.status == EpisodeStatusRecord::Open {
+                episode.status = EpisodeStatusRecord::Closed;
+                episode.last_activity_at = now;
+            }
+        }
+
+        state.pending_flush = true;
+        state.flush_phase = FlushPhase::Captured.as_str().to_string();
+        state.flush_phase_updated_at = Some(now.to_rfc3339());
+
+        store.upsert_session_memory_state(state).await
+    }
+
+    async fn find_stale_open_episode_states(
+        store: &Arc<MemoryStore>,
+        agent_id: &str,
+        idle_minutes: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionMemoryStateRecord>> {
+        store
+            .find_stale_open_episode_states(agent_id, idle_minutes, limit)
+            .await
     }
 }
 
@@ -1775,12 +1876,17 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
+    use chrono::Utc;
     use clawhive_memory::embedding::EmbeddingProvider;
     use clawhive_memory::fact_store::{generate_fact_id, Fact, FactStore};
     use clawhive_memory::file_store::MemoryFileStore;
     use clawhive_memory::memory_lineage::MemoryLineageStore;
     use clawhive_memory::session::SessionReader;
     use clawhive_memory::store::MemoryStore;
+    use clawhive_memory::{
+        EpisodeStateRecord, EpisodeStatusRecord, EpisodeTaskStateRecord, FlushPhase,
+        SessionMemoryStateRecord,
+    };
     use clawhive_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderRegistry, StubProvider};
     use tempfile::TempDir;
 
@@ -2176,6 +2282,64 @@ Working on Clawhive memory safety.
             30,
         );
         assert_eq!(scheduler.cron_expr, "0 4 * * *");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_scan_triggers_dead_flush_session_and_closes_open_episodes() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        memory_store
+            .upsert_session_memory_state(SessionMemoryStateRecord {
+                agent_id: "agent-1".to_string(),
+                session_id: "session-dead".to_string(),
+                session_key: "chat-dead".to_string(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: false,
+                flush_phase: FlushPhase::Summarized.as_str().to_string(),
+                flush_phase_updated_at: Some(
+                    (Utc::now() - chrono::Duration::minutes(20)).to_rfc3339(),
+                ),
+                flush_summary_cache: None,
+                recent_explicit_writes: Vec::new(),
+                open_episodes: vec![EpisodeStateRecord {
+                    episode_id: "session-dead:1".to_string(),
+                    start_turn: 1,
+                    end_turn: 1,
+                    status: EpisodeStatusRecord::Open,
+                    task_state: EpisodeTaskStateRecord::Exploring,
+                    topic_sketch: "topic".to_string(),
+                    last_activity_at: Utc::now() - chrono::Duration::minutes(60),
+                }],
+            })
+            .await?;
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store,
+                build_router(),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_memory_store(Arc::clone(&memory_store))
+            .with_session_idle_minutes(30),
+        );
+
+        ConsolidationScheduler::scan_stale_sessions_and_trigger_boundary_flush(&consolidator)
+            .await?;
+
+        let state = memory_store
+            .get_session_memory_state("agent-1", "session-dead")
+            .await?
+            .expect("state exists");
+        assert!(state.pending_flush);
+        assert_eq!(state.flush_phase, FlushPhase::Captured.as_str());
+        assert!(state
+            .open_episodes
+            .iter()
+            .all(|episode| episode.status != EpisodeStatusRecord::Open));
         Ok(())
     }
 

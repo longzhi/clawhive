@@ -63,6 +63,7 @@ use super::workspace_manager::{AgentWorkspaceManager, AgentWorkspaceState};
 const SKILL_INSTALL_USAGE_HINT: &str = "请提供 skill 来源路径或 URL。用法: /skill install <source>";
 const EPISODE_FLUSH_PENDING_GRACE_SECS: i64 = 30;
 const MAX_OPEN_EPISODE_TURNS: u64 = 4;
+const MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH: u64 = 50;
 
 #[derive(Debug, Clone)]
 struct BoundaryFlushEpisode {
@@ -262,7 +263,6 @@ fn episode_status_ready_for_boundary_flush(
 fn collect_unflushed_boundary_turns(
     entries: Vec<SessionEntry>,
     last_flushed_turn: u64,
-    history_limit: usize,
 ) -> Option<(Vec<BoundaryFlushEpisode>, u64)> {
     let mut turn_count = 0_u64;
     let mut include_current_turn = false;
@@ -309,21 +309,14 @@ fn collect_unflushed_boundary_turns(
         return None;
     }
 
-    if turns.len() > history_limit {
-        let start = turns.len() - history_limit;
-        turns = turns.split_off(start);
-    }
-
     Some((turns, turn_count))
 }
 
 fn collect_unflushed_boundary_episodes(
     entries: Vec<SessionEntry>,
     last_flushed_turn: u64,
-    history_limit: usize,
 ) -> Option<(Vec<BoundaryFlushEpisode>, u64)> {
-    let (turns, turn_count) =
-        collect_unflushed_boundary_turns(entries, last_flushed_turn, history_limit)?;
+    let (turns, turn_count) = collect_unflushed_boundary_turns(entries, last_flushed_turn)?;
 
     const MAX_EPISODE_TURNS: usize = 3;
     const MAX_EPISODE_CHARS: usize = 1600;
@@ -465,6 +458,44 @@ fn collect_boundary_episode_for_range(
             messages,
         })
     }
+}
+
+fn split_boundary_flush_episode_batches(
+    episodes: &[BoundaryFlushEpisode],
+    max_turns_per_batch: u64,
+) -> Vec<Vec<BoundaryFlushEpisode>> {
+    if episodes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut batches = Vec::new();
+    let mut current_batch = Vec::new();
+    let mut current_turns = 0_u64;
+
+    for episode in episodes {
+        let episode_turns = episode
+            .end_turn
+            .saturating_sub(episode.start_turn)
+            .saturating_add(1)
+            .max(1);
+
+        if !current_batch.is_empty()
+            && current_turns.saturating_add(episode_turns) > max_turns_per_batch
+        {
+            batches.push(current_batch);
+            current_batch = Vec::new();
+            current_turns = 0;
+        }
+
+        current_turns = current_turns.saturating_add(episode_turns);
+        current_batch.push(episode.clone());
+    }
+
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    batches
 }
 
 pub struct Orchestrator {
@@ -1941,18 +1972,7 @@ impl Orchestrator {
                 },
             )
             .await;
-        if let Some(closed_episode) =
-            closed_episode.filter(|episode| episode.task_state == EpisodeTaskStateRecord::Delivered)
-        {
-            self.spawn_closed_episode_flush(
-                view.as_ref(),
-                agent_id,
-                &session_result.session,
-                agent,
-                closed_episode,
-            )
-            .await;
-        }
+        let _ = closed_episode;
 
         {
             let mut session = session_result.session.clone();
@@ -3059,7 +3079,7 @@ impl Orchestrator {
         &self,
         agent_id: &str,
         session: &Session,
-        agent: &FullAgentConfig,
+        _agent: &FullAgentConfig,
     ) -> Option<BoundaryFlushSnapshot> {
         let workspace = self.workspace_state_for(agent_id);
         let state = self
@@ -3077,13 +3097,12 @@ impl Orchestrator {
             return None;
         }
 
-        let history_limit = history_message_limit(agent).max(20);
         let last_flushed_turn = state
             .as_ref()
             .map(|state| state.last_flushed_turn)
             .unwrap_or(0);
         let (turns, turn_count) =
-            collect_unflushed_boundary_turns(entries.clone(), last_flushed_turn, history_limit)?;
+            collect_unflushed_boundary_turns(entries.clone(), last_flushed_turn)?;
         let state_episodes = state
             .as_ref()
             .map(|state| {
@@ -3100,17 +3119,29 @@ impl Orchestrator {
             })
             .unwrap_or_default();
         let episodes = if state_episodes.is_empty() {
-            collect_unflushed_boundary_episodes(entries, last_flushed_turn, history_limit)
+            collect_unflushed_boundary_episodes(entries, last_flushed_turn)
                 .map(|(episodes, _)| episodes)?
         } else {
             let episodes = build_boundary_episodes_from_state(&turns, &state_episodes);
             if episodes.is_empty() {
-                collect_unflushed_boundary_episodes(entries, last_flushed_turn, history_limit)
+                collect_unflushed_boundary_episodes(entries, last_flushed_turn)
                     .map(|(episodes, _)| episodes)?
             } else {
                 episodes
             }
         };
+
+        let unflushed_turns = turn_count.saturating_sub(last_flushed_turn);
+        if unflushed_turns > MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH {
+            tracing::warn!(
+                %agent_id,
+                session_id = %session.session_id,
+                unflushed_turns,
+                batch_turn_limit = MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH,
+                "Boundary flush has long unflushed history; splitting flush into turn-capped batches"
+            );
+        }
+
         Some(BoundaryFlushSnapshot {
             episodes,
             turn_count,
@@ -3507,13 +3538,15 @@ impl Orchestrator {
         });
     }
 
-    async fn schedule_delivered_episode_flushes_for_session_end(
+    async fn schedule_session_end_flush(
         &self,
         view: &ConfigView,
         agent_id: &str,
         session: &Session,
         agent: &FullAgentConfig,
     ) {
+        Self::close_open_episodes_for_session_end(&self.memory, agent_id, session).await;
+
         let current = self
             .memory
             .get_session_memory_state(agent_id, &session.session_id)
@@ -3523,17 +3556,14 @@ impl Orchestrator {
             return;
         };
 
-        let mut delivered_closed = state
+        let mut session_end_episodes = state
             .open_episodes
             .into_iter()
-            .filter(|episode| {
-                episode.status == EpisodeStatusRecord::Closed
-                    && episode.task_state == EpisodeTaskStateRecord::Delivered
-            })
+            .filter(|episode| episode.status != EpisodeStatusRecord::Flushed)
             .collect::<Vec<_>>();
-        delivered_closed.sort_by_key(|episode| (episode.start_turn, episode.end_turn));
+        session_end_episodes.sort_by_key(|episode| (episode.start_turn, episode.end_turn));
 
-        for episode in delivered_closed {
+        for episode in session_end_episodes {
             self.spawn_closed_episode_flush(view, agent_id, session, agent, episode)
                 .await;
         }
@@ -3699,8 +3729,7 @@ impl Orchestrator {
         agent: &FullAgentConfig,
         recovery_guard: Option<Arc<tokio::sync::Mutex<HashSet<String>>>>,
     ) {
-        Self::close_open_episodes_for_session_end(&self.memory, agent_id, session).await;
-        self.schedule_delivered_episode_flushes_for_session_end(&view, agent_id, session, agent)
+        self.schedule_session_end_flush(&view, agent_id, session, agent)
             .await;
         let Some(snapshot) = self
             .capture_boundary_flush_snapshot(agent_id, session, agent)
@@ -3726,24 +3755,33 @@ impl Orchestrator {
         let memory = Arc::clone(&self.memory);
         let recovery_session_id = session.session_id.clone();
         tokio::spawn(async move {
+            let batches = split_boundary_flush_episode_batches(
+                &snapshot.episodes,
+                MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH,
+            );
             let mut success = true;
-            for (idx, episode) in snapshot.episodes.iter().enumerate() {
-                let episode_source = format!("fallback_summary:episode:{}", idx + 1);
-                let episode_success =
-                    Orchestrator::generate_summary_from_messages_static(SummaryGenerationRequest {
-                        router: &router,
-                        file_store: &file_store,
-                        memory: &memory,
-                        embedding_provider: &embedding_provider,
-                        agent_id: &agent_id,
-                        session: &session,
-                        agent: &agent,
-                        source: &episode_source,
-                        messages: episode.messages.clone(),
-                        recent_explicit_writes: snapshot.recent_explicit_writes.clone(),
-                    })
+            let mut episode_index = 0_usize;
+            for batch in batches {
+                for episode in batch {
+                    episode_index += 1;
+                    let episode_source = format!("fallback_summary:episode:{episode_index}");
+                    let episode_success = Orchestrator::generate_summary_from_messages_static(
+                        SummaryGenerationRequest {
+                            router: &router,
+                            file_store: &file_store,
+                            memory: &memory,
+                            embedding_provider: &embedding_provider,
+                            agent_id: &agent_id,
+                            session: &session,
+                            agent: &agent,
+                            source: &episode_source,
+                            messages: episode.messages,
+                            recent_explicit_writes: snapshot.recent_explicit_writes.clone(),
+                        },
+                    )
                     .await;
-                success &= episode_success;
+                    success &= episode_success;
+                }
             }
             Orchestrator::persist_boundary_flush_state(
                 &memory,
@@ -3788,41 +3826,48 @@ impl Orchestrator {
         source: &str,
         snapshot: BoundaryFlushSnapshot,
     ) -> bool {
-        let mut handles = Vec::with_capacity(snapshot.episodes.len());
-        for (idx, episode) in snapshot.episodes.iter().enumerate() {
-            let episode_source = format!("{source}:episode:{}", idx + 1);
-            let router = view.router.clone();
-            let file_store = self.file_store_for(agent_id);
-            let memory = Arc::clone(&self.memory);
-            let embedding_provider = Arc::clone(&view.embedding_provider);
-            let agent_id_owned = agent_id.to_string();
-            let session_clone = session.clone();
-            let agent_clone = agent.clone();
-            let messages = episode.messages.clone();
-            let recent_writes = snapshot.recent_explicit_writes.clone();
-            handles.push(tokio::spawn(async move {
-                Self::generate_summary_from_messages_static(SummaryGenerationRequest {
-                    router: &router,
-                    file_store: &file_store,
-                    memory: &memory,
-                    embedding_provider: &embedding_provider,
-                    agent_id: &agent_id_owned,
-                    session: &session_clone,
-                    agent: &agent_clone,
-                    source: &episode_source,
-                    messages,
-                    recent_explicit_writes: recent_writes,
-                })
-                .await
-            }));
-        }
         let mut success = true;
-        for handle in handles {
-            match handle.await {
-                Ok(result) => success &= result,
-                Err(error) => {
-                    tracing::warn!(%error, "boundary flush episode task panicked");
-                    success = false;
+        let batches = split_boundary_flush_episode_batches(
+            &snapshot.episodes,
+            MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH,
+        );
+        let mut episode_index = 0_usize;
+        for batch in batches {
+            let mut handles = Vec::with_capacity(batch.len());
+            for episode in batch {
+                episode_index += 1;
+                let episode_source = format!("{source}:episode:{episode_index}");
+                let router = view.router.clone();
+                let file_store = self.file_store_for(agent_id);
+                let memory = Arc::clone(&self.memory);
+                let embedding_provider = Arc::clone(&view.embedding_provider);
+                let agent_id_owned = agent_id.to_string();
+                let session_clone = session.clone();
+                let agent_clone = agent.clone();
+                let recent_writes = snapshot.recent_explicit_writes.clone();
+                handles.push(tokio::spawn(async move {
+                    Self::generate_summary_from_messages_static(SummaryGenerationRequest {
+                        router: &router,
+                        file_store: &file_store,
+                        memory: &memory,
+                        embedding_provider: &embedding_provider,
+                        agent_id: &agent_id_owned,
+                        session: &session_clone,
+                        agent: &agent_clone,
+                        source: &episode_source,
+                        messages: episode.messages,
+                        recent_explicit_writes: recent_writes,
+                    })
+                    .await
+                }));
+            }
+            for handle in handles {
+                match handle.await {
+                    Ok(result) => success &= result,
+                    Err(error) => {
+                        tracing::warn!(%error, "boundary flush episode task panicked");
+                        success = false;
+                    }
                 }
             }
         }
@@ -3842,15 +3887,8 @@ impl Orchestrator {
     ) -> Result<OutboundMessage> {
         let previous_session = self.session_mgr.get(session_key).await?;
         if let Some(previous_session) = previous_session.as_ref() {
-            Self::close_open_episodes_for_session_end(&self.memory, agent_id, previous_session)
+            self.schedule_session_end_flush(view, agent_id, previous_session, agent)
                 .await;
-            self.schedule_delivered_episode_flushes_for_session_end(
-                view,
-                agent_id,
-                previous_session,
-                agent,
-            )
-            .await;
             if let Some(snapshot) = self
                 .capture_boundary_flush_snapshot(agent_id, previous_session, agent)
                 .await
@@ -4380,7 +4418,7 @@ impl Orchestrator {
 
         let fact_store = clawhive_memory::fact_store::FactStore::new(self.memory.db());
         let facts = fact_store
-            .get_active_facts(agent_id)
+            .get_injected_facts(agent_id)
             .await
             .unwrap_or_default();
 
@@ -6047,7 +6085,7 @@ Body"#,
         ];
 
         let (episodes, turn_count) =
-            collect_unflushed_boundary_episodes(entries, 1, 20).expect("snapshot");
+            collect_unflushed_boundary_episodes(entries, 1).expect("snapshot");
 
         assert_eq!(turn_count, 2);
         assert_eq!(episodes.len(), 1);
@@ -6100,13 +6138,44 @@ Body"#,
         ];
 
         let (episodes, turn_count) =
-            collect_unflushed_boundary_episodes(entries, 0, 20).expect("snapshot");
+            collect_unflushed_boundary_episodes(entries, 0).expect("snapshot");
 
         assert_eq!(turn_count, 2);
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].start_turn, 1);
         assert_eq!(episodes[0].end_turn, 2);
         assert_eq!(episodes[0].messages.len(), 4);
+    }
+
+    #[test]
+    fn collect_unflushed_boundary_turns_does_not_truncate_long_unflushed_history() {
+        let mut entries = Vec::new();
+        for turn in 1..=60 {
+            entries.push(SessionEntry::Message {
+                id: format!("u-{turn}"),
+                timestamp: Utc::now(),
+                message: SessionMessage {
+                    role: "user".to_string(),
+                    content: format!("user turn {turn}"),
+                    timestamp: None,
+                },
+            });
+            entries.push(SessionEntry::Message {
+                id: format!("a-{turn}"),
+                timestamp: Utc::now(),
+                message: SessionMessage {
+                    role: "assistant".to_string(),
+                    content: format!("assistant turn {turn}"),
+                    timestamp: None,
+                },
+            });
+        }
+
+        let (turns, turn_count) = collect_unflushed_boundary_turns(entries, 0).expect("snapshot");
+        assert_eq!(turn_count, 60);
+        assert_eq!(turns.len(), 60);
+        assert_eq!(turns.first().map(|turn| turn.start_turn), Some(1));
+        assert_eq!(turns.last().map(|turn| turn.end_turn), Some(60));
     }
 
     #[tokio::test]
@@ -6700,7 +6769,7 @@ Body"#,
     }
 
     #[tokio::test]
-    async fn session_end_schedules_delivered_closed_episodes_before_fallback_snapshot() {
+    async fn session_end_schedule_closes_open_episodes_before_flush() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("memory.db");
         let session_id = "session-episode-session-end";
@@ -6747,7 +6816,7 @@ Body"#,
                             episode_id: format!("{session_id}:2"),
                             start_turn: 2,
                             end_turn: 2,
-                            status: EpisodeStatusRecord::Closed,
+                            status: EpisodeStatusRecord::Open,
                             task_state: EpisodeTaskStateRecord::Exploring,
                             topic_sketch: "runpod gpu".to_string(),
                             last_activity_at: Utc::now(),
@@ -6791,21 +6860,8 @@ Body"#,
         let view = orchestrator.config_view();
 
         orchestrator
-            .schedule_delivered_episode_flushes_for_session_end(
-                view.as_ref(),
-                agent_id,
-                &session,
-                &agent,
-            )
+            .schedule_session_end_flush(view.as_ref(), agent_id, &session, &agent)
             .await;
-
-        let snapshot = orchestrator
-            .capture_boundary_flush_snapshot(agent_id, &session, &agent)
-            .await
-            .expect("snapshot");
-        assert_eq!(snapshot.episodes.len(), 1);
-        assert_eq!(snapshot.episodes[0].start_turn, 2);
-        assert_eq!(snapshot.episodes[0].end_turn, 2);
 
         let state = memory
             .get_session_memory_state(agent_id, session_id)
@@ -6813,8 +6869,13 @@ Body"#,
             .unwrap()
             .expect("session memory state");
         assert_eq!(state.open_episodes.len(), 2);
-        assert_ne!(state.open_episodes[0].status, EpisodeStatusRecord::Open);
-        assert_eq!(state.open_episodes[1].status, EpisodeStatusRecord::Closed);
+        assert!(
+            state
+                .open_episodes
+                .iter()
+                .all(|episode| episode.status != EpisodeStatusRecord::Open),
+            "session-end scheduling should close all open episodes before flush"
+        );
     }
 
     #[tokio::test]

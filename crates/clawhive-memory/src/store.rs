@@ -760,6 +760,75 @@ impl MemoryStore {
         .await?
     }
 
+    pub async fn find_stale_open_episode_states(
+        &self,
+        agent_id: &str,
+        idle_minutes: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionMemoryStateRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let idle_minutes = idle_minutes.max(1);
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT agent_id, session_id, session_key, last_flushed_turn, last_boundary_flush_at, pending_flush, flush_phase, flush_phase_updated_at, flush_summary_cache, recent_explicit_writes, open_episodes
+                FROM session_memory_state
+                WHERE agent_id = ?1
+                  AND open_episodes LIKE '%"status":"Open"%'
+                ORDER BY updated_at ASC
+                LIMIT ?2
+                "#,
+            )?;
+            let mut rows = stmt.query(params![agent_id, limit as i64])?;
+            let cutoff = Utc::now() - TimeDelta::minutes(idle_minutes);
+            let mut states = Vec::new();
+            while let Some(row) = rows.next()? {
+                let last_boundary_flush_at_raw: Option<String> = row.get(4)?;
+                let flush_phase_raw: Option<String> = row.get(6)?;
+                let recent_explicit_writes_raw: String = row.get(9)?;
+                let open_episodes_raw: String = row.get(10)?;
+                let open_episodes: Vec<EpisodeStateRecord> = serde_json::from_str(&open_episodes_raw)?;
+                let has_stale_open_episode = open_episodes.iter().any(|episode| {
+                    episode.status == EpisodeStatusRecord::Open && episode.last_activity_at <= cutoff
+                });
+                if !has_stale_open_episode {
+                    continue;
+                }
+
+                states.push(SessionMemoryStateRecord {
+                    agent_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    session_key: row.get(2)?,
+                    last_flushed_turn: row.get(3)?,
+                    last_boundary_flush_at: last_boundary_flush_at_raw
+                        .as_deref()
+                        .map(parse_datetime_sql)
+                        .transpose()?,
+                    pending_flush: row.get::<_, i64>(5)? != 0,
+                    flush_phase: FlushPhase::from_str(
+                        flush_phase_raw.as_deref().unwrap_or(FlushPhase::Idle.as_str()),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    flush_phase_updated_at: row.get(7)?,
+                    flush_summary_cache: row.get(8)?,
+                    recent_explicit_writes: serde_json::from_str(&recent_explicit_writes_raw)?,
+                    open_episodes,
+                });
+            }
+            Ok::<Vec<SessionMemoryStateRecord>, anyhow::Error>(states)
+        })
+        .await?
+    }
+
     pub async fn cleanup_session_memory_state(&self, retention_days: u64) -> Result<usize> {
         let db = Arc::clone(&self.db);
         task::spawn_blocking(move || {
@@ -1478,6 +1547,47 @@ mod tests {
             .await
             .expect("find stale flushes empty");
         assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_stale_open_episode_states_returns_only_sessions_past_idle_cutoff() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let old = Utc::now() - TimeDelta::minutes(90);
+        let fresh = Utc::now() - TimeDelta::minutes(5);
+
+        for (session_id, last_activity_at) in [("stale", old), ("fresh", fresh)] {
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: "agent-1".to_owned(),
+                    session_id: session_id.to_owned(),
+                    session_key: format!("chat-{session_id}"),
+                    last_flushed_turn: 0,
+                    last_boundary_flush_at: None,
+                    pending_flush: false,
+                    flush_phase: FlushPhase::Idle.as_str().to_owned(),
+                    flush_phase_updated_at: None,
+                    flush_summary_cache: None,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: vec![EpisodeStateRecord {
+                        episode_id: format!("{session_id}:1"),
+                        start_turn: 1,
+                        end_turn: 1,
+                        status: EpisodeStatusRecord::Open,
+                        task_state: EpisodeTaskStateRecord::Exploring,
+                        topic_sketch: "topic".to_string(),
+                        last_activity_at,
+                    }],
+                })
+                .await
+                .expect("upsert state");
+        }
+
+        let stale = store
+            .find_stale_open_episode_states("agent-1", 30, 5)
+            .await
+            .expect("find stale open episodes");
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].session_id, "stale");
     }
 
     #[tokio::test]

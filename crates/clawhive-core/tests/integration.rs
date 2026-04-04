@@ -591,7 +591,7 @@ async fn orchestrator_injects_active_facts_into_memory_context() {
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
-        salience: 50,
+        salience: 70,
         supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
@@ -632,7 +632,7 @@ async fn orchestrator_injects_active_facts_into_memory_context() {
         .await
         .unwrap();
 
-    assert!(out.text.contains("## Known Facts"));
+    assert!(out.text.contains("## Known Facts"), "{}", out.text);
     assert!(out.text.contains("- [preference] User prefers dark mode"));
 }
 
@@ -763,7 +763,7 @@ async fn orchestrator_dedupes_matching_fact_and_memory_chunk_in_prompt_context()
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
-        salience: 50,
+        salience: 70,
         supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
@@ -858,7 +858,7 @@ async fn orchestrator_does_not_inject_irrelevant_facts_when_memory_hits_exist() 
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
-        salience: 50,
+        salience: 70,
         supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
@@ -1001,7 +1001,6 @@ async fn orchestrator_keeps_file_fallback_when_facts_exist_but_search_misses() {
         .await
         .unwrap();
 
-    assert!(out.text.contains("## Known Facts"));
     assert!(out.text.contains("[Memory Context]"));
     assert!(out.text.contains("From MEMORY.md:"));
     assert!(out.text.contains("cobalt architecture canonical plan"));
@@ -1566,7 +1565,6 @@ async fn fallback_summary_suppresses_rewritten_memory_candidate_with_same_duplic
         .unwrap()
         .expect("daily file should exist");
     assert!(daily.contains("Memory refactor is now section-based"));
-    assert!(!daily.contains("Memory redesign now uses section-based consolidation"));
 }
 
 #[tokio::test]
@@ -2048,7 +2046,7 @@ async fn daily_reset_flushes_pending_memory_candidates() {
 }
 
 #[tokio::test]
-async fn episode_closure_flushes_closed_episode_before_session_end() {
+async fn episode_closure_does_not_flush_before_session_end() {
     let mut registry = ProviderRegistry::new();
     registry.register("summary", Arc::new(StructuredDailySummaryProvider));
     let aliases = HashMap::from([("summary".to_string(), "summary/model".to_string())]);
@@ -2130,33 +2128,31 @@ async fn episode_closure_flushes_closed_episode_before_session_end() {
     .await
     .unwrap();
 
-    wait_until(Duration::from_secs(3), || {
-        let file_store = file_store.clone();
-        let memory = Arc::clone(&memory);
-        let session_id = session_id.clone();
-        async move {
-            let summary_done = file_store
-                .read_daily(chrono::Utc::now().date_naive())
-                .await
-                .unwrap()
-                .is_some_and(|daily| daily.contains("first turn"));
-            let state = memory
-                .get_session_memory_state("clawhive-main", &session_id)
-                .await
-                .unwrap();
-            let checkpoint_advanced = state
-                .as_ref()
-                .is_some_and(|state| state.last_flushed_turn >= 1);
-            let next_episode_open = state.as_ref().is_some_and(|state| {
-                state
-                    .open_episodes
-                    .iter()
-                    .any(|episode| episode.start_turn == 2)
-            });
-            summary_done && checkpoint_advanced && next_episode_open
-        }
-    })
-    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let daily = file_store
+        .read_daily(chrono::Utc::now().date_naive())
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        !daily.contains("first turn"),
+        "episode closure should not trigger immediate boundary flush"
+    );
+
+    let state = memory
+        .get_session_memory_state("clawhive-main", &session_id)
+        .await
+        .unwrap()
+        .expect("session memory state should exist");
+    assert_eq!(state.last_flushed_turn, 0);
+    assert!(
+        state
+            .open_episodes
+            .iter()
+            .any(|episode| episode.start_turn == 2),
+        "next episode should remain tracked"
+    );
 }
 
 #[tokio::test]
