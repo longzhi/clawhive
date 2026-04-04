@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use clawhive_memory::dirty_sources::{DirtySourceStore, DIRTY_KIND_MEMORY_FILE};
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::fact_store::{Fact, FactStore};
@@ -11,6 +11,7 @@ use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::session::SessionReader;
 use clawhive_memory::{EpisodeStatusRecord, FlushPhase, MemoryStore, SessionMemoryStateRecord};
 use clawhive_provider::LlmMessage;
+use tokio::task;
 
 use super::memory_document::{MemoryDocument, MEMORY_SECTION_ORDER};
 use super::router::LlmRouter;
@@ -1661,6 +1662,18 @@ impl ConsolidationScheduler {
                         );
                     }
                 }
+                let decay_now = Utc::now();
+                for consolidator in &self.consolidators {
+                    if let Err(error) =
+                        Self::run_weekly_confidence_decay_if_due(consolidator, decay_now).await
+                    {
+                        tracing::warn!(
+                            agent_id = %consolidator.agent_id(),
+                            %error,
+                            "Weekly confidence decay check failed"
+                        );
+                    }
+                }
             }
         })
     }
@@ -1756,6 +1769,95 @@ impl ConsolidationScheduler {
         store
             .find_stale_open_episode_states(agent_id, idle_minutes, limit)
             .await
+    }
+
+    fn should_run_weekly_decay(last_decay_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+        if now.weekday() != chrono::Weekday::Sun {
+            return false;
+        }
+
+        match last_decay_at {
+            Some(last) => now.signed_duration_since(last) >= Duration::days(6),
+            None => true,
+        }
+    }
+
+    async fn run_weekly_confidence_decay_if_due(
+        consolidator: &Arc<HippocampusConsolidator>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<clawhive_memory::fact_store::ConfidenceDecaySummary>> {
+        let Some(memory_store) = &consolidator.memory_store else {
+            return Ok(None);
+        };
+
+        let last_decay_at = Self::read_last_confidence_decay(memory_store).await?;
+        if !Self::should_run_weekly_decay(last_decay_at, now) {
+            return Ok(None);
+        }
+
+        let summary = FactStore::new(memory_store.db())
+            .apply_confidence_decay(consolidator.agent_id())
+            .await?;
+        Self::write_last_confidence_decay(memory_store, now).await?;
+
+        tracing::info!(
+            agent_id = %consolidator.agent_id(),
+            decayed_count = summary.decayed_count,
+            archived_count = summary.archived_count,
+            "Weekly confidence decay completed"
+        );
+
+        Ok(Some(summary))
+    }
+
+    async fn read_last_confidence_decay(store: &Arc<MemoryStore>) -> Result<Option<DateTime<Utc>>> {
+        let db = store.db();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt =
+                conn.prepare("SELECT value FROM meta WHERE key = 'last_confidence_decay'")?;
+            let mut rows = stmt.query([])?;
+            if let Some(row) = rows.next()? {
+                let raw: String = row.get(0)?;
+                match DateTime::parse_from_rfc3339(&raw) {
+                    Ok(parsed) => Ok(Some(parsed.with_timezone(&Utc))),
+                    Err(error) => {
+                        tracing::warn!(
+                            value = %raw,
+                            %error,
+                            "Invalid last_confidence_decay marker, ignoring"
+                        );
+                        Ok(None)
+                    }
+                }
+            } else {
+                Ok(None)
+            }
+        })
+        .await?
+    }
+
+    async fn write_last_confidence_decay(
+        store: &Arc<MemoryStore>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let db = store.db();
+        let marker = now.to_rfc3339();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('last_confidence_decay', ?1) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [&marker],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
     }
 }
 
@@ -3276,6 +3378,144 @@ Working on Clawhive memory safety.
         assert!(!updated.contains("Please synthesize the daily observations."));
         assert!(updated.contains("Another durable fact"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn weekly_confidence_decay_runs_on_sunday_and_records_meta_marker() -> Result<()> {
+        use chrono::{Duration, TimeZone};
+
+        let (_dir, file_store) = build_file_store()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let fact_store = FactStore::new(memory_store.db());
+        let fact = Fact {
+            id: generate_fact_id("agent-1", "Weekly event"),
+            agent_id: "agent-1".to_string(),
+            content: "Weekly event".to_string(),
+            fact_type: "event".to_string(),
+            importance: 0.5,
+            confidence: 1.0,
+            salience: 40,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "consolidation".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            supersede_reason: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        fact_store.insert_fact(&fact).await?;
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store,
+                build_router(),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_memory_store(Arc::clone(&memory_store)),
+        );
+
+        let sunday = Utc
+            .with_ymd_and_hms(2026, 4, 5, 4, 0, 0)
+            .single()
+            .expect("valid sunday");
+        let result =
+            ConsolidationScheduler::run_weekly_confidence_decay_if_due(&consolidator, sunday)
+                .await?;
+        assert!(result.is_some());
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Weekly event")
+            .await?
+            .expect("fact exists");
+        assert!((loaded.confidence - 0.93).abs() < 1e-9);
+
+        {
+            let conn = memory_store.db();
+            let conn = conn.lock().expect("lock db");
+            let marker: String = conn.query_row(
+                "SELECT value FROM meta WHERE key = 'last_confidence_decay'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(marker, sunday.to_rfc3339());
+        }
+
+        let rerun = ConsolidationScheduler::run_weekly_confidence_decay_if_due(
+            &consolidator,
+            sunday + Duration::days(1),
+        )
+        .await?;
+        assert!(rerun.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn weekly_confidence_decay_skips_when_not_sunday() -> Result<()> {
+        use chrono::TimeZone;
+
+        let (_dir, file_store) = build_file_store()?;
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store,
+                build_router(),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_memory_store(Arc::clone(&memory_store)),
+        );
+
+        let monday = Utc
+            .with_ymd_and_hms(2026, 4, 6, 4, 0, 0)
+            .single()
+            .expect("valid monday");
+        let result =
+            ConsolidationScheduler::run_weekly_confidence_decay_if_due(&consolidator, monday)
+                .await?;
+        assert!(result.is_none());
+
+        let conn = memory_store.db();
+        let conn = conn.lock().expect("lock db");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM meta WHERE key = 'last_confidence_decay'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn decay_schedule_enforces_sunday_and_six_day_gap() {
+        use chrono::{Duration, TimeZone};
+
+        let sunday = Utc
+            .with_ymd_and_hms(2026, 4, 5, 4, 0, 0)
+            .single()
+            .expect("valid sunday");
+        let last = sunday - Duration::days(5);
+        assert!(!ConsolidationScheduler::should_run_weekly_decay(
+            Some(last),
+            sunday
+        ));
+
+        let last_week = sunday - Duration::days(7);
+        assert!(ConsolidationScheduler::should_run_weekly_decay(
+            Some(last_week),
+            sunday
+        ));
+
+        let monday = sunday + Duration::days(1);
+        assert!(!ConsolidationScheduler::should_run_weekly_decay(
+            None, monday
+        ));
     }
 
     #[tokio::test]

@@ -64,6 +64,18 @@ pub fn default_salience_for_type(fact_type: &str) -> u8 {
     }
 }
 
+pub(crate) fn decay_factor_for_type(fact_type: &str) -> f64 {
+    match fact_type {
+        "rule" => 0.99,
+        "preference" => 0.97,
+        "decision" => 0.98,
+        "event" => 0.93,
+        "person" => 0.98,
+        "procedure" => 0.99,
+        _ => 0.95,
+    }
+}
+
 fn validated_status(value: &str) -> Result<&str> {
     match value {
         "active" | "superseded" | "retracted" | "expired" | "deleted" | "archived" => Ok(value),
@@ -74,6 +86,12 @@ fn validated_status(value: &str) -> Result<&str> {
 #[derive(Clone)]
 pub struct FactStore {
     db: Arc<Mutex<Connection>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfidenceDecaySummary {
+    pub decayed_count: usize,
+    pub archived_count: usize,
 }
 
 impl FactStore {
@@ -456,6 +474,75 @@ impl FactStore {
         Ok(())
     }
 
+    pub async fn apply_confidence_decay(&self, agent_id: &str) -> Result<ConfidenceDecaySummary> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let now = Utc::now().to_rfc3339();
+
+        task::spawn_blocking(move || {
+            let mut conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let tx = conn.transaction()?;
+
+            let facts = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
+                     occurred_at, recorded_at, source_type, source_session, access_count, \
+                     last_accessed, superseded_by, supersede_reason, created_at, updated_at \
+                     FROM facts WHERE agent_id = ?1 AND status = 'active'",
+                )?;
+                let rows = stmt.query_map(params![agent_id], row_to_fact)?;
+                let mut loaded = Vec::new();
+                for row in rows {
+                    loaded.push(row?);
+                }
+                loaded
+            };
+
+            let mut decayed_count = 0usize;
+            let mut archived_count = 0usize;
+
+            for fact in facts {
+                let boost = (1.0 + (fact.access_count.max(0) as f64)).ln() * 0.05;
+                let boosted_confidence = (fact.confidence + boost).min(1.0);
+                let decayed_confidence =
+                    (boosted_confidence * decay_factor_for_type(&fact.fact_type)).clamp(0.0, 1.0);
+
+                let should_archive =
+                    decayed_confidence < 0.2 && fact.access_count < 3 && fact.salience < 30;
+
+                if should_archive {
+                    tx.execute(
+                        "UPDATE facts SET confidence = ?1, status = 'archived', updated_at = ?2 WHERE id = ?3",
+                        params![decayed_confidence, now, fact.id],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO fact_history (id, fact_id, event, old_content, new_content, reason, created_at) \
+                         VALUES (?1, ?2, 'ARCHIVE', ?3, NULL, 'confidence_decay_archive', ?4)",
+                        params![Uuid::new_v4().to_string(), fact.id, fact.status, now],
+                    )?;
+                    archived_count += 1;
+                } else {
+                    tx.execute(
+                        "UPDATE facts SET confidence = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![decayed_confidence, now, fact.id],
+                    )?;
+                }
+
+                decayed_count += 1;
+            }
+
+            tx.commit()?;
+
+            Ok::<ConfidenceDecaySummary, anyhow::Error>(ConfidenceDecaySummary {
+                decayed_count,
+                archived_count,
+            })
+        })
+        .await?
+    }
+
     pub async fn get_history(&self, fact_id: &str) -> Result<Vec<FactHistory>> {
         let db = Arc::clone(&self.db);
         let fact_id = fact_id.to_owned();
@@ -780,5 +867,120 @@ mod tests {
         for pair in injected.windows(2) {
             assert!(pair[0].salience >= pair[1].salience);
         }
+    }
+
+    #[tokio::test]
+    async fn apply_confidence_decay_updates_event_and_rule_with_expected_decay_factors() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let event = make_fact("agent-1", "Event fact", "event");
+        let rule = make_fact("agent-1", "Rule fact", "rule");
+        fact_store.insert_fact(&event).await.unwrap();
+        fact_store.insert_fact(&rule).await.unwrap();
+
+        let summary = fact_store.apply_confidence_decay("agent-1").await.unwrap();
+        assert_eq!(summary.decayed_count, 2);
+        assert_eq!(summary.archived_count, 0);
+
+        let decayed_event = fact_store
+            .find_by_content("agent-1", "Event fact")
+            .await
+            .unwrap()
+            .unwrap();
+        let decayed_rule = fact_store
+            .find_by_content("agent-1", "Rule fact")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!((decayed_event.confidence - 0.93).abs() < 1e-9);
+        assert!((decayed_rule.confidence - 0.99).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn apply_confidence_decay_boosts_by_log_access_before_decay() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut fact = make_fact("agent-1", "High access fact", "event");
+        fact.confidence = 0.5;
+        fact.access_count = 100;
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let summary = fact_store.apply_confidence_decay("agent-1").await.unwrap();
+        assert_eq!(summary.decayed_count, 1);
+
+        let decayed = fact_store
+            .find_by_content("agent-1", "High access fact")
+            .await
+            .unwrap()
+            .unwrap();
+        let boost = (1.0_f64 + 100.0).ln() * 0.05;
+        let expected = (0.5 + boost).min(1.0) * 0.93;
+        assert!((decayed.confidence - expected).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn apply_confidence_decay_archives_low_value_facts_and_records_archive_reason() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut low_value = make_fact("agent-1", "Low value", "event");
+        low_value.confidence = 0.15;
+        low_value.salience = 20;
+        low_value.access_count = 0;
+        fact_store.insert_fact(&low_value).await.unwrap();
+
+        let summary = fact_store.apply_confidence_decay("agent-1").await.unwrap();
+        assert_eq!(summary.decayed_count, 1);
+        assert_eq!(summary.archived_count, 1);
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Low value")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, "archived");
+
+        let history = fact_store.get_history(&low_value.id).await.unwrap();
+        let archive = history
+            .iter()
+            .find(|entry| entry.event == "ARCHIVE")
+            .unwrap();
+        assert_eq!(archive.reason.as_deref(), Some("confidence_decay_archive"));
+    }
+
+    #[tokio::test]
+    async fn apply_confidence_decay_skips_archived_facts() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut archived = make_fact("agent-1", "Already archived", "event");
+        archived.status = "archived".to_string();
+        archived.confidence = 0.42;
+        fact_store.insert_fact(&archived).await.unwrap();
+
+        let summary = fact_store.apply_confidence_decay("agent-1").await.unwrap();
+        assert_eq!(summary.decayed_count, 0);
+        assert_eq!(summary.archived_count, 0);
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Already archived")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!((loaded.confidence - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decay_factor_for_type_maps_expected_values() {
+        assert!((decay_factor_for_type("rule") - 0.99).abs() < 1e-9);
+        assert!((decay_factor_for_type("preference") - 0.97).abs() < 1e-9);
+        assert!((decay_factor_for_type("decision") - 0.98).abs() < 1e-9);
+        assert!((decay_factor_for_type("event") - 0.93).abs() < 1e-9);
+        assert!((decay_factor_for_type("person") - 0.98).abs() < 1e-9);
+        assert!((decay_factor_for_type("procedure") - 0.99).abs() < 1e-9);
+        assert!((decay_factor_for_type("unknown") - 0.95).abs() < 1e-9);
     }
 }
