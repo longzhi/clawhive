@@ -102,6 +102,42 @@ impl MemoryFileStore {
         Ok(())
     }
 
+    pub async fn read_archived_long_term(&self) -> Result<String> {
+        let path = self.archived_long_term_path();
+        match fs::read_to_string(path).await {
+            Ok(content) => Ok(content),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub async fn write_archived_long_term(&self, content: &str) -> Result<()> {
+        safe_io::safe_overwrite(&self.archived_long_term_path(), content.as_bytes()).await?;
+        Ok(())
+    }
+
+    pub async fn append_archived_section(
+        &self,
+        section_name: &str,
+        content: &str,
+        archived_at: &str,
+    ) -> Result<()> {
+        let existing = self.read_archived_long_term().await?;
+        let mut out = String::new();
+        if !existing.trim().is_empty() {
+            out.push_str(existing.trim_end());
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "## {} (archived {})\n\n{}\n",
+            section_name,
+            archived_at,
+            content.trim()
+        ));
+
+        self.write_archived_long_term(&out).await
+    }
+
     /// Read a specific daily file. Returns None if file doesn't exist.
     pub async fn read_daily(&self, date: NaiveDate) -> Result<Option<String>> {
         let path = self.daily_path(date);
@@ -221,6 +257,56 @@ impl MemoryFileStore {
         Ok(out)
     }
 
+    pub async fn archive_daily(&self, date: NaiveDate) -> Result<PathBuf> {
+        let source = self.daily_path(date);
+        let target = self.archive_path(date);
+
+        fs::create_dir_all(self.archive_dir()).await?;
+        fs::rename(&source, &target).await?;
+
+        Ok(target)
+    }
+
+    pub async fn delete_archived_daily(&self, date: NaiveDate) -> Result<()> {
+        let target = self.archive_path(date);
+        match fs::remove_file(target).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub async fn list_archived_files(&self) -> Result<Vec<(NaiveDate, PathBuf)>> {
+        let mut out = Vec::new();
+        let archive_dir = self.archive_dir();
+
+        if fs::metadata(&archive_dir).await.is_err() {
+            return Ok(out);
+        }
+
+        let mut entries = fs::read_dir(&archive_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
+            if !name.ends_with(".md") || name.len() != 13 {
+                continue;
+            }
+
+            let date_part = &name[..10];
+            if let Ok(date) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+                out.push((date, entry.path()));
+            }
+        }
+
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(out)
+    }
+
     pub async fn build_memory_context(&self) -> Result<String> {
         let long_term = self.read_long_term().await?;
         let long_term_truncated = smart_truncate(&long_term, 4000);
@@ -245,12 +331,25 @@ impl MemoryFileStore {
         self.workspace.join("MEMORY.md")
     }
 
+    fn archived_long_term_path(&self) -> PathBuf {
+        self.workspace.join("MEMORY_ARCHIVED.md")
+    }
+
     fn daily_dir(&self) -> PathBuf {
         self.workspace.join("memory")
     }
 
     fn daily_path(&self, date: NaiveDate) -> PathBuf {
         self.daily_dir()
+            .join(format!("{}.md", date.format("%Y-%m-%d")))
+    }
+
+    fn archive_dir(&self) -> PathBuf {
+        self.daily_dir().join("archive")
+    }
+
+    fn archive_path(&self, date: NaiveDate) -> PathBuf {
+        self.archive_dir()
             .join(format!("{}.md", date.format("%Y-%m-%d")))
     }
 
@@ -402,6 +501,83 @@ mod tests {
             dates,
             vec![date(2026, 2, 12), date(2026, 2, 11), date(2026, 2, 10)]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_archive_daily_moves_file_into_archive_directory() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+        let d = date(2026, 2, 13);
+
+        store.write_daily(d, "daily-content").await?;
+        let archived_path = store.archive_daily(d).await?;
+
+        assert_eq!(
+            archived_path,
+            dir.path().join("memory/archive/2026-02-13.md")
+        );
+        assert!(!dir.path().join("memory/2026-02-13.md").exists());
+        assert!(dir.path().join("memory/archive/2026-02-13.md").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_archived_files_sorted_by_date_desc() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+
+        store.write_daily(date(2026, 2, 10), "a").await?;
+        store.write_daily(date(2026, 2, 12), "b").await?;
+        store.write_daily(date(2026, 2, 11), "c").await?;
+
+        store.archive_daily(date(2026, 2, 10)).await?;
+        store.archive_daily(date(2026, 2, 12)).await?;
+        store.archive_daily(date(2026, 2, 11)).await?;
+
+        let archived = store.list_archived_files().await?;
+        let dates: Vec<_> = archived.into_iter().map(|(d, _)| d).collect();
+        assert_eq!(
+            dates,
+            vec![date(2026, 2, 12), date(2026, 2, 11), date(2026, 2, 10)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_delete_archived_daily_is_idempotent_when_file_missing() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+
+        store.delete_archived_daily(date(2026, 2, 13)).await?;
+        store.delete_archived_daily(date(2026, 2, 13)).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_archive_daily_returns_error_when_source_file_missing() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+
+        let result = store.archive_daily(date(2026, 2, 13)).await;
+        assert!(result.is_err());
+        assert!(!dir.path().join("memory/archive/2026-02-13.md").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_archive_daily_keeps_source_file_when_move_fails() -> Result<()> {
+        let dir = TempDir::new()?;
+        let store = MemoryFileStore::new(dir.path());
+        let d = date(2026, 2, 13);
+
+        store.write_daily(d, "daily-content").await?;
+        fs::create_dir_all(dir.path().join("memory/archive/2026-02-13.md")).await?;
+
+        let result = store.archive_daily(d).await;
+        assert!(result.is_err());
+        assert!(dir.path().join("memory/2026-02-13.md").exists());
         Ok(())
     }
 
