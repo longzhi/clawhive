@@ -1093,6 +1093,36 @@ impl HippocampusConsolidator {
                 continue;
             };
 
+            let confirmed = match self
+                .confirm_fact_conflict_with_llm(&recent, &conflict)
+                .await
+            {
+                Ok(true) => true,
+                Ok(false) => {
+                    tracing::info!(
+                        agent_id = %self.agent_id,
+                        recent_fact_id = %recent.id,
+                        conflict_fact_id = %conflict.id,
+                        "LLM rejected conflict candidate during reconciliation; skipping supersede"
+                    );
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        recent_fact_id = %recent.id,
+                        conflict_fact_id = %conflict.id,
+                        error = %error,
+                        "LLM conflict confirmation failed; skipping supersede (conservative)"
+                    );
+                    false
+                }
+            };
+
+            if !confirmed {
+                continue;
+            }
+
             if let Err(error) = self
                 .supersede_with_existing_fact(&conflict, &recent, "auto_consolidation_reconcile")
                 .await
@@ -1117,6 +1147,38 @@ impl HippocampusConsolidator {
 
             active_facts.retain(|fact| fact.id != conflict.id);
         }
+    }
+
+    async fn confirm_fact_conflict_with_llm(
+        &self,
+        recent: &Fact,
+        candidate: &Fact,
+    ) -> Result<bool> {
+        let prompt = format!(
+            "Compare these two facts about the same user:\n\n\
+            Fact A (older): \"{}\"\nType: {}\n\n\
+            Fact B (newer): \"{}\"\nType: {}\n\n\
+            Question: Is Fact B a direct update or correction of Fact A? \
+            (e.g. preference change, updated decision, corrected information)\n\n\
+            Reply with exactly \"yes\" or \"no\". \
+            Answer \"yes\" only if they are clearly about the same specific subject \
+            and Fact B supersedes Fact A.",
+            candidate.content, candidate.fact_type, recent.content, recent.fact_type
+        );
+
+        let response = self
+            .router
+            .chat(
+                &self.model_primary,
+                &self.model_fallbacks,
+                None,
+                vec![LlmMessage::user(prompt)],
+                16,
+            )
+            .await?;
+
+        let answer = response.text.trim().to_lowercase();
+        Ok(answer.starts_with("yes"))
     }
 
     async fn supersede_with_existing_fact(
@@ -2349,7 +2411,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use anyhow::Result;
+    use anyhow::{anyhow, Result};
     use async_trait::async_trait;
     use chrono::Utc;
     use clawhive_memory::embedding::EmbeddingProvider;
@@ -3280,7 +3342,10 @@ Working on Clawhive memory safety.
         fact_store.insert_fact(&recent_fact).await?;
         fact_store.record_add(&recent_fact).await?;
 
-        let router = build_router_with_provider(SequenceProvider::new(vec!["[]".to_string()]));
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            "[]".to_string(),
+            "yes".to_string(),
+        ]));
 
         let consolidator = HippocampusConsolidator::new(
             "agent-1".to_string(),
@@ -3375,7 +3440,10 @@ Working on Clawhive memory safety.
         fact_store.insert_fact(&recent_fact).await?;
         fact_store.record_add(&recent_fact).await?;
 
-        let router = build_router_with_provider(SequenceProvider::new(vec!["[]".to_string()]));
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            "[]".to_string(),
+            "yes".to_string(),
+        ]));
         let consolidator = HippocampusConsolidator::new(
             "agent-1".to_string(),
             file_store,
@@ -3390,6 +3458,262 @@ Working on Clawhive memory safety.
         let facts = fact_store.get_active_facts("agent-1").await?;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].id, recent_fact.id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_reconcile_skips_supersede_when_llm_rejects_conflict() -> Result<()> {
+        use chrono::{Local, Utc};
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# Memory\n\nExisting").await?;
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Observations\n\nPreference update candidate.")
+            .await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let fact_store = FactStore::new(memory_store.db());
+        let old_created = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        let recent_created = Utc::now().to_rfc3339();
+
+        let old_fact = Fact {
+            id: generate_fact_id("agent-1", "用户喜欢 TypeScript 项目"),
+            agent_id: "agent-1".to_string(),
+            content: "用户喜欢 TypeScript 项目".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.6,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: old_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-old".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: old_created.clone(),
+            updated_at: old_created,
+        };
+        fact_store.insert_fact(&old_fact).await?;
+        fact_store.record_add(&old_fact).await?;
+
+        let recent_fact = Fact {
+            id: generate_fact_id("agent-1", "用户喜欢 JavaScript 项目"),
+            agent_id: "agent-1".to_string(),
+            content: "用户喜欢 JavaScript 项目".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: recent_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-recent".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: recent_created.clone(),
+            updated_at: recent_created,
+        };
+        fact_store.insert_fact(&recent_fact).await?;
+        fact_store.record_add(&recent_fact).await?;
+
+        let router = build_router_with_provider(SequenceProvider::new(vec![
+            "[]".to_string(),
+            "no".to_string(),
+        ]));
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert_eq!(report.facts_extracted, 0);
+
+        let active = fact_store.get_active_facts("agent-1").await?;
+        assert_eq!(active.len(), 2);
+
+        let history = fact_store.get_history(&old_fact.id).await?;
+        assert!(history.iter().all(|entry| entry.event != "SUPERSEDE"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consolidation_reconcile_skips_supersede_when_llm_confirmation_errors() -> Result<()> {
+        use chrono::{Local, Utc};
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store.write_long_term("# Memory\n\nExisting").await?;
+        let today = Local::now().date_naive();
+        file_store
+            .write_daily(today, "## Observations\n\nPreference update candidate.")
+            .await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let fact_store = FactStore::new(memory_store.db());
+        let old_created = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        let recent_created = Utc::now().to_rfc3339();
+
+        let old_fact = Fact {
+            id: generate_fact_id("agent-1", "用户喜欢 TypeScript 项目"),
+            agent_id: "agent-1".to_string(),
+            content: "用户喜欢 TypeScript 项目".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.6,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: old_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-old".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: old_created.clone(),
+            updated_at: old_created,
+        };
+        fact_store.insert_fact(&old_fact).await?;
+        fact_store.record_add(&old_fact).await?;
+
+        let recent_fact = Fact {
+            id: generate_fact_id("agent-1", "用户喜欢 JavaScript 项目"),
+            agent_id: "agent-1".to_string(),
+            content: "用户喜欢 JavaScript 项目".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: recent_created.clone(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("session-recent".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: recent_created.clone(),
+            updated_at: recent_created,
+        };
+        fact_store.insert_fact(&recent_fact).await?;
+        fact_store.record_add(&recent_fact).await?;
+
+        let router = build_router_with_provider(FailAtCallProvider::new(vec!["[]".to_string()], 1));
+        let consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            router,
+            "sonnet".to_string(),
+            vec![],
+        )
+        .with_memory_store(Arc::clone(&memory_store));
+
+        let report = consolidator.consolidate().await?;
+        assert_eq!(report.facts_extracted, 0);
+
+        let active = fact_store.get_active_facts("agent-1").await?;
+        assert_eq!(active.len(), 2);
+
+        let history = fact_store.get_history(&old_fact.id).await?;
+        assert!(history.iter().all(|entry| entry.event != "SUPERSEDE"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirm_fact_conflict_with_llm_parses_yes_and_no() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let recent = Fact {
+            id: "recent-fact".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "改用 Rust 了".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("s1".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let candidate = Fact {
+            id: "old-fact".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "喜欢 TypeScript".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.6,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "consolidation".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        let yes_router = build_router_with_provider(SequenceProvider::new(vec!["yes".to_string()]));
+        let yes_consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store.clone(),
+            yes_router,
+            "sonnet".to_string(),
+            vec![],
+        );
+        assert!(
+            yes_consolidator
+                .confirm_fact_conflict_with_llm(&recent, &candidate)
+                .await?
+        );
+
+        let no_router = build_router_with_provider(SequenceProvider::new(vec!["no".to_string()]));
+        let no_consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            no_router,
+            "sonnet".to_string(),
+            vec![],
+        );
+        assert!(
+            !no_consolidator
+                .confirm_fact_conflict_with_llm(&recent, &candidate)
+                .await?
+        );
+
         Ok(())
     }
 
@@ -4355,6 +4679,40 @@ Working on Clawhive memory safety.
     impl LlmProvider for SequenceProvider {
         async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse> {
             let index = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let text = self.responses.get(index).cloned().unwrap_or_default();
+            Ok(LlmResponse {
+                text,
+                content: vec![],
+                input_tokens: None,
+                output_tokens: None,
+                stop_reason: Some("end_turn".to_string()),
+            })
+        }
+    }
+
+    struct FailAtCallProvider {
+        responses: Vec<String>,
+        fail_at: usize,
+        call_count: AtomicUsize,
+    }
+
+    impl FailAtCallProvider {
+        fn new(responses: Vec<String>, fail_at: usize) -> Arc<Self> {
+            Arc::new(Self {
+                responses,
+                fail_at,
+                call_count: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for FailAtCallProvider {
+        async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse> {
+            let index = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if index == self.fail_at {
+                return Err(anyhow!("forced llm failure"));
+            }
             let text = self.responses.get(index).cloned().unwrap_or_default();
             Ok(LlmResponse {
                 text,
