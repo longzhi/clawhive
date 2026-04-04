@@ -150,6 +150,15 @@ pub struct ConsolidationReport {
     pub summary: String,
 }
 
+#[derive(Debug, Default)]
+pub struct GcReport {
+    pub stale_sections_pruned: usize,
+    pub orphans_detected: usize,
+    pub orphans_cleaned: usize,
+    pub health_report_generated: bool,
+    pub errors: Vec<String>,
+}
+
 impl HippocampusConsolidator {
     pub fn new(
         agent_id: String,
@@ -1881,19 +1890,30 @@ impl ConsolidationScheduler {
                     }
                 }
                 for consolidator in &self.consolidators {
-                    // TODO: Unit 12 Phase 2: 180-day archive physical deletion
-                    if let Err(error) = Self::run_daily_file_lifecycle(
+                    match Self::run_gc_pipeline(
                         consolidator,
                         self.archive_retention_days,
                         decay_now,
                     )
                     .await
                     {
-                        tracing::warn!(
-                            agent_id = %consolidator.agent_id(),
-                            %error,
-                            "Daily file lifecycle management failed"
-                        );
+                        Ok(gc_report) => {
+                            if !gc_report.errors.is_empty() {
+                                tracing::warn!(
+                                    agent_id = %consolidator.agent_id(),
+                                    error_count = gc_report.errors.len(),
+                                    errors = ?gc_report.errors,
+                                    "GC pipeline completed with errors"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                agent_id = %consolidator.agent_id(),
+                                %error,
+                                "GC pipeline failed"
+                            );
+                        }
                     }
                 }
             }
@@ -2117,6 +2137,148 @@ impl ConsolidationScheduler {
         }
 
         Ok(())
+    }
+
+    async fn run_gc_pipeline(
+        consolidator: &Arc<HippocampusConsolidator>,
+        archive_retention_days: u64,
+        now: DateTime<Utc>,
+    ) -> Result<GcReport> {
+        let mut report = GcReport::default();
+
+        match Self::run_daily_file_lifecycle(consolidator, archive_retention_days, now).await {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %consolidator.agent_id(),
+                    %error,
+                    "GC Step 1 (daily file lifecycle) failed; continuing"
+                );
+                report.errors.push(format!("daily_lifecycle: {error}"));
+            }
+        }
+
+        match consolidator.evaluate_memory_staleness().await {
+            Ok(candidates) => match consolidator.prune_stale_sections(&candidates).await {
+                Ok(pruned) => report.stale_sections_pruned = pruned,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %consolidator.agent_id(),
+                        %error,
+                        "GC Step 2 (stale section prune) failed; continuing"
+                    );
+                    report.errors.push(format!("stale_prune: {error}"));
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %consolidator.agent_id(),
+                    %error,
+                    "GC Step 2 (stale section evaluation) failed; continuing"
+                );
+                report.errors.push(format!("stale_eval: {error}"));
+            }
+        }
+
+        if let Some(search_index) = consolidator.search_index() {
+            let known_paths = Self::collect_known_chunk_paths(consolidator)
+                .await
+                .unwrap_or_default();
+            match search_index.detect_orphan_chunks(&known_paths).await {
+                Ok(orphan_paths) => {
+                    report.orphans_detected = orphan_paths.len();
+                    for path in &orphan_paths {
+                        match search_index.delete_indexed_path(path).await {
+                            Ok(()) => {
+                                report.orphans_cleaned += 1;
+                                tracing::info!(
+                                    agent_id = %consolidator.agent_id(),
+                                    path = %path,
+                                    "GC cleaned orphan chunk path"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    agent_id = %consolidator.agent_id(),
+                                    path = %path,
+                                    %error,
+                                    "GC failed to clean orphan chunk path"
+                                );
+                                report
+                                    .errors
+                                    .push(format!("orphan_cleanup({path}): {error}"));
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %consolidator.agent_id(),
+                        %error,
+                        "GC Step 3 (orphan detection) failed; continuing"
+                    );
+                    report.errors.push(format!("orphan_detect: {error}"));
+                }
+            }
+        }
+
+        if let Some(memory_store) = &consolidator.memory_store {
+            let daily_active = consolidator
+                .file_store
+                .list_daily_files()
+                .await
+                .map(|files| files.len())
+                .unwrap_or(0);
+            let daily_archived = consolidator
+                .file_store
+                .list_archived_files()
+                .await
+                .map(|files| files.len())
+                .unwrap_or(0);
+
+            let reporter = clawhive_memory::health::HealthReporter::new(memory_store.db());
+            match reporter
+                .generate(daily_active, daily_archived, report.orphans_detected)
+                .await
+            {
+                Ok(health_report) => {
+                    let workspace_dir = consolidator.file_store.workspace_dir();
+                    if let Err(error) =
+                        clawhive_memory::health::write_health_report(&health_report, workspace_dir)
+                            .await
+                    {
+                        tracing::warn!(
+                            agent_id = %consolidator.agent_id(),
+                            %error,
+                            "GC failed to write health report"
+                        );
+                        report.errors.push(format!("health_write: {error}"));
+                    } else {
+                        report.health_report_generated = true;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %consolidator.agent_id(),
+                        %error,
+                        "GC Step 4 (health report) failed"
+                    );
+                    report.errors.push(format!("health_gen: {error}"));
+                }
+            }
+        }
+
+        tracing::info!(
+            agent_id = %consolidator.agent_id(),
+            stale_pruned = report.stale_sections_pruned,
+            orphans_detected = report.orphans_detected,
+            orphans_cleaned = report.orphans_cleaned,
+            health_generated = report.health_report_generated,
+            errors = report.errors.len(),
+            "GC pipeline completed"
+        );
+
+        Ok(report)
     }
 
     async fn collect_known_chunk_paths(
@@ -3111,6 +3273,174 @@ Working on Clawhive memory safety.
         )?;
         assert_eq!(chunk_count, 0);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_pipeline_happy_path_prunes_stale_cleans_orphans_and_writes_health_report(
+    ) -> Result<()> {
+        use clawhive_memory::search_index::SearchIndex;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- stale-unit15-mainline\n\n## 持续性背景脉络\n\n- keep-context\n\n## 关键历史决策\n\n- keep-decision\n",
+            )
+            .await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let search_index = SearchIndex::new(memory_store.db(), "agent-1");
+        let provider = StubEmbeddingProvider;
+        search_index
+            .index_file(
+                "MEMORY.md",
+                &file_store.read_long_term().await?,
+                "long_term",
+                &provider,
+            )
+            .await?;
+        search_index
+            .index_file(
+                "memory/orphan.md",
+                "# Orphan\n\n- chunk",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        {
+            let db = memory_store.db();
+            let conn = db.lock().expect("lock");
+            let stale_ts = (Utc::now() - chrono::Duration::days(95)).to_rfc3339();
+            conn.execute(
+                "UPDATE chunks SET access_count = 2, last_accessed = ?1 WHERE agent_id = 'agent-1' AND path = 'MEMORY.md' AND text LIKE '%stale-unit15-mainline%'",
+                [stale_ts],
+            )?;
+        }
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store.clone(),
+                build_router_with_provider(SequenceProvider::new(vec!["STALE".to_string()])),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_search_index(search_index)
+            .with_memory_store(Arc::clone(&memory_store)),
+        );
+
+        let report = ConsolidationScheduler::run_gc_pipeline(&consolidator, 30, Utc::now()).await?;
+
+        assert_eq!(report.stale_sections_pruned, 1);
+        assert_eq!(report.orphans_detected, 1);
+        assert_eq!(report.orphans_cleaned, 1);
+        assert!(report.health_report_generated);
+        assert!(report.errors.is_empty());
+
+        let orphan_chunks: i64 = {
+            let db = memory_store.db();
+            let conn = db.lock().expect("lock");
+            conn.query_row(
+                "SELECT COUNT(*) FROM chunks WHERE agent_id = 'agent-1' AND path = 'memory/orphan.md'",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        assert_eq!(orphan_chunks, 0);
+
+        assert!(
+            fs::metadata(file_store.workspace_dir().join("memory/health.json"))
+                .await
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_pipeline_no_orphans_no_stale_is_noop_report() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let consolidator = Arc::new(HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            build_router(),
+            "sonnet".to_string(),
+            vec![],
+        ));
+
+        let report = ConsolidationScheduler::run_gc_pipeline(&consolidator, 30, Utc::now()).await?;
+
+        assert_eq!(report.stale_sections_pruned, 0);
+        assert_eq!(report.orphans_detected, 0);
+        assert_eq!(report.orphans_cleaned, 0);
+        assert!(!report.health_report_generated);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gc_pipeline_continues_when_stale_prune_fails() -> Result<()> {
+        use clawhive_memory::search_index::SearchIndex;
+
+        let (_dir, file_store) = build_file_store()?;
+        file_store
+            .write_long_term(
+                "# MEMORY.md\n\n## 长期项目主线\n\n- stale-unit15-fail\n\n## 持续性背景脉络\n\n- keep-context\n\n## 关键历史决策\n\n- keep-decision\n",
+            )
+            .await?;
+
+        let memory_store = Arc::new(MemoryStore::open_in_memory()?);
+        let search_index = SearchIndex::new(memory_store.db(), "agent-1");
+        let provider = StubEmbeddingProvider;
+        search_index
+            .index_file(
+                "MEMORY.md",
+                &file_store.read_long_term().await?,
+                "long_term",
+                &provider,
+            )
+            .await?;
+        search_index
+            .index_file(
+                "memory/orphan-error.md",
+                "# Orphan\n\n- chunk",
+                "daily",
+                &provider,
+            )
+            .await?;
+
+        {
+            let db = memory_store.db();
+            let conn = db.lock().expect("lock");
+            let stale_ts = (Utc::now() - chrono::Duration::days(100)).to_rfc3339();
+            conn.execute(
+                "UPDATE chunks SET access_count = 2, last_accessed = ?1 WHERE agent_id = 'agent-1' AND path = 'MEMORY.md' AND text LIKE '%stale-unit15-fail%'",
+                [stale_ts],
+            )?;
+        }
+
+        let consolidator = Arc::new(
+            HippocampusConsolidator::new(
+                "agent-1".to_string(),
+                file_store,
+                build_router_with_provider(FailAtCallProvider::new(vec![], 0)),
+                "sonnet".to_string(),
+                vec![],
+            )
+            .with_search_index(search_index)
+            .with_memory_store(Arc::clone(&memory_store)),
+        );
+
+        let report = ConsolidationScheduler::run_gc_pipeline(&consolidator, 30, Utc::now()).await?;
+
+        assert_eq!(report.stale_sections_pruned, 0);
+        assert_eq!(report.orphans_detected, 1);
+        assert_eq!(report.orphans_cleaned, 1);
+        assert!(report.health_report_generated);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("stale_prune:")));
         Ok(())
     }
 
