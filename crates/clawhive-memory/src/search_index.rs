@@ -104,6 +104,17 @@ fn classify_temperature(
     }
 }
 
+fn recent_access_boost(last_accessed: Option<&str>) -> f64 {
+    let age_days = last_accessed
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_days() as f64);
+
+    match age_days {
+        Some(days) if (0.0..30.0).contains(&days) => 0.02 * (1.0 - days / 30.0),
+        _ => 0.0,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub chunk_id: String,
@@ -124,6 +135,7 @@ pub struct ScoreBreakdown {
     pub fused_score: f64,
     pub temporal_decay: f64,
     pub access_boost: f64,
+    pub recent_access_boost: f64,
     pub temperature: String,
     pub final_score: f64,
 }
@@ -1358,6 +1370,7 @@ impl SearchIndex {
                     },
                     temporal_decay: 1.0,
                     access_boost: 1.0,
+                    recent_access_boost: 0.0,
                     temperature: "cold".to_string(),
                     final_score: if use_vectors {
                         (item.vector_score * self.search_config.vector_weight)
@@ -1431,6 +1444,15 @@ impl SearchIndex {
                             result.score *= access_boost;
                             if let Some(breakdown) = result.score_breakdown.as_mut() {
                                 breakdown.access_boost = access_boost;
+                                breakdown.final_score = result.score;
+                            }
+                        }
+
+                        let recency_boost = recent_access_boost(last_accessed.as_deref());
+                        if recency_boost > 0.0 {
+                            result.score += recency_boost;
+                            if let Some(breakdown) = result.score_breakdown.as_mut() {
+                                breakdown.recent_access_boost = recency_boost;
                                 breakdown.final_score = result.score;
                             }
                         }
@@ -3795,7 +3817,8 @@ mod tests {
             .as_ref()
             .expect("score breakdown should exist");
 
-        let base = breakdown.fused_score * breakdown.temporal_decay * breakdown.access_boost;
+        let base = (breakdown.fused_score * breakdown.temporal_decay * breakdown.access_boost)
+            + breakdown.recent_access_boost;
         let expected_final = if breakdown.temperature == "hot" {
             (base + 0.01).min(1.0)
         } else {
@@ -3803,6 +3826,71 @@ mod tests {
         };
         assert!((breakdown.final_score - expected_final).abs() < 1e-6);
         assert!((results[0].score - breakdown.final_score).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn search_boosts_recently_accessed_chunks_over_older_chunks() -> Result<()> {
+        let db = test_db()?;
+        let index = SearchIndex::new_with_config(
+            Arc::clone(&db),
+            "test-agent",
+            SearchConfig {
+                cold_filter: false,
+                min_score: 0.0,
+                ..SearchConfig::default()
+            },
+        );
+        let provider = StubEmbeddingProvider::new(8);
+
+        index
+            .index_file(
+                "MEMORY.md",
+                "# Topic\n\nshared keyword content",
+                "long_term",
+                &provider,
+            )
+            .await?;
+        index
+            .index_file(
+                "notes.md",
+                "# Topic\n\nshared keyword content",
+                "long_term",
+                &provider,
+            )
+            .await?;
+
+        let now = chrono::Utc::now();
+        let warm_accessed = (now - chrono::Duration::days(20)).to_rfc3339();
+        let cold_accessed = (now - chrono::Duration::days(40)).to_rfc3339();
+        {
+            let conn = db.lock().expect("lock");
+            conn.execute(
+                "UPDATE chunks SET access_count = 0, last_accessed = ?1 WHERE path = 'MEMORY.md'",
+                params![warm_accessed],
+            )?;
+            conn.execute(
+                "UPDATE chunks SET access_count = 0, last_accessed = ?1 WHERE path = 'notes.md'",
+                params![cold_accessed],
+            )?;
+        }
+
+        let results = index
+            .search("shared keyword", &provider, 10, 0.0, None)
+            .await?;
+        let warm_score = results
+            .iter()
+            .find(|result| result.path == "MEMORY.md")
+            .map(|result| result.score)
+            .expect("warm chunk should be in results");
+        let cold_score = results
+            .iter()
+            .find(|result| result.path == "notes.md")
+            .map(|result| result.score)
+            .expect("cold chunk should be in results");
+
+        assert!(warm_score > cold_score);
 
         Ok(())
     }
