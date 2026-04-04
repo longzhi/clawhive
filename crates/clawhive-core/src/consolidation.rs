@@ -994,6 +994,8 @@ impl HippocampusConsolidator {
                 access_count: 0,
                 last_accessed: None,
                 superseded_by: None,
+                salience: 50,
+                supersede_reason: None,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
@@ -2326,6 +2328,8 @@ Working on Clawhive memory safety.
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: now.clone(),
             updated_at: now,
         };

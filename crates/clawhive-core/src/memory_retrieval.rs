@@ -719,6 +719,8 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -749,6 +751,8 @@ mod tests {
                     access_count: 0,
                     last_accessed: None,
                     superseded_by: None,
+                    salience: 50,
+                    supersede_reason: None,
                     created_at: "2026-03-29T00:00:00Z".to_string(),
                     updated_at: "2026-03-29T00:00:00Z".to_string(),
                 },
@@ -797,6 +801,8 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -922,6 +928,8 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -986,6 +994,8 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -1018,6 +1028,8 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: "2026-03-15T10:00:00Z".to_string(),
             updated_at: "2026-03-15T10:00:00Z".to_string(),
         };

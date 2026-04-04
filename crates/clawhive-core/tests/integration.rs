@@ -591,6 +591,8 @@ async fn orchestrator_injects_active_facts_into_memory_context() {
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
+        salience: 50,
+        supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -761,6 +763,8 @@ async fn orchestrator_dedupes_matching_fact_and_memory_chunk_in_prompt_context()
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
+        salience: 50,
+        supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -854,6 +858,8 @@ async fn orchestrator_does_not_inject_irrelevant_facts_when_memory_hits_exist() 
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
+        salience: 50,
+        supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -950,6 +956,8 @@ async fn orchestrator_keeps_file_fallback_when_facts_exist_but_search_misses() {
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
+        salience: 50,
+        supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -1395,6 +1403,8 @@ async fn fallback_summary_suppresses_content_already_explicitly_remembered() {
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
+        salience: 50,
+        supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -1890,6 +1900,9 @@ async fn pending_boundary_flush_recovers_after_restart_on_next_inbound() {
             last_flushed_turn: 0,
             last_boundary_flush_at: None,
             pending_flush: true,
+            flush_phase: "idle".to_string(),
+            flush_phase_updated_at: None,
+            flush_summary_cache: None,
             recent_explicit_writes: Vec::new(),
             open_episodes: Vec::new(),
         })
@@ -2237,6 +2250,8 @@ async fn episode_closure_respects_explicit_memory_precheck_for_fact_candidates()
         access_count: 0,
         last_accessed: None,
         superseded_by: None,
+        salience: 50,
+        supersede_reason: None,
         created_at: now.clone(),
         updated_at: now,
     };

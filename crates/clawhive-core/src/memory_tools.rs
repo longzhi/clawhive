@@ -274,6 +274,9 @@ impl MemoryWriteTool {
                 last_flushed_turn: 0,
                 last_boundary_flush_at: None,
                 pending_flush: false,
+                flush_phase: "idle".to_string(),
+                flush_phase_updated_at: None,
+                flush_summary_cache: None,
                 recent_explicit_writes: Vec::new(),
                 open_episodes: Vec::new(),
             });
@@ -390,6 +393,8 @@ impl ToolExecutor for MemoryWriteTool {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
             created_at: now.clone(),
             updated_at: now,
         };
