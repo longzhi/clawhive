@@ -1844,7 +1844,7 @@ fn compute_line_diff(old: &str, new: &str) -> Vec<String> {
     diff
 }
 
-fn normalized_word_set(text: &str) -> std::collections::HashSet<String> {
+pub(crate) fn normalized_word_set(text: &str) -> std::collections::HashSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| word.len() > 1)
@@ -1858,7 +1858,7 @@ fn normalized_word_set(text: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-fn jaccard_similarity(
+pub(crate) fn jaccard_similarity(
     a: &std::collections::HashSet<String>,
     b: &std::collections::HashSet<String>,
 ) -> f64 {

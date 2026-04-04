@@ -141,38 +141,9 @@ fn normalized_candidate_fact_type(
 }
 
 fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
-    let tokens_a = a
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.len() > 1)
-        .filter(|word| {
-            !matches!(
-                *word,
-                "an" | "and" | "all" | "for" | "in" | "of" | "on" | "the" | "their" | "to"
-            )
-        })
-        .map(ToOwned::to_owned)
-        .collect::<HashSet<_>>();
-    let tokens_b = b
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.len() > 1)
-        .filter(|word| {
-            !matches!(
-                *word,
-                "an" | "and" | "all" | "for" | "in" | "of" | "on" | "the" | "their" | "to"
-            )
-        })
-        .map(ToOwned::to_owned)
-        .collect::<HashSet<_>>();
-
-    let intersection = tokens_a.intersection(&tokens_b).count();
-    let union = tokens_a.union(&tokens_b).count();
-    if union == 0 {
-        return 0.0;
-    }
-
-    intersection as f64 / union as f64
+    let tokens_a = super::consolidation::normalized_word_set(a);
+    let tokens_b = super::consolidation::normalized_word_set(b);
+    super::consolidation::jaccard_similarity(&tokens_a, &tokens_b)
 }
 
 fn boundary_flush_conflict_passes_two_step(
@@ -3677,7 +3648,10 @@ impl Orchestrator {
         let mut session_end_episodes = state
             .open_episodes
             .into_iter()
-            .filter(|episode| episode.status != EpisodeStatusRecord::Flushed)
+            .filter(|episode| {
+                episode.status != EpisodeStatusRecord::Flushed
+                    && episode.status != EpisodeStatusRecord::FlushPending
+            })
             .collect::<Vec<_>>();
         session_end_episodes.sort_by_key(|episode| (episode.start_turn, episode.end_turn));
 
