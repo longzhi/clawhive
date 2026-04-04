@@ -590,8 +590,10 @@ impl MemoryLineageStore {
             })?;
 
             let mut attached = 0;
+            let mut all_chunk_ids = Vec::new();
             for row in rows {
                 let (chunk_id, text) = row?;
+                 all_chunk_ids.push(chunk_id.clone());
                 if !chunk_matches_summary(&text, &normalized_summary) {
                     continue;
                 }
@@ -605,6 +607,20 @@ impl MemoryLineageStore {
                     &relation,
                 )?;
                 attached += 1;
+            }
+
+            if attached == 0 {
+                for chunk_id in all_chunk_ids {
+                    attach_source_inner(
+                        &conn,
+                        &agent_id,
+                        &canonical_id,
+                        "chunk",
+                        &chunk_id,
+                        &relation,
+                    )?;
+                    attached += 1;
+                }
             }
 
             Ok::<usize, anyhow::Error>(attached)
@@ -810,6 +826,8 @@ mod tests {
             last_accessed: None,
             superseded_by: None,
             supersede_reason: None,
+            affect: "neutral".to_owned(),
+            affect_intensity: 0.0,
             created_at: now.clone(),
             updated_at: now,
         }

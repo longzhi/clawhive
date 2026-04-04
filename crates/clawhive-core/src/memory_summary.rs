@@ -26,6 +26,10 @@ pub struct SummaryCandidate {
     pub fact_type: Option<String>,
     #[serde(default)]
     pub duplicate_key: Option<String>,
+    #[serde(default)]
+    pub affect: Option<String>,
+    #[serde(default)]
+    pub affect_intensity: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +55,8 @@ Return a JSON array only. Each item must contain:
 - "importance": 0.0 to 1.0
 - "fact_type": optional for "fact" items; one of "preference", "decision", "event", "person", "rule", "procedure"
 - "duplicate_key": optional short key for deduplication
+- "affect": optional affect tag for emotional weight; one of "neutral", "frustrated", "excited", "uncertain", "urgent", "satisfied"
+- "affect_intensity": optional 0.0 to 1.0, stronger affect means stronger salience
 
 Rules:
 - Prefer under-selection over over-selection
@@ -355,6 +361,8 @@ fn parse_list_fallback(raw: &str) -> Option<Vec<SummaryCandidate>> {
                     importance: 0.5,
                     fact_type: None,
                     duplicate_key: None,
+                    affect: None,
+                    affect_intensity: None,
                 })
                 .collect(),
         )
@@ -502,6 +510,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_candidates_deserializes_affect_fields() {
+        let raw = r#"[
+            {
+                "content": "User is blocked by flaky CI",
+                "classification": "fact",
+                "topic": "CI",
+                "importance": 0.9,
+                "fact_type": "event",
+                "affect": "frustrated",
+                "affect_intensity": 0.7
+            }
+        ]"#;
+
+        let parsed = parse_candidates(raw).expect("json should parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].affect.as_deref(), Some("frustrated"));
+        assert_eq!(parsed[0].affect_intensity, Some(0.7_f32));
+    }
+
+    #[test]
     fn retain_daily_candidates_drops_greetings_and_duplicates() {
         let input = vec![
             SummaryCandidate {
@@ -511,6 +539,8 @@ mod tests {
                 importance: 0.1,
                 fact_type: None,
                 duplicate_key: None,
+                affect: None,
+                affect_intensity: None,
             },
             SummaryCandidate {
                 content: "Confirmed memory redesign will use section-based consolidation."
@@ -520,6 +550,8 @@ mod tests {
                 importance: 0.8,
                 fact_type: None,
                 duplicate_key: Some("memory-redesign".to_string()),
+                affect: None,
+                affect_intensity: None,
             },
             SummaryCandidate {
                 content: "Confirmed memory redesign will use section-based consolidation."
@@ -529,6 +561,8 @@ mod tests {
                 importance: 0.9,
                 fact_type: None,
                 duplicate_key: Some("memory-redesign".to_string()),
+                affect: None,
+                affect_intensity: None,
             },
         ];
 
@@ -547,6 +581,8 @@ mod tests {
                 importance: 0.9,
                 fact_type: Some("preference".to_string()),
                 duplicate_key: Some("reply-lang".to_string()),
+                affect: None,
+                affect_intensity: None,
             },
             SummaryCandidate {
                 content: "Memory refactor is now section-based".to_string(),
@@ -555,6 +591,8 @@ mod tests {
                 importance: 0.8,
                 fact_type: None,
                 duplicate_key: Some("memory-refactor".to_string()),
+                affect: None,
+                affect_intensity: None,
             },
             SummaryCandidate {
                 content: "hello".to_string(),
@@ -563,6 +601,8 @@ mod tests {
                 importance: 0.1,
                 fact_type: None,
                 duplicate_key: None,
+                affect: None,
+                affect_intensity: None,
             },
         ]);
 
@@ -586,6 +626,8 @@ mod tests {
                 importance: 0.5,
                 fact_type: None,
                 duplicate_key: None,
+                affect: None,
+                affect_intensity: None,
             },
             SummaryCandidate {
                 content: "B".to_string(),
@@ -594,6 +636,8 @@ mod tests {
                 importance: 0.5,
                 fact_type: None,
                 duplicate_key: None,
+                affect: None,
+                affect_intensity: None,
             },
         ]);
 

@@ -722,6 +722,8 @@ mod tests {
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -751,6 +753,8 @@ mod tests {
             superseded_by: None,
             salience: 100,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -781,6 +785,8 @@ mod tests {
             superseded_by: None,
             salience: 10,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -824,6 +830,8 @@ mod tests {
                     superseded_by: None,
                     salience: 50,
                     supersede_reason: None,
+                    affect: "neutral".to_string(),
+                    affect_intensity: 0.0,
                     created_at: "2026-03-29T00:00:00Z".to_string(),
                     updated_at: "2026-03-29T00:00:00Z".to_string(),
                 },
@@ -874,6 +882,8 @@ mod tests {
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -1001,6 +1011,8 @@ mod tests {
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-03-29T00:00:00Z".to_string(),
             updated_at: "2026-03-29T00:00:00Z".to_string(),
         };
@@ -1067,6 +1079,8 @@ mod tests {
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -1101,6 +1115,8 @@ mod tests {
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: "2026-03-15T10:00:00Z".to_string(),
             updated_at: "2026-03-15T10:00:00Z".to_string(),
         };

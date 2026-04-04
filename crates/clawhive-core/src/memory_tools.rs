@@ -413,6 +413,8 @@ impl ToolExecutor for MemoryWriteTool {
             superseded_by: None,
             salience,
             supersede_reason: None,
+            affect: "neutral".to_owned(),
+            affect_intensity: 0.0,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -628,6 +630,8 @@ impl ToolExecutor for MemorySupersedeToolDef {
             superseded_by: None,
             salience: fact_store::default_salience_for_type(fact_type),
             supersede_reason: None,
+            affect: "neutral".to_owned(),
+            affect_intensity: 0.0,
             created_at: now.clone(),
             updated_at: now,
         };

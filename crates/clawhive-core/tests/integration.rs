@@ -593,6 +593,8 @@ async fn orchestrator_injects_active_facts_into_memory_context() {
         superseded_by: None,
         salience: 70,
         supersede_reason: None,
+        affect: "neutral".to_string(),
+        affect_intensity: 0.0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -765,6 +767,8 @@ async fn orchestrator_dedupes_matching_fact_and_memory_chunk_in_prompt_context()
         superseded_by: None,
         salience: 70,
         supersede_reason: None,
+        affect: "neutral".to_string(),
+        affect_intensity: 0.0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -860,6 +864,8 @@ async fn orchestrator_does_not_inject_irrelevant_facts_when_memory_hits_exist() 
         superseded_by: None,
         salience: 70,
         supersede_reason: None,
+        affect: "neutral".to_string(),
+        affect_intensity: 0.0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -958,6 +964,8 @@ async fn orchestrator_keeps_file_fallback_when_facts_exist_but_search_misses() {
         superseded_by: None,
         salience: 50,
         supersede_reason: None,
+        affect: "neutral".to_string(),
+        affect_intensity: 0.0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -1406,6 +1414,8 @@ async fn fallback_summary_suppresses_content_already_explicitly_remembered() {
         superseded_by: None,
         salience: 50,
         supersede_reason: None,
+        affect: "neutral".to_string(),
+        affect_intensity: 0.0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -2250,6 +2260,8 @@ async fn episode_closure_respects_explicit_memory_precheck_for_fact_candidates()
         superseded_by: None,
         salience: 50,
         supersede_reason: None,
+        affect: "neutral".to_string(),
+        affect_intensity: 0.0,
         created_at: now.clone(),
         updated_at: now,
     };

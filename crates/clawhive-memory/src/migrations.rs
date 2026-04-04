@@ -451,6 +451,13 @@ fn migrations() -> Vec<Migration> {
             WHERE trim(created_at) = '';
             "#,
         ),
+        (
+            26,
+            r#"
+            ALTER TABLE facts ADD COLUMN affect TEXT NOT NULL DEFAULT 'neutral';
+            ALTER TABLE facts ADD COLUMN affect_intensity REAL NOT NULL DEFAULT 0.0;
+            "#,
+        ),
     ]
 }
 
@@ -720,6 +727,27 @@ mod tests {
                 last_accessed TEXT
             );
 
+            CREATE TABLE facts (
+                id             TEXT PRIMARY KEY,
+                agent_id       TEXT NOT NULL,
+                content        TEXT NOT NULL,
+                fact_type      TEXT NOT NULL,
+                importance     REAL NOT NULL DEFAULT 0.5,
+                confidence     REAL NOT NULL DEFAULT 1.0,
+                status         TEXT NOT NULL DEFAULT 'active',
+                occurred_at    TEXT,
+                recorded_at    TEXT NOT NULL,
+                source_type    TEXT NOT NULL,
+                source_session TEXT,
+                access_count   INTEGER NOT NULL DEFAULT 0,
+                last_accessed  TEXT,
+                superseded_by  TEXT,
+                salience       INTEGER NOT NULL DEFAULT 50,
+                supersede_reason TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+
             CREATE TABLE __schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -908,6 +936,35 @@ mod tests {
         assert!(!created_2.is_empty());
         assert!(chrono::DateTime::parse_from_rfc3339(&created_2).is_ok());
 
+        Ok(())
+    }
+
+    #[test]
+    fn migration_26_adds_affect_columns_with_defaults() -> Result<()> {
+        let store = MemoryStore::open_in_memory()?;
+        let db = store.db();
+        let conn = db.lock().expect("lock");
+
+        conn.execute(
+            "INSERT INTO facts(id, agent_id, content, fact_type, importance, confidence, salience, status, occurred_at, recorded_at, source_type, source_session, access_count, last_accessed, superseded_by, supersede_reason, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0.8, 1.0, 50, 'active', NULL, ?5, 'test', NULL, 0, NULL, NULL, NULL, ?5, ?5)",
+            rusqlite::params![
+                "fact-1",
+                "agent-1",
+                "existing fact",
+                "event",
+                "2026-04-05T00:00:00Z"
+            ],
+        )?;
+
+        let (affect, intensity): (String, f64) = conn.query_row(
+            "SELECT affect, affect_intensity FROM facts WHERE id = 'fact-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        assert_eq!(affect, "neutral");
+        assert!((intensity - 0.0).abs() < f64::EPSILON);
         Ok(())
     }
 }

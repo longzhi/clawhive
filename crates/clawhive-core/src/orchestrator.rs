@@ -4142,6 +4142,14 @@ impl Orchestrator {
                     }
 
                     let now = chrono::Utc::now().to_rfc3339();
+                    let affect = candidate
+                        .affect
+                        .clone()
+                        .unwrap_or_else(|| "neutral".to_string());
+                    let affect_intensity = f64::from(candidate.affect_intensity.unwrap_or(0.0));
+                    let salience = (50.0_f64 * (1.0 + affect_intensity.clamp(0.0, 1.0) * 0.2))
+                        .min(100.0)
+                        .round() as u8;
                     let fact = clawhive_memory::fact_store::Fact {
                         id: clawhive_memory::fact_store::generate_fact_id(
                             agent_id,
@@ -4160,8 +4168,10 @@ impl Orchestrator {
                         access_count: 0,
                         last_accessed: None,
                         superseded_by: None,
-                        salience: 50,
+                        salience,
                         supersede_reason: None,
+                        affect,
+                        affect_intensity,
                         created_at: now.clone(),
                         updated_at: now,
                     };
@@ -4333,6 +4343,54 @@ impl Orchestrator {
                     let relative_path = format!("memory/{}.md", today.format("%Y-%m-%d"));
                     let dirty = DirtySourceStore::new(memory.db());
                     let mut daily_reindexed = false;
+                    let session_path_prefix = format!("sessions/{}#", session.session_id);
+
+                    for candidate in &retained_for_daily {
+                        let canonical_key = candidate
+                            .duplicate_key
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty());
+                        let canonical = match lineage_store
+                            .ensure_canonical_with_key(
+                                agent_id,
+                                "daily",
+                                canonical_key,
+                                &candidate.content,
+                            )
+                            .await
+                        {
+                            Ok(canonical) => canonical,
+                            Err(error) => {
+                                tracing::warn!(
+                                    source,
+                                    content = %candidate.content,
+                                    error = %error,
+                                    "Failed to ensure daily canonical for pre-reindex session linkage"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if let Err(error) = lineage_store
+                            .attach_matching_chunks_by_prefix(
+                                agent_id,
+                                &canonical.canonical_id,
+                                &session_path_prefix,
+                                &candidate.content,
+                                "raw",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                source,
+                                canonical_id = %canonical.canonical_id,
+                                error = %error,
+                                "Failed to pre-link session chunk lineage for daily candidate"
+                            );
+                        }
+                    }
+
                     if let Err(error) = dirty
                         .enqueue(agent_id, DIRTY_KIND_DAILY_FILE, &relative_path, source)
                         .await
@@ -4357,7 +4415,6 @@ impl Orchestrator {
                         }
                     }
 
-                    let session_path_prefix = format!("sessions/{}#", session.session_id);
                     for candidate in &retained_for_daily {
                         let canonical_key = candidate
                             .duplicate_key
@@ -4403,7 +4460,7 @@ impl Orchestrator {
                             );
                         }
 
-                        if let Err(error) = lineage_store
+                        match lineage_store
                             .attach_matching_chunks_by_prefix(
                                 agent_id,
                                 &canonical.canonical_id,
@@ -4413,12 +4470,34 @@ impl Orchestrator {
                             )
                             .await
                         {
-                            tracing::warn!(
-                                source,
-                                canonical_id = %canonical.canonical_id,
-                                error = %error,
-                                "Failed to record session chunk lineage for daily candidate"
-                            );
+                            Ok(0) => {
+                                if let Err(error) = lineage_store
+                                    .attach_matching_chunks_by_prefix(
+                                        agent_id,
+                                        &canonical.canonical_id,
+                                        "sessions/",
+                                        &candidate.content,
+                                        "raw",
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        source,
+                                        canonical_id = %canonical.canonical_id,
+                                        error = %error,
+                                        "Failed to record fallback session chunk lineage for daily candidate"
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    source,
+                                    canonical_id = %canonical.canonical_id,
+                                    error = %error,
+                                    "Failed to record session chunk lineage for daily candidate"
+                                );
+                            }
                         }
 
                         if daily_reindexed {
@@ -6584,6 +6663,8 @@ Body"#,
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };
@@ -6631,6 +6712,8 @@ Body"#,
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };

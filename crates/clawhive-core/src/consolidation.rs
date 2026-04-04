@@ -3247,6 +3247,8 @@ Working on Clawhive memory safety.
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: old_created.clone(),
             updated_at: old_created,
         };
@@ -3270,6 +3272,8 @@ Working on Clawhive memory safety.
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: recent_created.clone(),
             updated_at: recent_created,
         };
@@ -3338,6 +3342,8 @@ Working on Clawhive memory safety.
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: old_created.clone(),
             updated_at: old_created,
         };
@@ -3361,6 +3367,8 @@ Working on Clawhive memory safety.
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: recent_created.clone(),
             updated_at: recent_created,
         };
@@ -3842,6 +3850,8 @@ Working on Clawhive memory safety.
             superseded_by: None,
             salience: 50,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -4165,6 +4175,8 @@ Working on Clawhive memory safety.
             last_accessed: None,
             superseded_by: None,
             supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };

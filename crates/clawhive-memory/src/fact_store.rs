@@ -28,6 +28,10 @@ pub struct Fact {
     pub last_accessed: Option<String>,
     pub superseded_by: Option<String>,
     pub supersede_reason: Option<String>,
+    #[serde(default = "default_affect")]
+    pub affect: String,
+    #[serde(default = "default_affect_intensity")]
+    pub affect_intensity: f64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -62,6 +66,35 @@ pub fn default_salience_for_type(fact_type: &str) -> u8 {
         "procedure" => 70,
         _ => 50,
     }
+}
+
+fn default_affect() -> String {
+    "neutral".to_string()
+}
+
+fn default_affect_intensity() -> f64 {
+    0.0
+}
+
+fn normalize_affect(value: &str) -> &str {
+    match value {
+        "neutral" | "frustrated" | "excited" | "uncertain" | "urgent" | "satisfied" => value,
+        _ => "neutral",
+    }
+}
+
+fn normalize_affect_intensity(value: f64) -> f64 {
+    value.clamp(0.0, 1.0)
+}
+
+fn apply_affect_salience_boost(salience: u8, affect: &str, affect_intensity: f64) -> u8 {
+    let normalized_affect = normalize_affect(affect);
+    if normalized_affect == "neutral" {
+        return salience;
+    }
+    let boosted = (f64::from(salience) * (1.0 + normalize_affect_intensity(affect_intensity) * 0.2))
+        .round() as u8;
+    boosted.min(100)
 }
 
 pub(crate) fn decay_factor_for_type(fact_type: &str) -> f64 {
@@ -128,8 +161,8 @@ impl FactStore {
                 INSERT INTO facts (
                     id, agent_id, content, fact_type, importance, confidence, salience,
                     status, occurred_at, recorded_at, source_type, source_session,
-                    access_count, last_accessed, superseded_by, supersede_reason, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    access_count, last_accessed, superseded_by, supersede_reason, affect, affect_intensity, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 "#,
                 params![
                     fact.id,
@@ -138,11 +171,15 @@ impl FactStore {
                     fact.fact_type,
                     fact.importance,
                     fact.confidence,
+                    apply_affect_salience_boost(
                     if fact.salience == 0 {
                         default_salience_for_type(&fact.fact_type)
                     } else {
                         fact.salience
                     },
+                    &fact.affect,
+                    fact.affect_intensity,
+                    ),
                     fact.status,
                     fact.occurred_at,
                     fact.recorded_at,
@@ -152,6 +189,8 @@ impl FactStore {
                     fact.last_accessed,
                     fact.superseded_by,
                     fact.supersede_reason,
+                    normalize_affect(&fact.affect),
+                    normalize_affect_intensity(fact.affect_intensity),
                     fact.created_at,
                     fact.updated_at,
                 ],
@@ -221,7 +260,7 @@ impl FactStore {
             let mut stmt = conn.prepare(
                 "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
                  occurred_at, recorded_at, source_type, source_session, access_count, \
-                 last_accessed, superseded_by, supersede_reason, created_at, updated_at \
+                 last_accessed, superseded_by, supersede_reason, COALESCE(affect, 'neutral'), COALESCE(affect_intensity, 0.0), created_at, updated_at \
                  FROM facts WHERE agent_id = ?1 AND status = 'active' \
                  ORDER BY importance DESC, updated_at DESC",
             )?;
@@ -245,7 +284,7 @@ impl FactStore {
             let result = conn.query_row(
                 "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
                  occurred_at, recorded_at, source_type, source_session, access_count, \
-                 last_accessed, superseded_by, supersede_reason, created_at, updated_at \
+                 last_accessed, superseded_by, supersede_reason, COALESCE(affect, 'neutral'), COALESCE(affect_intensity, 0.0), created_at, updated_at \
                  FROM facts WHERE id = ?1",
                 params![id],
                 row_to_fact,
@@ -294,8 +333,8 @@ impl FactStore {
                 INSERT INTO facts (
                     id, agent_id, content, fact_type, importance, confidence, salience,
                     status, occurred_at, recorded_at, source_type, source_session,
-                    access_count, last_accessed, superseded_by, supersede_reason, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    access_count, last_accessed, superseded_by, supersede_reason, affect, affect_intensity, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 "#,
                 params![
                     new_fact.id,
@@ -304,11 +343,15 @@ impl FactStore {
                     new_fact.fact_type,
                     new_fact.importance,
                     new_fact.confidence,
+                    apply_affect_salience_boost(
                     if new_fact.salience == 0 {
                         default_salience_for_type(&new_fact.fact_type)
                     } else {
                         new_fact.salience
                     },
+                    &new_fact.affect,
+                    new_fact.affect_intensity,
+                    ),
                     new_fact.status,
                     new_fact.occurred_at,
                     new_fact.recorded_at,
@@ -318,6 +361,8 @@ impl FactStore {
                     new_fact.last_accessed,
                     new_fact.superseded_by,
                     Some(reason.clone()),
+                    normalize_affect(&new_fact.affect),
+                    normalize_affect_intensity(new_fact.affect_intensity),
                     new_fact.created_at,
                     new_fact.updated_at,
                 ],
@@ -415,7 +460,7 @@ impl FactStore {
             let mut stmt = conn.prepare(
                 "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
                  occurred_at, recorded_at, source_type, source_session, access_count, \
-                 last_accessed, superseded_by, supersede_reason, created_at, updated_at \
+                 last_accessed, superseded_by, supersede_reason, COALESCE(affect, 'neutral'), COALESCE(affect_intensity, 0.0), created_at, updated_at \
                  FROM facts \
                  WHERE agent_id = ?1 AND status = 'active' AND COALESCE(salience, 50) >= 60 AND confidence >= 0.5 \
                  ORDER BY COALESCE(salience, 50) DESC, updated_at DESC \
@@ -489,7 +534,7 @@ impl FactStore {
                 let mut stmt = tx.prepare(
                     "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
                      occurred_at, recorded_at, source_type, source_session, access_count, \
-                     last_accessed, superseded_by, supersede_reason, created_at, updated_at \
+                     last_accessed, superseded_by, supersede_reason, COALESCE(affect, 'neutral'), COALESCE(affect_intensity, 0.0), created_at, updated_at \
                      FROM facts WHERE agent_id = ?1 AND status = 'active'",
                 )?;
                 let rows = stmt.query_map(params![agent_id], row_to_fact)?;
@@ -506,8 +551,10 @@ impl FactStore {
             for fact in facts {
                 let boost = (1.0 + (fact.access_count.max(0) as f64)).ln() * 0.05;
                 let boosted_confidence = (fact.confidence + boost).min(1.0);
-                let decayed_confidence =
-                    (boosted_confidence * decay_factor_for_type(&fact.fact_type)).clamp(0.0, 1.0);
+                let decay_factor = (decay_factor_for_type(&fact.fact_type)
+                    * (1.0 + normalize_affect_intensity(fact.affect_intensity) * 0.02))
+                    .min(1.0);
+                let decayed_confidence = (boosted_confidence * decay_factor).clamp(0.0, 1.0);
 
                 let should_archive =
                     decayed_confidence < 0.2 && fact.access_count < 3 && fact.salience < 30;
@@ -593,8 +640,10 @@ fn row_to_fact(r: &rusqlite::Row) -> rusqlite::Result<Fact> {
         last_accessed: r.get(13)?,
         superseded_by: r.get(14)?,
         supersede_reason: r.get(15)?,
-        created_at: r.get(16)?,
-        updated_at: r.get(17)?,
+        affect: r.get(16)?,
+        affect_intensity: r.get(17)?,
+        created_at: r.get(18)?,
+        updated_at: r.get(19)?,
     })
 }
 
@@ -623,6 +672,8 @@ mod tests {
             last_accessed: None,
             superseded_by: None,
             supersede_reason: None,
+            affect: default_affect(),
+            affect_intensity: default_affect_intensity(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -971,6 +1022,102 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!((loaded.confidence - 0.42).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn insert_fact_applies_affect_salience_boost_for_frustrated_fact() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut fact = make_fact("agent-1", "Frustrating blocker persists", "event");
+        fact.salience = 50;
+        fact.affect = "frustrated".to_string();
+        fact.affect_intensity = 0.7;
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Frustrating blocker persists")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.salience, 57);
+    }
+
+    #[tokio::test]
+    async fn insert_fact_keeps_salience_for_neutral_affect() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut fact = make_fact("agent-1", "Neutral status update", "event");
+        fact.salience = 50;
+        fact.affect = "neutral".to_string();
+        fact.affect_intensity = 0.0;
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Neutral status update")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.salience, 50);
+    }
+
+    #[tokio::test]
+    async fn insert_fact_caps_affect_salience_boost_at_twenty_percent() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut fact = make_fact("agent-1", "Urgent outage triage", "event");
+        fact.salience = 50;
+        fact.affect = "urgent".to_string();
+        fact.affect_intensity = 1.0;
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Urgent outage triage")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.salience, 60);
+    }
+
+    #[tokio::test]
+    async fn old_facts_keep_default_affect_without_behavior_change() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let fact = make_fact("agent-1", "Legacy fact shape", "event");
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Legacy fact shape")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.affect, "neutral");
+        assert!((loaded.affect_intensity - 0.0).abs() < 1e-9);
+        assert_eq!(loaded.salience, default_salience_for_type("event"));
+    }
+
+    #[tokio::test]
+    async fn apply_confidence_decay_slows_decay_for_higher_affect_intensity() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let mut fact = make_fact("agent-1", "Emotionally charged fact", "event");
+        fact.affect = "frustrated".to_string();
+        fact.affect_intensity = 1.0;
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        fact_store.apply_confidence_decay("agent-1").await.unwrap();
+
+        let loaded = fact_store
+            .find_by_content("agent-1", "Emotionally charged fact")
+            .await
+            .unwrap()
+            .unwrap();
+        let expected_decay_factor = (0.93_f64 * (1.0 + 1.0 * 0.02)).min(1.0);
+        assert!((loaded.confidence - expected_decay_factor).abs() < 1e-9);
     }
 
     #[test]
