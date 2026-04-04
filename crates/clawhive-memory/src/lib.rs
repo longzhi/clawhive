@@ -4,6 +4,7 @@ pub mod embedding;
 pub mod fact_store;
 pub mod file_audit;
 pub mod file_store;
+pub mod health;
 pub mod memory_lineage;
 pub mod migrations;
 pub mod models;
