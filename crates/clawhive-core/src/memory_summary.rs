@@ -49,7 +49,7 @@ Return a JSON array only. Each item must contain:
 - "classification": one of "discard", "daily", "fact", "memory"
 - "topic": short topic label
 - "importance": 0.0 to 1.0
-- "fact_type": optional for "fact" items; one of "preference", "decision", "event", "person", "rule"
+- "fact_type": optional for "fact" items; one of "preference", "decision", "event", "person", "rule", "procedure"
 - "duplicate_key": optional short key for deduplication
 
 Rules:

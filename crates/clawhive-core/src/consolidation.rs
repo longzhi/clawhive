@@ -51,7 +51,7 @@ const FACT_EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a fact extraction system.
 
 Return a JSON array of facts. Each fact should have:
 - "content": A clear, concise statement of the fact (e.g., "User prefers Rust over Go")
-- "fact_type": One of: "preference", "decision", "event", "person", "rule"
+- "fact_type": One of: "preference", "decision", "event", "person", "rule", "procedure"
 - "importance": 0.0 to 1.0 (how important this fact is for future interactions)
 - "occurred_at": ISO date string if the fact has a specific date, null otherwise
 
