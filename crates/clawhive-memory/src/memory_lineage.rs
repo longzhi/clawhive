@@ -800,6 +800,7 @@ mod tests {
             fact_type: "preference".to_owned(),
             importance: 0.5,
             confidence: 1.0,
+            salience: crate::fact_store::default_salience_for_type("preference"),
             status: "active".to_owned(),
             occurred_at: None,
             recorded_at: now.clone(),
@@ -808,6 +809,7 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            supersede_reason: None,
             created_at: now.clone(),
             updated_at: now,
         }

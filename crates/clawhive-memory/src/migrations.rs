@@ -409,6 +409,24 @@ fn migrations() -> Vec<Migration> {
             WHERE last_accessed IS NULL;
             "#,
         ),
+        (
+            23,
+            r#"
+            ALTER TABLE facts ADD COLUMN salience INTEGER NOT NULL DEFAULT 50;
+            ALTER TABLE facts ADD COLUMN supersede_reason TEXT;
+            "#,
+        ),
+        (
+            24,
+            r#"
+            ALTER TABLE session_memory_state ADD COLUMN flush_phase TEXT NOT NULL DEFAULT 'idle';
+            ALTER TABLE session_memory_state ADD COLUMN flush_phase_updated_at TEXT DEFAULT NULL;
+            ALTER TABLE session_memory_state ADD COLUMN flush_summary_cache TEXT DEFAULT NULL;
+            UPDATE session_memory_state
+            SET flush_phase = 'idle'
+            WHERE flush_phase IS NULL OR flush_phase = '';
+            "#,
+        ),
     ]
 }
 
@@ -471,6 +489,39 @@ mod tests {
                 last_accessed TEXT
             );
 
+            CREATE TABLE facts (
+                id             TEXT PRIMARY KEY,
+                agent_id       TEXT NOT NULL,
+                content        TEXT NOT NULL,
+                fact_type      TEXT NOT NULL,
+                importance     REAL NOT NULL DEFAULT 0.5,
+                confidence     REAL NOT NULL DEFAULT 1.0,
+                status         TEXT NOT NULL DEFAULT 'active',
+                occurred_at    TEXT,
+                recorded_at    TEXT NOT NULL,
+                source_type    TEXT NOT NULL,
+                source_session TEXT,
+                access_count   INTEGER NOT NULL DEFAULT 0,
+                last_accessed  TEXT,
+                superseded_by  TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE session_memory_state (
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                last_flushed_turn INTEGER NOT NULL DEFAULT 0,
+                last_boundary_flush_at TEXT,
+                pending_flush INTEGER NOT NULL DEFAULT 0,
+                recent_explicit_writes TEXT NOT NULL DEFAULT '[]',
+                open_episodes TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_id, session_id)
+            );
+
             CREATE TABLE __schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -509,6 +560,143 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(last_accessed, "2026-04-01T10:00:00Z");
+
+        Ok(())
+    }
+
+    #[test]
+    fn migration_23_adds_salience_and_supersede_reason_without_data_loss() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE facts (
+                id             TEXT PRIMARY KEY,
+                agent_id       TEXT NOT NULL,
+                content        TEXT NOT NULL,
+                fact_type      TEXT NOT NULL,
+                importance     REAL NOT NULL DEFAULT 0.5,
+                confidence     REAL NOT NULL DEFAULT 1.0,
+                status         TEXT NOT NULL DEFAULT 'active',
+                occurred_at    TEXT,
+                recorded_at    TEXT NOT NULL,
+                source_type    TEXT NOT NULL,
+                source_session TEXT,
+                access_count   INTEGER NOT NULL DEFAULT 0,
+                last_accessed  TEXT,
+                superseded_by  TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE session_memory_state (
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                last_flushed_turn INTEGER NOT NULL DEFAULT 0,
+                last_boundary_flush_at TEXT,
+                pending_flush INTEGER NOT NULL DEFAULT 0,
+                recent_explicit_writes TEXT NOT NULL DEFAULT '[]',
+                open_episodes TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_id, session_id)
+            );
+
+            CREATE TABLE __schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            WITH RECURSIVE versions(v) AS (
+                SELECT 1
+                UNION ALL
+                SELECT v + 1 FROM versions WHERE v < 22
+            )
+            INSERT INTO __schema_version(version, applied_at)
+            SELECT v, datetime('now') FROM versions;
+            "#,
+        )?;
+
+        conn.execute(
+            "INSERT INTO facts(id, agent_id, content, fact_type, importance, confidence, status, occurred_at, recorded_at, source_type, source_session, access_count, last_accessed, superseded_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0.9, 0.8, 'active', NULL, ?5, 'manual', NULL, 0, NULL, NULL, ?5, ?5)",
+            rusqlite::params![
+                "f1",
+                "agent-1",
+                "existing fact",
+                "preference",
+                "2026-04-01T10:00:00Z"
+            ],
+        )?;
+
+        run_migrations(&conn)?;
+
+        let (content, salience, supersede_reason): (String, i64, Option<String>) = conn.query_row(
+            "SELECT content, salience, supersede_reason FROM facts WHERE id = 'f1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(content, "existing fact");
+        assert_eq!(salience, 50);
+        assert_eq!(supersede_reason, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migration_24_adds_flush_phase_columns_and_backfills_idle() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE session_memory_state (
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                last_flushed_turn INTEGER NOT NULL DEFAULT 0,
+                last_boundary_flush_at TEXT,
+                pending_flush INTEGER NOT NULL DEFAULT 0,
+                recent_explicit_writes TEXT NOT NULL DEFAULT '[]',
+                open_episodes TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_id, session_id)
+            );
+
+            CREATE TABLE __schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            WITH RECURSIVE versions(v) AS (
+                SELECT 1
+                UNION ALL
+                SELECT v + 1 FROM versions WHERE v < 23
+            )
+            INSERT INTO __schema_version(version, applied_at)
+            SELECT v, datetime('now') FROM versions;
+            "#,
+        )?;
+
+        conn.execute(
+            "INSERT INTO session_memory_state(agent_id, session_id, session_key, last_flushed_turn, pending_flush, recent_explicit_writes, open_episodes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params!["agent-1", "session-1", "chat-1", 12_i64, 1_i64, "[]", "[]"],
+        )?;
+
+        run_migrations(&conn)?;
+
+        let (flush_phase, updated_at, summary_cache): (String, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT flush_phase, flush_phase_updated_at, flush_summary_cache
+                 FROM session_memory_state
+                 WHERE agent_id = 'agent-1' AND session_id = 'session-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        assert_eq!(flush_phase, "idle");
+        assert_eq!(updated_at, None);
+        assert_eq!(summary_cache, None);
 
         Ok(())
     }

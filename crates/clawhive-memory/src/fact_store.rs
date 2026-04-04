@@ -18,6 +18,7 @@ pub struct Fact {
     pub fact_type: String,
     pub importance: f64,
     pub confidence: f64,
+    pub salience: u8,
     pub status: String,
     pub occurred_at: Option<String>,
     pub recorded_at: String,
@@ -26,6 +27,7 @@ pub struct Fact {
     pub access_count: i64,
     pub last_accessed: Option<String>,
     pub superseded_by: Option<String>,
+    pub supersede_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -48,6 +50,25 @@ pub fn generate_fact_id(agent_id: &str, content: &str) -> String {
     let hash = hasher.finalize();
     let hash_bytes: [u8; 16] = hash[..16].try_into().unwrap_or([0u8; 16]);
     Uuid::from_bytes(hash_bytes).to_string()
+}
+
+pub fn default_salience_for_type(fact_type: &str) -> u8 {
+    match fact_type {
+        "preference" => 70,
+        "rule" => 75,
+        "decision" => 65,
+        "person" => 50,
+        "event" => 40,
+        "procedure" => 70,
+        _ => 50,
+    }
+}
+
+fn validated_status(value: &str) -> Result<&str> {
+    match value {
+        "active" | "superseded" | "retracted" | "expired" | "deleted" | "archived" => Ok(value),
+        _ => Err(anyhow!("invalid fact status: {value}")),
+    }
 }
 
 #[derive(Clone)]
@@ -87,10 +108,10 @@ impl FactStore {
             conn.execute(
                 r#"
                 INSERT INTO facts (
-                    id, agent_id, content, fact_type, importance, confidence,
+                    id, agent_id, content, fact_type, importance, confidence, salience,
                     status, occurred_at, recorded_at, source_type, source_session,
-                    access_count, last_accessed, superseded_by, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    access_count, last_accessed, superseded_by, supersede_reason, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 "#,
                 params![
                     fact.id,
@@ -99,6 +120,11 @@ impl FactStore {
                     fact.fact_type,
                     fact.importance,
                     fact.confidence,
+                    if fact.salience == 0 {
+                        default_salience_for_type(&fact.fact_type)
+                    } else {
+                        fact.salience
+                    },
                     fact.status,
                     fact.occurred_at,
                     fact.recorded_at,
@@ -107,6 +133,7 @@ impl FactStore {
                     fact.access_count,
                     fact.last_accessed,
                     fact.superseded_by,
+                    fact.supersede_reason,
                     fact.created_at,
                     fact.updated_at,
                 ],
@@ -174,9 +201,9 @@ impl FactStore {
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let mut stmt = conn.prepare(
-                "SELECT id, agent_id, content, fact_type, importance, confidence, status, \
+                "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
                  occurred_at, recorded_at, source_type, source_session, access_count, \
-                 last_accessed, superseded_by, created_at, updated_at \
+                 last_accessed, superseded_by, supersede_reason, created_at, updated_at \
                  FROM facts WHERE agent_id = ?1 AND status = 'active' \
                  ORDER BY importance DESC, updated_at DESC",
             )?;
@@ -198,9 +225,9 @@ impl FactStore {
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let result = conn.query_row(
-                "SELECT id, agent_id, content, fact_type, importance, confidence, status, \
+                "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
                  occurred_at, recorded_at, source_type, source_session, access_count, \
-                 last_accessed, superseded_by, created_at, updated_at \
+                 last_accessed, superseded_by, supersede_reason, created_at, updated_at \
                  FROM facts WHERE id = ?1",
                 params![id],
                 row_to_fact,
@@ -247,10 +274,10 @@ impl FactStore {
             tx.execute(
                 r#"
                 INSERT INTO facts (
-                    id, agent_id, content, fact_type, importance, confidence,
+                    id, agent_id, content, fact_type, importance, confidence, salience,
                     status, occurred_at, recorded_at, source_type, source_session,
-                    access_count, last_accessed, superseded_by, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    access_count, last_accessed, superseded_by, supersede_reason, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 "#,
                 params![
                     new_fact.id,
@@ -259,6 +286,11 @@ impl FactStore {
                     new_fact.fact_type,
                     new_fact.importance,
                     new_fact.confidence,
+                    if new_fact.salience == 0 {
+                        default_salience_for_type(&new_fact.fact_type)
+                    } else {
+                        new_fact.salience
+                    },
                     new_fact.status,
                     new_fact.occurred_at,
                     new_fact.recorded_at,
@@ -267,6 +299,7 @@ impl FactStore {
                     new_fact.access_count,
                     new_fact.last_accessed,
                     new_fact.superseded_by,
+                    Some(reason.clone()),
                     new_fact.created_at,
                     new_fact.updated_at,
                 ],
@@ -322,10 +355,13 @@ impl FactStore {
                 |r| r.get(0),
             )?;
 
-            let event = match new_status.as_str() {
+            let new_status = validated_status(&new_status)?;
+
+            let event = match new_status {
                 "retracted" => "RETRACT",
                 "expired" => "EXPIRE",
                 "deleted" => "DELETE",
+                "archived" => "ARCHIVE",
                 _ => "UPDATE",
             };
 
@@ -347,6 +383,32 @@ impl FactStore {
                 ],
             )?;
             Ok(())
+        })
+        .await?
+    }
+
+    pub async fn get_injected_facts(&self, agent_id: &str) -> Result<Vec<Fact>> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt = conn.prepare(
+                "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
+                 occurred_at, recorded_at, source_type, source_session, access_count, \
+                 last_accessed, superseded_by, supersede_reason, created_at, updated_at \
+                 FROM facts \
+                 WHERE agent_id = ?1 AND status = 'active' AND COALESCE(salience, 50) >= 60 AND confidence >= 0.5 \
+                 ORDER BY COALESCE(salience, 50) DESC, updated_at DESC \
+                 LIMIT 50",
+            )?;
+            let rows = stmt.query_map(params![agent_id], row_to_fact)?;
+            let mut facts = Vec::new();
+            for row in rows {
+                facts.push(row?);
+            }
+            Ok(facts)
         })
         .await?
     }
@@ -434,16 +496,18 @@ fn row_to_fact(r: &rusqlite::Row) -> rusqlite::Result<Fact> {
         fact_type: r.get(3)?,
         importance: r.get(4)?,
         confidence: r.get(5)?,
-        status: r.get(6)?,
-        occurred_at: r.get(7)?,
-        recorded_at: r.get(8)?,
-        source_type: r.get(9)?,
-        source_session: r.get(10)?,
-        access_count: r.get(11)?,
-        last_accessed: r.get(12)?,
-        superseded_by: r.get(13)?,
-        created_at: r.get(14)?,
-        updated_at: r.get(15)?,
+        salience: r.get(6)?,
+        status: r.get(7)?,
+        occurred_at: r.get(8)?,
+        recorded_at: r.get(9)?,
+        source_type: r.get(10)?,
+        source_session: r.get(11)?,
+        access_count: r.get(12)?,
+        last_accessed: r.get(13)?,
+        superseded_by: r.get(14)?,
+        supersede_reason: r.get(15)?,
+        created_at: r.get(16)?,
+        updated_at: r.get(17)?,
     })
 }
 
@@ -462,6 +526,7 @@ mod tests {
             fact_type: fact_type.to_owned(),
             importance: 0.5,
             confidence: 1.0,
+            salience: default_salience_for_type(fact_type),
             status: "active".to_owned(),
             occurred_at: None,
             recorded_at: now.clone(),
@@ -470,6 +535,7 @@ mod tests {
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
+            supersede_reason: None,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -604,5 +670,115 @@ mod tests {
             .unwrap()
             .expect("canonical should exist");
         assert_eq!(canonical.summary, "User likes black coffee");
+    }
+
+    #[test]
+    fn default_salience_for_type_rules() {
+        assert_eq!(default_salience_for_type("preference"), 70);
+        assert_eq!(default_salience_for_type("rule"), 75);
+        assert_eq!(default_salience_for_type("decision"), 65);
+        assert_eq!(default_salience_for_type("person"), 50);
+        assert_eq!(default_salience_for_type("event"), 40);
+        assert_eq!(default_salience_for_type("procedure"), 70);
+        assert_eq!(default_salience_for_type("unknown"), 50);
+    }
+
+    #[tokio::test]
+    async fn archived_status_is_excluded_from_active_facts() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+        let fact = make_fact("agent-1", "Old preference", "preference");
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        fact_store
+            .update_status(&fact.id, "archived", "stale")
+            .await
+            .unwrap();
+
+        let active = fact_store.get_active_facts("agent-1").await.unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_persists_salience_column() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+        let fact = make_fact("agent-1", "Has salience", "procedure");
+        fact_store.insert_fact(&fact).await.unwrap();
+
+        let conn = store.db();
+        let conn = conn.lock().unwrap();
+        let salience: i64 = conn
+            .query_row(
+                "SELECT salience FROM facts WHERE id = ?1",
+                params![fact.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(salience, 70);
+    }
+
+    #[tokio::test]
+    async fn supersede_stores_supersede_reason() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        let old = make_fact("agent-1", "User lives in Berlin", "event");
+        fact_store.insert_fact(&old).await.unwrap();
+        let new = make_fact("agent-1", "User lives in Tokyo", "event");
+
+        fact_store
+            .supersede(&old.id, &new, "User moved to Tokyo")
+            .await
+            .unwrap();
+
+        let conn = store.db();
+        let conn = conn.lock().unwrap();
+        let reason: Option<String> = conn
+            .query_row(
+                "SELECT supersede_reason FROM facts WHERE id = ?1",
+                params![new.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("User moved to Tokyo"));
+    }
+
+    #[tokio::test]
+    async fn get_injected_facts_filters_orders_and_limits() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_store = FactStore::new(store.db());
+
+        for i in 0..55 {
+            let mut fact = make_fact("agent-1", &format!("rule-{i}"), "rule");
+            fact.importance = 0.1;
+            fact.confidence = 0.9;
+            fact_store.insert_fact(&fact).await.unwrap();
+        }
+
+        let mut low_conf = make_fact("agent-1", "low-conf", "rule");
+        low_conf.confidence = 0.4;
+        fact_store.insert_fact(&low_conf).await.unwrap();
+
+        let mut low_salience = make_fact("agent-1", "low-salience", "event");
+        low_salience.confidence = 0.9;
+        fact_store.insert_fact(&low_salience).await.unwrap();
+
+        let archived = make_fact("agent-1", "archived-fact", "rule");
+        fact_store.insert_fact(&archived).await.unwrap();
+        fact_store
+            .update_status(&archived.id, "archived", "archive for test")
+            .await
+            .unwrap();
+
+        let injected = fact_store.get_injected_facts("agent-1").await.unwrap();
+        assert_eq!(injected.len(), 50);
+        assert!(injected.iter().all(|f| f.status == "active"));
+        assert!(injected.iter().all(|f| f.confidence >= 0.5));
+        assert!(injected.iter().all(|f| f.salience >= 60));
+
+        for pair in injected.windows(2) {
+            assert!(pair[0].salience >= pair[1].salience);
+        }
     }
 }

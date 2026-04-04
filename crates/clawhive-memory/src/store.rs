@@ -1,6 +1,6 @@
 use crate::migrations::run_migrations;
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -47,6 +47,57 @@ fn default_episode_status() -> EpisodeStatusRecord {
     EpisodeStatusRecord::Open
 }
 
+fn default_flush_phase() -> String {
+    FlushPhase::Idle.as_str().to_owned()
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlushPhase {
+    Idle,
+    Captured,
+    Summarized,
+    FactsWritten,
+    DailyWritten,
+    Archived,
+    Done,
+}
+
+impl FlushPhase {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Idle => "idle",
+            Self::Captured => "captured",
+            Self::Summarized => "summarized",
+            Self::FactsWritten => "facts_written",
+            Self::DailyWritten => "daily_written",
+            Self::Archived => "archived",
+            Self::Done => "done",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "captured" => Self::Captured,
+            "summarized" => Self::Summarized,
+            "facts_written" => Self::FactsWritten,
+            "daily_written" => Self::DailyWritten,
+            "archived" => Self::Archived,
+            "done" => Self::Done,
+            _ => Self::Idle,
+        }
+    }
+}
+
+impl std::str::FromStr for FlushPhase {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(FlushPhase::from_str(s))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EpisodeStateRecord {
     pub episode_id: String,
@@ -67,6 +118,12 @@ pub struct SessionMemoryStateRecord {
     pub last_flushed_turn: u64,
     pub last_boundary_flush_at: Option<DateTime<Utc>>,
     pub pending_flush: bool,
+    #[serde(default = "default_flush_phase")]
+    pub flush_phase: String,
+    #[serde(default)]
+    pub flush_phase_updated_at: Option<String>,
+    #[serde(default)]
+    pub flush_summary_cache: Option<String>,
     #[serde(default)]
     pub recent_explicit_writes: Vec<RecentExplicitMemoryWrite>,
     #[serde(default)]
@@ -363,7 +420,7 @@ impl MemoryStore {
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let mut stmt = conn.prepare(
                 r#"
-                SELECT agent_id, session_id, session_key, last_flushed_turn, last_boundary_flush_at, pending_flush, recent_explicit_writes, open_episodes
+                SELECT agent_id, session_id, session_key, last_flushed_turn, last_boundary_flush_at, pending_flush, flush_phase, flush_phase_updated_at, flush_summary_cache, recent_explicit_writes, open_episodes
                 FROM session_memory_state
                 WHERE agent_id = ?1 AND session_id = ?2
                 LIMIT 1
@@ -372,8 +429,9 @@ impl MemoryStore {
             let mut rows = stmt.query(params![agent_id, session_id])?;
             if let Some(row) = rows.next()? {
                 let last_boundary_flush_at_raw: Option<String> = row.get(4)?;
-                let recent_explicit_writes_raw: String = row.get(6)?;
-                let open_episodes_raw: String = row.get(7)?;
+                let flush_phase_raw: Option<String> = row.get(6)?;
+                let recent_explicit_writes_raw: String = row.get(9)?;
+                let open_episodes_raw: String = row.get(10)?;
                 return Ok::<Option<SessionMemoryStateRecord>, anyhow::Error>(Some(
                     SessionMemoryStateRecord {
                         agent_id: row.get(0)?,
@@ -385,6 +443,13 @@ impl MemoryStore {
                             .map(parse_datetime_sql)
                             .transpose()?,
                         pending_flush: row.get::<_, i64>(5)? != 0,
+                        flush_phase: FlushPhase::from_str(
+                            flush_phase_raw.as_deref().unwrap_or(FlushPhase::Idle.as_str()),
+                        )
+                        .as_str()
+                        .to_owned(),
+                        flush_phase_updated_at: row.get(7)?,
+                        flush_summary_cache: row.get(8)?,
                         recent_explicit_writes: serde_json::from_str(
                             &recent_explicit_writes_raw,
                         )?,
@@ -412,16 +477,22 @@ impl MemoryStore {
                     last_flushed_turn,
                     last_boundary_flush_at,
                     pending_flush,
+                    flush_phase,
+                    flush_phase_updated_at,
+                    flush_summary_cache,
                     recent_explicit_writes,
                     open_episodes,
                     updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
                 ON CONFLICT(agent_id, session_id) DO UPDATE SET
                     session_key = excluded.session_key,
                     last_flushed_turn = excluded.last_flushed_turn,
                     last_boundary_flush_at = excluded.last_boundary_flush_at,
                     pending_flush = excluded.pending_flush,
+                    flush_phase = excluded.flush_phase,
+                    flush_phase_updated_at = excluded.flush_phase_updated_at,
+                    flush_summary_cache = excluded.flush_summary_cache,
                     recent_explicit_writes = excluded.recent_explicit_writes,
                     open_episodes = excluded.open_episodes,
                     updated_at = datetime('now')
@@ -433,6 +504,9 @@ impl MemoryStore {
                     state.last_flushed_turn,
                     state.last_boundary_flush_at.map(|dt| dt.to_rfc3339()),
                     if state.pending_flush { 1_i64 } else { 0_i64 },
+                    FlushPhase::from_str(&state.flush_phase).as_str(),
+                    state.flush_phase_updated_at,
+                    state.flush_summary_cache,
                     serde_json::to_string(&state.recent_explicit_writes)?,
                     serde_json::to_string(&state.open_episodes)?,
                 ],
@@ -480,7 +554,7 @@ impl MemoryStore {
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
             let mut stmt = conn.prepare(
                 r#"
-                SELECT agent_id, session_id, session_key, last_flushed_turn, last_boundary_flush_at, pending_flush, recent_explicit_writes, open_episodes
+                SELECT agent_id, session_id, session_key, last_flushed_turn, last_boundary_flush_at, pending_flush, flush_phase, flush_phase_updated_at, flush_summary_cache, recent_explicit_writes, open_episodes
                 FROM session_memory_state
                 WHERE agent_id = ?1
                   AND session_key = ?2
@@ -493,8 +567,9 @@ impl MemoryStore {
             let mut states = Vec::new();
             while let Some(row) = rows.next()? {
                 let last_boundary_flush_at_raw: Option<String> = row.get(4)?;
-                let recent_explicit_writes_raw: String = row.get(6)?;
-                let open_episodes_raw: String = row.get(7)?;
+                let flush_phase_raw: Option<String> = row.get(6)?;
+                let recent_explicit_writes_raw: String = row.get(9)?;
+                let open_episodes_raw: String = row.get(10)?;
                 states.push(SessionMemoryStateRecord {
                     agent_id: row.get(0)?,
                     session_id: row.get(1)?,
@@ -505,6 +580,177 @@ impl MemoryStore {
                         .map(parse_datetime_sql)
                         .transpose()?,
                     pending_flush: row.get::<_, i64>(5)? != 0,
+                    flush_phase: FlushPhase::from_str(
+                        flush_phase_raw.as_deref().unwrap_or(FlushPhase::Idle.as_str()),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    flush_phase_updated_at: row.get(7)?,
+                    flush_summary_cache: row.get(8)?,
+                    recent_explicit_writes: serde_json::from_str(&recent_explicit_writes_raw)?,
+                    open_episodes: serde_json::from_str(&open_episodes_raw)?,
+                });
+            }
+            Ok::<Vec<SessionMemoryStateRecord>, anyhow::Error>(states)
+        })
+        .await?
+    }
+
+    pub async fn try_acquire_flush_lock(&self, agent_id: &str, session_id: &str) -> Result<bool> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let session_id = session_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let now = Utc::now().to_rfc3339();
+            let updated = conn.execute(
+                r#"
+                UPDATE session_memory_state
+                SET flush_phase = ?3,
+                    flush_phase_updated_at = ?4,
+                    updated_at = datetime('now')
+                WHERE agent_id = ?1
+                  AND session_id = ?2
+                  AND flush_phase = ?5
+                "#,
+                params![
+                    agent_id,
+                    session_id,
+                    FlushPhase::Captured.as_str(),
+                    now,
+                    FlushPhase::Idle.as_str(),
+                ],
+            )?;
+            Ok::<bool, anyhow::Error>(updated > 0)
+        })
+        .await?
+    }
+
+    pub async fn advance_flush_phase(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        new_phase: FlushPhase,
+        summary_cache: Option<String>,
+    ) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let session_id = session_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let now = Utc::now().to_rfc3339();
+            match summary_cache {
+                Some(cache) => {
+                    conn.execute(
+                        r#"
+                        UPDATE session_memory_state
+                        SET flush_phase = ?3,
+                            flush_phase_updated_at = ?4,
+                            flush_summary_cache = ?5,
+                            updated_at = datetime('now')
+                        WHERE agent_id = ?1
+                          AND session_id = ?2
+                        "#,
+                        params![agent_id, session_id, new_phase.as_str(), now, cache],
+                    )?;
+                }
+                None => {
+                    conn.execute(
+                        r#"
+                        UPDATE session_memory_state
+                        SET flush_phase = ?3,
+                            flush_phase_updated_at = ?4,
+                            updated_at = datetime('now')
+                        WHERE agent_id = ?1
+                          AND session_id = ?2
+                        "#,
+                        params![agent_id, session_id, new_phase.as_str(), now],
+                    )?;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        Ok(())
+    }
+
+    pub async fn reset_flush_phase(&self, agent_id: &str, session_id: &str) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let session_id = session_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                r#"
+                UPDATE session_memory_state
+                SET flush_phase = ?3,
+                    flush_phase_updated_at = ?4,
+                    flush_summary_cache = NULL,
+                    updated_at = datetime('now')
+                WHERE agent_id = ?1
+                  AND session_id = ?2
+                "#,
+                params![agent_id, session_id, FlushPhase::Idle.as_str(), now],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        Ok(())
+    }
+
+    pub async fn find_dead_flushes(
+        &self,
+        timeout_minutes: i64,
+    ) -> Result<Vec<SessionMemoryStateRecord>> {
+        let db = Arc::clone(&self.db);
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let cutoff = (Utc::now() - TimeDelta::minutes(timeout_minutes)).to_rfc3339();
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT agent_id, session_id, session_key, last_flushed_turn, last_boundary_flush_at, pending_flush, flush_phase, flush_phase_updated_at, flush_summary_cache, recent_explicit_writes, open_episodes
+                FROM session_memory_state
+                WHERE flush_phase != ?1
+                  AND flush_phase_updated_at IS NOT NULL
+                  AND flush_phase_updated_at < ?2
+                ORDER BY flush_phase_updated_at ASC
+                "#,
+            )?;
+            let mut rows = stmt.query(params![FlushPhase::Idle.as_str(), cutoff])?;
+            let mut states = Vec::new();
+            while let Some(row) = rows.next()? {
+                let last_boundary_flush_at_raw: Option<String> = row.get(4)?;
+                let flush_phase_raw: Option<String> = row.get(6)?;
+                let recent_explicit_writes_raw: String = row.get(9)?;
+                let open_episodes_raw: String = row.get(10)?;
+                states.push(SessionMemoryStateRecord {
+                    agent_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    session_key: row.get(2)?,
+                    last_flushed_turn: row.get(3)?,
+                    last_boundary_flush_at: last_boundary_flush_at_raw
+                        .as_deref()
+                        .map(parse_datetime_sql)
+                        .transpose()?,
+                    pending_flush: row.get::<_, i64>(5)? != 0,
+                        flush_phase: FlushPhase::from_str(
+                        flush_phase_raw.as_deref().unwrap_or(FlushPhase::Idle.as_str()),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    flush_phase_updated_at: row.get(7)?,
+                    flush_summary_cache: row.get(8)?,
                     recent_explicit_writes: serde_json::from_str(&recent_explicit_writes_raw)?,
                     open_episodes: serde_json::from_str(&open_episodes_raw)?,
                 });
@@ -716,8 +962,6 @@ fn parse_datetime_sql(raw: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeDelta;
-
     use super::*;
 
     #[tokio::test]
@@ -865,6 +1109,9 @@ mod tests {
             last_flushed_turn: 7,
             last_boundary_flush_at: Some(Utc::now()),
             pending_flush: true,
+            flush_phase: FlushPhase::Idle.as_str().to_owned(),
+            flush_phase_updated_at: None,
+            flush_summary_cache: None,
             recent_explicit_writes: vec![RecentExplicitMemoryWrite {
                 turn_index: 8,
                 memory_ref: "fact-1".to_owned(),
@@ -920,6 +1167,9 @@ mod tests {
             last_flushed_turn: 3,
             last_boundary_flush_at: Some(recorded_at),
             pending_flush: true,
+            flush_phase: FlushPhase::Idle.as_str().to_owned(),
+            flush_phase_updated_at: None,
+            flush_summary_cache: None,
             recent_explicit_writes: vec![RecentExplicitMemoryWrite {
                 turn_index: 4,
                 memory_ref: "fact-1".to_owned(),
@@ -972,6 +1222,9 @@ mod tests {
                     last_flushed_turn: 0,
                     last_boundary_flush_at: None,
                     pending_flush,
+                    flush_phase: FlushPhase::Idle.as_str().to_owned(),
+                    flush_phase_updated_at: None,
+                    flush_summary_cache: None,
                     recent_explicit_writes: Vec::new(),
                     open_episodes: Vec::new(),
                 })
@@ -1029,6 +1282,9 @@ mod tests {
                     last_flushed_turn: 0,
                     last_boundary_flush_at: None,
                     pending_flush,
+                    flush_phase: FlushPhase::Idle.as_str().to_owned(),
+                    flush_phase_updated_at: None,
+                    flush_summary_cache: None,
                     recent_explicit_writes: Vec::new(),
                     open_episodes: Vec::new(),
                 })
@@ -1065,6 +1321,163 @@ mod tests {
             .await
             .expect("load keep-active")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn try_acquire_flush_lock_only_succeeds_once() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        store
+            .upsert_session_memory_state(SessionMemoryStateRecord {
+                agent_id: "agent-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                session_key: "chat-1".to_owned(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: true,
+                flush_phase: "idle".to_owned(),
+                flush_phase_updated_at: None,
+                flush_summary_cache: None,
+                recent_explicit_writes: Vec::new(),
+                open_episodes: Vec::new(),
+            })
+            .await
+            .expect("upsert state");
+
+        let s1 = store.clone();
+        let s2 = store.clone();
+        let (r1, r2) = tokio::join!(
+            s1.try_acquire_flush_lock("agent-1", "session-1"),
+            s2.try_acquire_flush_lock("agent-1", "session-1")
+        );
+
+        let successes = [r1.expect("first lock"), r2.expect("second lock")]
+            .into_iter()
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(successes, 1);
+
+        let third = store
+            .try_acquire_flush_lock("agent-1", "session-1")
+            .await
+            .expect("third lock");
+        assert!(!third);
+
+        let loaded = store
+            .get_session_memory_state("agent-1", "session-1")
+            .await
+            .expect("load state")
+            .expect("state exists");
+        assert_eq!(loaded.flush_phase, "captured");
+        assert!(loaded.flush_phase_updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn advance_and_reset_flush_phase_round_trip() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        store
+            .upsert_session_memory_state(SessionMemoryStateRecord {
+                agent_id: "agent-1".to_owned(),
+                session_id: "session-2".to_owned(),
+                session_key: "chat-1".to_owned(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: true,
+                flush_phase: "idle".to_owned(),
+                flush_phase_updated_at: None,
+                flush_summary_cache: None,
+                recent_explicit_writes: Vec::new(),
+                open_episodes: Vec::new(),
+            })
+            .await
+            .expect("upsert state");
+
+        store
+            .advance_flush_phase(
+                "agent-1",
+                "session-2",
+                FlushPhase::Summarized,
+                Some("cached summary".to_owned()),
+            )
+            .await
+            .expect("advance phase");
+
+        let advanced = store
+            .get_session_memory_state("agent-1", "session-2")
+            .await
+            .expect("load advanced")
+            .expect("state exists");
+        assert_eq!(advanced.flush_phase, "summarized");
+        assert_eq!(
+            advanced.flush_summary_cache.as_deref(),
+            Some("cached summary")
+        );
+        assert!(advanced.flush_phase_updated_at.is_some());
+
+        store
+            .reset_flush_phase("agent-1", "session-2")
+            .await
+            .expect("reset phase");
+
+        let reset = store
+            .get_session_memory_state("agent-1", "session-2")
+            .await
+            .expect("load reset")
+            .expect("state exists");
+        assert_eq!(reset.flush_phase, "idle");
+        assert_eq!(reset.flush_summary_cache, None);
+    }
+
+    #[tokio::test]
+    async fn find_dead_flushes_returns_stale_non_idle_only() {
+        let store = MemoryStore::open_in_memory().expect("store");
+
+        for (session_id, phase, updated_at) in [
+            (
+                "stale",
+                "captured",
+                (Utc::now() - TimeDelta::minutes(120)).to_rfc3339(),
+            ),
+            (
+                "fresh",
+                "summarized",
+                (Utc::now() - TimeDelta::minutes(2)).to_rfc3339(),
+            ),
+            (
+                "idle",
+                "idle",
+                (Utc::now() - TimeDelta::minutes(180)).to_rfc3339(),
+            ),
+        ] {
+            store
+                .upsert_session_memory_state(SessionMemoryStateRecord {
+                    agent_id: "agent-1".to_owned(),
+                    session_id: session_id.to_owned(),
+                    session_key: "chat-1".to_owned(),
+                    last_flushed_turn: 0,
+                    last_boundary_flush_at: None,
+                    pending_flush: true,
+                    flush_phase: phase.to_owned(),
+                    flush_phase_updated_at: Some(updated_at),
+                    flush_summary_cache: None,
+                    recent_explicit_writes: Vec::new(),
+                    open_episodes: Vec::new(),
+                })
+                .await
+                .expect("upsert state");
+        }
+
+        let stale = store
+            .find_dead_flushes(30)
+            .await
+            .expect("find stale flushes");
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].session_id, "stale");
+
+        let none = store
+            .find_dead_flushes(300)
+            .await
+            .expect("find stale flushes empty");
+        assert!(none.is_empty());
     }
 
     #[tokio::test]
