@@ -1543,11 +1543,13 @@ impl Orchestrator {
         }
     }
 
-    async fn process_session_close_daily_dirty(&self, view: &ConfigView, agent_id: &str) {
-        let daily_path = format!(
-            "memory/{}.md",
-            chrono::Utc::now().date_naive().format("%Y-%m-%d")
-        );
+    async fn process_session_close_daily_dirty(
+        &self,
+        view: &ConfigView,
+        agent_id: &str,
+        session_date: chrono::NaiveDate,
+    ) {
+        let daily_path = format!("memory/{}.md", session_date.format("%Y-%m-%d"));
         self.enqueue_dirty_source(
             agent_id,
             DIRTY_KIND_DAILY_FILE,
@@ -1789,8 +1791,12 @@ impl Orchestrator {
                     .await;
                 }
             }
-            self.process_session_close_daily_dirty(view.as_ref(), agent_id)
-                .await;
+            self.process_session_close_daily_dirty(
+                view.as_ref(),
+                agent_id,
+                previous_session.last_active.date_naive(),
+            )
+            .await;
         }
 
         let session_text = build_session_text(&inbound.text, &inbound.attachments);
@@ -2182,8 +2188,12 @@ impl Orchestrator {
                     .await;
                 }
             }
-            self.process_session_close_daily_dirty(view.as_ref(), agent_id)
-                .await;
+            self.process_session_close_daily_dirty(
+                view.as_ref(),
+                agent_id,
+                previous_session.last_active.date_naive(),
+            )
+            .await;
         }
 
         let system_prompt = view
@@ -4076,7 +4086,14 @@ impl Orchestrator {
         }
         let reader = clawhive_memory::session::SessionReader::new(file_store.workspace_dir());
 
-        let today = chrono::Utc::now().date_naive();
+        // Use the last message's timestamp to determine the daily file date,
+        // so that sessions from older dates don't pollute today's daily file.
+        let today = messages
+            .iter()
+            .rev()
+            .find_map(|m| m.timestamp)
+            .map(|ts| ts.date_naive())
+            .unwrap_or_else(|| chrono::Utc::now().date_naive());
 
         let conversation = messages
             .iter()
