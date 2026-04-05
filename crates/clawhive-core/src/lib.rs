@@ -97,6 +97,10 @@ pub struct ModelPolicy {
     /// Override context window (auto-resolved from model presets if not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Cheap model for simple classification tasks (e.g. conflict confirmation).
+    /// Falls back to primary when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

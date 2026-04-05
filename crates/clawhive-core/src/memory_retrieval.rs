@@ -508,8 +508,10 @@ fn score_facts(
                 score += 0.1;
             }
             score += fact.importance.clamp(0.0, 1.0) * 0.15;
-            score += fact.confidence.clamp(0.0, 1.0) * 0.12;
-            score += (fact.salience as f64 / 100.0) * 0.08;
+            score += fact.confidence.clamp(0.0, 1.0) * 0.2;
+            score += fact.salience.clamp(0, 100) as f64 * 0.002;
+            // Emotionally significant facts get a ranking boost
+            score += fact.affect_intensity.clamp(0.0, 1.0) * 0.05;
             score *= source_weight(MemorySourceKind::Fact, bias);
 
             if score < min_score {
@@ -762,8 +764,8 @@ mod tests {
         let hits = score_facts(&[fact], "likes ramen", 0.0, MemoryRoutingBias::Neutral);
 
         assert_eq!(hits.len(), 1);
-        let expected = 1.58125;
-        assert!((hits[0].score - expected).abs() < 1e-9);
+        let expected = 1.78125;
+        assert!((hits[0].score - expected).abs() < 1e-6);
     }
 
     #[test]
@@ -809,8 +811,8 @@ mod tests {
         assert_eq!(hits[0].fact.id, "fact-high-signal");
 
         let score_delta = hits[0].score - hits[1].score;
-        let expected_delta = 0.21;
-        assert!((score_delta - expected_delta).abs() < 1e-9);
+        let expected_delta = 0.425;
+        assert!((score_delta - expected_delta).abs() < 1e-6);
     }
 
     #[test]

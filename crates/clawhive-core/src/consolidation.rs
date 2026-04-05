@@ -61,7 +61,7 @@ Return a JSON array only. Each item must contain:
 
 Rules:
 - discard greetings, identity chatter, small talk, raw command output, receipts, and bilingual restatements
-- choose "fact" for stable rules, preferences, identities, or durable atomic decisions
+- choose "fact" for stable rules, preferences, identities, durable atomic decisions, or recurring procedures/workflows
 - choose "memory" only for long-lived narrative context that belongs in MEMORY.md
 - prefer under-selection over over-selection
 - return valid JSON only"#;
@@ -131,6 +131,7 @@ pub struct HippocampusConsolidator {
     router: Arc<LlmRouter>,
     model_primary: String,
     model_fallbacks: Vec<String>,
+    model_compaction: Option<String>,
     lookback_days: usize,
     search_index: Option<SearchIndex>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
@@ -173,6 +174,7 @@ impl HippocampusConsolidator {
             router,
             model_primary,
             model_fallbacks,
+            model_compaction: None,
             lookback_days: 7,
             search_index: None,
             embedding_provider: None,
@@ -216,6 +218,11 @@ impl HippocampusConsolidator {
 
     pub fn with_session_idle_minutes(mut self, idle_minutes: i64) -> Self {
         self.session_idle_minutes = idle_minutes.max(1);
+        self
+    }
+
+    pub fn with_model_compaction(mut self, model: String) -> Self {
+        self.model_compaction = Some(model);
         self
     }
 
@@ -1186,12 +1193,14 @@ impl HippocampusConsolidator {
             candidate.content, candidate.fact_type, recent.content, recent.fact_type
         );
 
-        // TODO: use a dedicated compaction/cheap model instead of model_primary
-        // to reduce cost for this simple yes/no classification
+        let model = self
+            .model_compaction
+            .as_deref()
+            .unwrap_or(&self.model_primary);
         let response = self
             .router
             .chat(
-                &self.model_primary,
+                model,
                 &self.model_fallbacks,
                 None,
                 vec![LlmMessage::user(prompt)],
@@ -1953,13 +1962,74 @@ impl ConsolidationScheduler {
         const MAX_STALE_SESSIONS_PER_SCAN: usize = 5;
         const DEAD_FLUSH_TIMEOUT_MINUTES: i64 = 10;
 
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<SessionMemoryStateRecord> = Vec::new();
         let dead = store.find_dead_flushes(DEAD_FLUSH_TIMEOUT_MINUTES).await?;
-        candidates.extend(
-            dead.into_iter()
-                .filter(|state| state.agent_id == consolidator.agent_id)
-                .take(MAX_STALE_SESSIONS_PER_SCAN),
-        );
+        for dead_flush in dead
+            .into_iter()
+            .filter(|state| state.agent_id == consolidator.agent_id)
+            .take(MAX_STALE_SESSIONS_PER_SCAN)
+        {
+            if dead_flush.flush_summary_cache.is_some() {
+                match store
+                    .refresh_flush_phase_timestamp(&dead_flush.agent_id, &dead_flush.session_id)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            agent_id = %dead_flush.agent_id,
+                            session_id = %dead_flush.session_id,
+                            "dead flush recovery: Path A (re-armed timeout, resuming from cache)"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_id = %dead_flush.agent_id,
+                            session_id = %dead_flush.session_id,
+                            %error,
+                            "dead flush recovery: Path A failed, falling back to Path B"
+                        );
+                        if let Err(reset_error) = store
+                            .reset_flush_phase(&dead_flush.agent_id, &dead_flush.session_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                agent_id = %dead_flush.agent_id,
+                                session_id = %dead_flush.session_id,
+                                error = %reset_error,
+                                "dead flush recovery: Path B fallback also failed"
+                            );
+                        } else {
+                            tracing::info!(
+                                agent_id = %dead_flush.agent_id,
+                                session_id = %dead_flush.session_id,
+                                "dead flush recovery: Path B fallback (reset to idle)"
+                            );
+                        }
+                    }
+                }
+            } else {
+                match store
+                    .reset_flush_phase(&dead_flush.agent_id, &dead_flush.session_id)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            agent_id = %dead_flush.agent_id,
+                            session_id = %dead_flush.session_id,
+                            "dead flush recovery: Path B (reset to idle, no cache present)"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_id = %dead_flush.agent_id,
+                            session_id = %dead_flush.session_id,
+                            %error,
+                            "dead flush recovery: Path B reset failed"
+                        );
+                    }
+                }
+            }
+        }
 
         if candidates.len() < MAX_STALE_SESSIONS_PER_SCAN {
             let open_episode_stale = Self::find_stale_open_episode_states(
@@ -1972,7 +2042,9 @@ impl ConsolidationScheduler {
             for state in open_episode_stale {
                 if candidates
                     .iter()
-                    .any(|existing| existing.session_id == state.session_id)
+                    .any(|existing: &SessionMemoryStateRecord| {
+                        existing.session_id == state.session_id
+                    })
                 {
                     continue;
                 }
@@ -2108,6 +2180,41 @@ impl ConsolidationScheduler {
             };
 
             if total_access == 0 {
+                let has_lineage = match &consolidator.memory_store {
+                    Some(store) => {
+                        match Self::has_archived_chunk_lineage_refs(
+                            store,
+                            consolidator.agent_id(),
+                            &archived_rel_path,
+                        )
+                        .await
+                        {
+                            Ok(has) => has,
+                            Err(error) => {
+                                tracing::warn!(
+                                    agent_id = %consolidator.agent_id(),
+                                    date = %date,
+                                    %error,
+                                    "lineage check failed, retaining file"
+                                );
+                                true
+                            }
+                        }
+                    }
+                    None => false,
+                };
+
+                if has_lineage {
+                    tracing::info!(
+                        agent_id = %consolidator.agent_id(),
+                        date = %date,
+                        action = "retain",
+                        reason = "lineage_refs_exist",
+                        "Daily file lifecycle action"
+                    );
+                    continue;
+                }
+
                 consolidator.file_store.delete_archived_daily(date).await?;
                 if let Some(search_index) = consolidator.search_index() {
                     if let Err(error) = search_index.delete_indexed_path(&archived_rel_path).await {
@@ -2366,6 +2473,41 @@ impl ConsolidationScheduler {
             Ok::<i64, anyhow::Error>(total_access)
         })
         .await?
+    }
+
+    async fn has_archived_chunk_lineage_refs(
+        memory_store: &Arc<MemoryStore>,
+        agent_id: &str,
+        archived_path: &str,
+    ) -> Result<bool> {
+        let db = memory_store.db();
+        let agent_id_owned = agent_id.to_string();
+        let archived_path_owned = archived_path.to_string();
+
+        let chunk_ids: Vec<String> = task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let mut stmt =
+                conn.prepare("SELECT id FROM chunks WHERE path = ?1 AND agent_id = ?2")?;
+            let ids = stmt
+                .query_map([&archived_path_owned, &agent_id_owned], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok::<Vec<String>, anyhow::Error>(ids)
+        })
+        .await??;
+
+        if chunk_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let lineage_store = MemoryLineageStore::new(memory_store.db());
+        let refs = lineage_store
+            .get_canonical_ids_for_sources(agent_id, "chunk", &chunk_ids)
+            .await?;
+        Ok(refs.values().any(|ids| !ids.is_empty()))
     }
 
     fn should_run_weekly_decay(last_decay_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {

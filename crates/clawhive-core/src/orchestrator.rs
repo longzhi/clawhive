@@ -136,6 +136,7 @@ fn normalized_candidate_fact_type(
         Some("event") => "event",
         Some("person") => "person",
         Some("rule") => "rule",
+        Some("procedure") => "procedure",
         _ => "decision",
     }
 }
@@ -144,6 +145,32 @@ fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
     let tokens_a = super::consolidation::normalized_word_set(a);
     let tokens_b = super::consolidation::normalized_word_set(b);
     super::consolidation::jaccard_similarity(&tokens_a, &tokens_b)
+}
+
+pub(crate) fn contains_correction_phrase(content: &str) -> bool {
+    const PHRASES_CN: &[&str] = &[
+        "不再",
+        "改为",
+        "已切换到",
+        "改成",
+        "换成",
+        "已放弃",
+        "不用了",
+    ];
+    const PHRASES_EN: &[&str] = &[
+        "no longer",
+        "switched to",
+        "changed to",
+        "moved to",
+        "instead of",
+        "replaced with",
+        "stopped using",
+        "quit using",
+    ];
+
+    let lower = content.to_lowercase();
+    PHRASES_CN.iter().any(|phrase| content.contains(phrase))
+        || PHRASES_EN.iter().any(|phrase| lower.contains(phrase))
 }
 
 fn boundary_flush_conflict_passes_two_step(
@@ -160,6 +187,10 @@ fn boundary_flush_conflict_passes_two_step(
     }
     if existing.fact_type != new_fact_type {
         return false;
+    }
+
+    if contains_correction_phrase(new_content) {
+        return true;
     }
 
     fact_token_overlap_ratio(new_content, &existing.content) > 0.6
@@ -186,7 +217,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
-async fn find_boundary_flush_conflict(
+pub(crate) async fn find_boundary_flush_conflict(
     embedding_provider: &Arc<dyn EmbeddingProvider>,
     new_content: &str,
     new_fact_type: &str,
@@ -5688,6 +5719,7 @@ mod tests {
                 fallbacks: vec![],
                 thinking_level: None,
                 context_window: None,
+                compaction_model: None,
             },
             tool_policy: None,
             memory_policy,
@@ -6690,6 +6722,12 @@ Body"#,
             "preference",
             &old_fact,
             None
+        ));
+        assert!(boundary_flush_conflict_passes_two_step(
+            "User no longer uses Python for backend systems",
+            "preference",
+            &old_fact,
+            Some(0.9)
         ));
     }
 

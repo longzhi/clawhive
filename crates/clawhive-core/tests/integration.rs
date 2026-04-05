@@ -350,6 +350,7 @@ fn test_agent(primary: &str, fallbacks: Vec<&str>) -> AgentConfig {
             fallbacks: fallbacks.into_iter().map(|s| s.to_string()).collect(),
             thinking_level: None,
             context_window: None,
+            compaction_model: None,
         },
     }
 }
@@ -365,6 +366,7 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
             fallbacks: fallbacks.into_iter().map(|s| s.to_string()).collect(),
             thinking_level: None,
             context_window: None,
+            compaction_model: None,
         },
         tool_policy: None,
         memory_policy: None,

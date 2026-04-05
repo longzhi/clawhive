@@ -86,6 +86,7 @@ async fn make_orchestrator_with_provider(
             fallbacks: vec![],
             thinking_level: None,
             context_window: None,
+            compaction_model: None,
         },
         tool_policy: None,
         memory_policy: None,
@@ -395,6 +396,7 @@ async fn mock_server_fallback_on_failure() {
             fallbacks: vec!["fallback/claude-sonnet-4-5".to_string()],
             thinking_level: None,
             context_window: None,
+            compaction_model: None,
         },
     };
 

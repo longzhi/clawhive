@@ -316,6 +316,29 @@ impl MemoryWriteTool {
         }
         self.memory.upsert_session_memory_state(state).await
     }
+
+    fn find_correction_phrase_conflict(
+        &self,
+        active_facts: &[Fact],
+        content: &str,
+        fact_type: &str,
+    ) -> Option<Fact> {
+        let new_tokens = super::consolidation::normalized_word_set(content);
+
+        active_facts
+            .iter()
+            .filter(|existing| existing.fact_type == fact_type)
+            .filter_map(|existing| {
+                let existing_tokens = super::consolidation::normalized_word_set(&existing.content);
+                let similarity =
+                    super::consolidation::jaccard_similarity(&new_tokens, &existing_tokens);
+                (similarity > 0.5).then(|| (similarity, existing.clone()))
+            })
+            .max_by(|(left_similarity, _), (right_similarity, _)| {
+                left_similarity.total_cmp(right_similarity)
+            })
+            .map(|(_, fact)| fact)
+    }
 }
 
 #[async_trait]
@@ -367,13 +390,16 @@ impl ToolExecutor for MemoryWriteTool {
             .and_then(|value| u8::try_from(value).ok())
             .unwrap_or_else(|| fact_store::default_salience_for_type(fact_type));
         let occurred_at = input["occurred_at"].as_str().map(String::from);
+        let has_correction_phrase = super::orchestrator::contains_correction_phrase(content);
 
         let active_facts = self.fact_store.get_active_facts(&self.agent_id).await?;
         if let Some(existing) = find_matching_fact(&active_facts, content) {
-            return Ok(ToolOutput {
-                content: format!("Already remembered: {}", existing.content),
-                is_error: false,
-            });
+            if !has_correction_phrase {
+                return Ok(ToolOutput {
+                    content: format!("Already remembered: {}", existing.content),
+                    is_error: false,
+                });
+            }
         }
 
         let long_term = self.file_store.read_long_term().await?;
@@ -391,6 +417,82 @@ impl ToolExecutor for MemoryWriteTool {
             }
         }
 
+        let source_session = self
+            .memory
+            .get_session(ctx.session_key())
+            .await?
+            .map(|session| session.session_id);
+
+        if has_correction_phrase {
+            if let Some(old_fact) =
+                self.find_correction_phrase_conflict(&active_facts, content, fact_type)
+            {
+                let now = chrono::Utc::now().to_rfc3339();
+                let new_fact = Fact {
+                    id: fact_store::generate_fact_id(&self.agent_id, content),
+                    agent_id: self.agent_id.clone(),
+                    content: content.to_owned(),
+                    fact_type: fact_type.to_owned(),
+                    importance,
+                    confidence: 1.0,
+                    status: "active".to_owned(),
+                    occurred_at: occurred_at.clone(),
+                    recorded_at: now.clone(),
+                    source_type: "explicit_user_memory".to_owned(),
+                    source_session: source_session.clone(),
+                    access_count: 0,
+                    last_accessed: None,
+                    superseded_by: None,
+                    salience,
+                    supersede_reason: None,
+                    affect: "neutral".to_owned(),
+                    affect_intensity: 0.0,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+
+                match self
+                    .fact_store
+                    .supersede(&old_fact.id, &new_fact, "auto_correction_phrase")
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = self.fact_store.record_add(&new_fact).await;
+                        if let Err(error) = self.record_explicit_write_marker(ctx, &new_fact).await
+                        {
+                            tracing::warn!(
+                                %error,
+                                agent_id = %self.agent_id,
+                                session_key = %ctx.session_key(),
+                                "Failed to persist explicit memory write marker"
+                            );
+                        }
+                        tracing::info!(
+                            agent_id = %self.agent_id,
+                            old_fact_id = %old_fact.id,
+                            new_fact_id = %new_fact.id,
+                            "auto-superseded fact via correction phrase detection"
+                        );
+                        return Ok(ToolOutput {
+                            content: format!(
+                                "Updated memory: superseded \"{}\" with new fact",
+                                old_fact.content
+                            ),
+                            is_error: false,
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            old_fact_id = %old_fact.id,
+                            error = %error,
+                            "correction phrase auto-supersede failed, falling back to normal write"
+                        );
+                    }
+                }
+            }
+        }
+
         let now = chrono::Utc::now().to_rfc3339();
         let fact = Fact {
             id: fact_store::generate_fact_id(&self.agent_id, content),
@@ -403,11 +505,7 @@ impl ToolExecutor for MemoryWriteTool {
             occurred_at,
             recorded_at: now.clone(),
             source_type: "explicit_user_memory".to_owned(),
-            source_session: self
-                .memory
-                .get_session(ctx.session_key())
-                .await?
-                .map(|session| session.session_id),
+            source_session,
             access_count: 0,
             last_accessed: None,
             superseded_by: None,
@@ -665,6 +763,7 @@ impl ToolExecutor for MemorySupersedeToolDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::contains_correction_phrase;
     use clawhive_memory::embedding::StubEmbeddingProvider;
     use clawhive_memory::fact_store::FactStore;
     use clawhive_memory::memory_lineage::MemoryLineageStore;
@@ -1134,6 +1233,104 @@ mod tests {
         let marker = &state.recent_explicit_writes[0];
         assert_eq!(marker.turn_index, 5);
         assert_eq!(marker.summary, "User prefers concise replies");
+    }
+
+    #[test]
+    fn correction_phrase_detection_cn() {
+        assert!(contains_correction_phrase("我不再用 Rust 了"));
+    }
+
+    #[test]
+    fn correction_phrase_detection_en() {
+        assert!(contains_correction_phrase("I switched to Python"));
+    }
+
+    #[test]
+    fn no_correction_phrase() {
+        assert!(!contains_correction_phrase("I like Rust"));
+    }
+
+    #[tokio::test]
+    async fn memory_write_auto_supersedes_conflicting_fact_when_correction_phrase_detected() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+
+        tool.execute(
+            serde_json::json!({
+                "content": "User uses Rust for backend services",
+                "fact_type": "preference"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User no longer uses Rust for backend services",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Updated memory: superseded"));
+
+        let active = fact_store.get_active_facts("agent-1").await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0].content,
+            "User no longer uses Rust for backend services"
+        );
+
+        let old = fact_store
+            .find_by_content("agent-1", "User uses Rust for backend services")
+            .await
+            .unwrap()
+            .expect("old fact should still exist as superseded record");
+        assert_eq!(old.status, "superseded");
+        assert_eq!(old.supersede_reason.as_deref(), None);
+    }
+
+    #[tokio::test]
+    async fn memory_write_correction_phrase_without_conflict_falls_back_to_normal_write() {
+        let (tmp, memory, _, _) = setup();
+        let ctx = ToolContext::builtin();
+        let fact_store = FactStore::new(memory.db());
+        let tool = MemoryWriteTool::new(
+            fact_store.clone(),
+            MemoryFileStore::new(tmp.path()),
+            memory.clone(),
+            "agent-1".to_string(),
+        );
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "我已切换到 TypeScript",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.content, "Remembered: 我已切换到 TypeScript");
+
+        let active = fact_store.get_active_facts("agent-1").await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "我已切换到 TypeScript");
     }
 
     #[tokio::test]

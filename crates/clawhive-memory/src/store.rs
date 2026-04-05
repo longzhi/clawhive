@@ -709,6 +709,36 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Re-arm the flush timeout without changing the phase (Path A: resume from cache).
+    pub async fn refresh_flush_phase_timestamp(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        let session_id = session_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                r#"
+                UPDATE session_memory_state
+                SET flush_phase_updated_at = ?3,
+                    updated_at = datetime('now')
+                WHERE agent_id = ?1
+                  AND session_id = ?2
+                "#,
+                params![agent_id, session_id, now],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
     pub async fn find_dead_flushes(
         &self,
         timeout_minutes: i64,
@@ -1639,6 +1669,48 @@ mod tests {
             assert_eq!(remaining_old, 0);
             assert_eq!(remaining_fresh, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_flush_phase_timestamp_updates_only_timestamp() {
+        let store = MemoryStore::open_in_memory().expect("store");
+        let old_ts = (Utc::now() - TimeDelta::minutes(30)).to_rfc3339();
+
+        store
+            .upsert_session_memory_state(SessionMemoryStateRecord {
+                agent_id: "agent-1".to_owned(),
+                session_id: "session-refresh".to_owned(),
+                session_key: "chat-1".to_owned(),
+                last_flushed_turn: 0,
+                last_boundary_flush_at: None,
+                pending_flush: true,
+                flush_phase: "summarized".to_owned(),
+                flush_phase_updated_at: Some(old_ts.clone()),
+                flush_summary_cache: Some("some cached data".to_owned()),
+                recent_explicit_writes: Vec::new(),
+                open_episodes: Vec::new(),
+            })
+            .await
+            .expect("upsert state");
+
+        store
+            .refresh_flush_phase_timestamp("agent-1", "session-refresh")
+            .await
+            .expect("refresh timestamp");
+
+        let updated = store
+            .get_session_memory_state("agent-1", "session-refresh")
+            .await
+            .expect("load updated")
+            .expect("state exists");
+
+        assert_eq!(updated.flush_phase, "summarized");
+        assert_eq!(
+            updated.flush_summary_cache.as_deref(),
+            Some("some cached data")
+        );
+        let new_ts = updated.flush_phase_updated_at.expect("timestamp set");
+        assert_ne!(new_ts, old_ts, "timestamp should be updated");
     }
 
     #[tokio::test]

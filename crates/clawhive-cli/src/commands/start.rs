@@ -648,28 +648,30 @@ async fn start_bot(
             });
         }
 
-        let consolidator = Arc::new(
-            HippocampusConsolidator::new(
-                agent_config.agent_id.clone(),
-                file_store.clone(),
-                Arc::clone(&router_for_consolidation),
-                agent_config.model_policy.primary.clone(),
-                agent_config.model_policy.fallbacks.clone(),
-            )
-            .with_search_index(search_index)
-            .with_embedding_provider(consolidation_embedding_provider.clone())
-            .with_file_store_for_reindex(file_store)
-            .with_session_reader_for_reindex(session_reader)
-            .with_memory_store(Arc::clone(&memory))
-            .with_session_idle_minutes(
-                agent_config
-                    .memory_policy
-                    .as_ref()
-                    .and_then(|policy| policy.idle_minutes)
-                    .unwrap_or(30) as i64,
-            )
-            .with_embedding_cache_ttl_days(embedding_cache_ttl_days),
-        );
+        let mut consolidator_builder = HippocampusConsolidator::new(
+            agent_config.agent_id.clone(),
+            file_store.clone(),
+            Arc::clone(&router_for_consolidation),
+            agent_config.model_policy.primary.clone(),
+            agent_config.model_policy.fallbacks.clone(),
+        )
+        .with_search_index(search_index)
+        .with_embedding_provider(consolidation_embedding_provider.clone())
+        .with_file_store_for_reindex(file_store)
+        .with_session_reader_for_reindex(session_reader)
+        .with_memory_store(Arc::clone(&memory))
+        .with_session_idle_minutes(
+            agent_config
+                .memory_policy
+                .as_ref()
+                .and_then(|policy| policy.idle_minutes)
+                .unwrap_or(30) as i64,
+        )
+        .with_embedding_cache_ttl_days(embedding_cache_ttl_days);
+        if let Some(compaction_model) = agent_config.model_policy.compaction_model.clone() {
+            consolidator_builder = consolidator_builder.with_model_compaction(compaction_model);
+        }
+        let consolidator = Arc::new(consolidator_builder);
         consolidators.push(consolidator);
     }
 

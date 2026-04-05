@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,12 @@ pub struct FactHealth {
     pub archived: usize,
     pub avg_confidence: f64,
     pub avg_salience: f64,
+    #[serde(default)]
+    pub added_this_week: usize,
+    #[serde(default)]
+    pub superseded_this_week: usize,
+    #[serde(default)]
+    pub archived_this_week: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +91,24 @@ impl HealthReporter {
                     })?
                 };
 
+            let week_ago = (Utc::now() - Duration::days(7)).to_rfc3339();
+            let (added_this_week, superseded_this_week, archived_this_week): (usize, usize, usize) = {
+                let mut stmt = conn.prepare(
+                    "SELECT \
+                     COALESCE(SUM(CASE WHEN status = 'active' AND created_at >= ?1 THEN 1 ELSE 0 END), 0), \
+                     COALESCE(SUM(CASE WHEN status = 'superseded' AND updated_at >= ?1 THEN 1 ELSE 0 END), 0), \
+                     COALESCE(SUM(CASE WHEN status = 'archived' AND updated_at >= ?1 THEN 1 ELSE 0 END), 0) \
+                     FROM facts",
+                )?;
+                stmt.query_row(rusqlite::params![week_ago], |row| {
+                    Ok((
+                        row.get::<_, usize>(0)?,
+                        row.get::<_, usize>(1)?,
+                        row.get::<_, usize>(2)?,
+                    ))
+                })?
+            };
+
             let (chunk_total, with_embeddings): (usize, usize) = {
                 let mut stmt = conn.prepare(
                     "SELECT COUNT(*), COALESCE(SUM(CASE WHEN embedding != '' THEN 1 ELSE 0 END), 0) FROM chunks",
@@ -114,6 +138,9 @@ impl HealthReporter {
                     archived,
                     avg_confidence,
                     avg_salience,
+                    added_this_week,
+                    superseded_this_week,
+                    archived_this_week,
                 },
                 chunks: ChunkHealth {
                     total: chunk_total,
@@ -163,6 +190,7 @@ mod tests {
         let db = setup_db().expect("setup db");
         {
             let conn = db.lock().expect("lock sqlite connection");
+            let now = Utc::now().to_rfc3339();
 
             conn.execute(
                 "INSERT INTO facts (
@@ -171,22 +199,8 @@ mod tests {
                     supersede_reason, affect, affect_intensity, created_at, updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
-                    "f1",
-                    "agent-a",
-                    "fact one",
-                    "rule",
-                    0.8_f64,
-                    0.9_f64,
-                    80_i64,
-                    "active",
-                    "2026-04-05T00:00:00Z",
-                    "session",
-                    0_i64,
-                    "",
-                    "neutral",
-                    0.0_f64,
-                    "2026-04-05T00:00:00Z",
-                    "2026-04-05T00:00:00Z",
+                    "f1", "agent-a", "fact one", "rule", 0.8_f64, 0.9_f64, 80_i64, "active", &now,
+                    "session", 0_i64, "", "neutral", 0.0_f64, &now, &now,
                 ],
             )
             .expect("insert fact f1");
@@ -206,14 +220,14 @@ mod tests {
                     0.7_f64,
                     40_i64,
                     "superseded",
-                    "2026-04-05T00:00:01Z",
+                    &now,
                     "session",
                     0_i64,
                     "replaced",
                     "neutral",
                     0.0_f64,
-                    "2026-04-05T00:00:01Z",
-                    "2026-04-05T00:00:01Z",
+                    &now,
+                    &now,
                 ],
             )
             .expect("insert fact f2");
@@ -233,14 +247,14 @@ mod tests {
                     0.6_f64,
                     20_i64,
                     "archived",
-                    "2026-04-05T00:00:02Z",
+                    &now,
                     "session",
                     0_i64,
                     "",
                     "neutral",
                     0.0_f64,
-                    "2026-04-05T00:00:02Z",
-                    "2026-04-05T00:00:02Z",
+                    &now,
+                    &now,
                 ],
             )
             .expect("insert fact f3");
@@ -260,11 +274,11 @@ mod tests {
                     "model-a",
                     "chunk one",
                     "[0.1,0.2]",
-                    "2026-04-05T00:00:00Z",
+                    &now,
                     1_i64,
                     "agent-a",
-                    "2026-04-05T00:00:00Z",
-                    "2026-04-05T00:00:00Z",
+                    &now,
+                    &now,
                 ],
             )
             .expect("insert chunk c1");
@@ -284,11 +298,11 @@ mod tests {
                     "model-a",
                     "chunk two",
                     "",
-                    "2026-04-05T00:00:01Z",
+                    &now,
                     0_i64,
                     "agent-a",
-                    "2026-04-05T00:00:01Z",
-                    "2026-04-05T00:00:01Z",
+                    &now,
+                    &now,
                 ],
             )
             .expect("insert chunk c2");
@@ -303,6 +317,9 @@ mod tests {
         assert_eq!(report.facts.archived, 1);
         assert!((report.facts.avg_confidence - 0.733333333).abs() < 1e-6);
         assert!((report.facts.avg_salience - 46.666666666).abs() < 1e-6);
+        assert_eq!(report.facts.added_this_week, 1);
+        assert_eq!(report.facts.superseded_this_week, 1);
+        assert_eq!(report.facts.archived_this_week, 1);
 
         assert_eq!(report.chunks.total, 2);
         assert_eq!(report.chunks.with_embeddings, 1);
@@ -326,6 +343,9 @@ mod tests {
         assert_eq!(report.facts.archived, 0);
         assert_eq!(report.facts.avg_confidence, 0.0);
         assert_eq!(report.facts.avg_salience, 0.0);
+        assert_eq!(report.facts.added_this_week, 0);
+        assert_eq!(report.facts.superseded_this_week, 0);
+        assert_eq!(report.facts.archived_this_week, 0);
 
         assert_eq!(report.chunks.total, 0);
         assert_eq!(report.chunks.with_embeddings, 0);
@@ -347,6 +367,9 @@ mod tests {
                 archived: 0,
                 avg_confidence: 0.0,
                 avg_salience: 0.0,
+                added_this_week: 0,
+                superseded_this_week: 0,
+                archived_this_week: 0,
             },
             chunks: ChunkHealth {
                 total: 0,

@@ -130,6 +130,7 @@ mod tests {
                     fallbacks: Vec::new(),
                     thinking_level: None,
                     context_window: None,
+                    compaction_model: None,
                 },
                 tool_policy: None,
                 memory_policy: None,

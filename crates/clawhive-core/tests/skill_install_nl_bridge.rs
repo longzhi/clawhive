@@ -45,6 +45,7 @@ fn test_full_agent() -> FullAgentConfig {
             fallbacks: vec![],
             thinking_level: None,
             context_window: None,
+            compaction_model: None,
         },
         tool_policy: None,
         memory_policy: None,

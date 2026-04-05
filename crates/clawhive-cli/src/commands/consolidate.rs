@@ -46,28 +46,30 @@ pub(crate) async fn run(root: &Path, agent_id_override: Option<&str>) -> Result<
         },
     );
     let consolidation_embedding_provider = build_embedding_provider(&config).await;
-    let consolidator = Arc::new(
-        HippocampusConsolidator::new(
-            consolidation_agent_id,
-            file_store.clone(),
-            Arc::new(build_router_from_config(&config).await),
-            agent_config.model_policy.primary.clone(),
-            agent_config.model_policy.fallbacks.clone(),
-        )
-        .with_search_index(consolidation_search_index)
-        .with_embedding_provider(consolidation_embedding_provider)
-        .with_file_store_for_reindex(file_store)
-        .with_session_reader_for_reindex(session_reader)
-        .with_memory_store(Arc::clone(&memory))
-        .with_session_idle_minutes(
-            agent_config
-                .memory_policy
-                .as_ref()
-                .and_then(|policy| policy.idle_minutes)
-                .unwrap_or(30) as i64,
-        )
-        .with_embedding_cache_ttl_days(config.main.memory_search.embedding_cache_ttl_days),
-    );
+    let mut consolidator_builder = HippocampusConsolidator::new(
+        consolidation_agent_id,
+        file_store.clone(),
+        Arc::new(build_router_from_config(&config).await),
+        agent_config.model_policy.primary.clone(),
+        agent_config.model_policy.fallbacks.clone(),
+    )
+    .with_search_index(consolidation_search_index)
+    .with_embedding_provider(consolidation_embedding_provider)
+    .with_file_store_for_reindex(file_store)
+    .with_session_reader_for_reindex(session_reader)
+    .with_memory_store(Arc::clone(&memory))
+    .with_session_idle_minutes(
+        agent_config
+            .memory_policy
+            .as_ref()
+            .and_then(|policy| policy.idle_minutes)
+            .unwrap_or(30) as i64,
+    )
+    .with_embedding_cache_ttl_days(config.main.memory_search.embedding_cache_ttl_days);
+    if let Some(compaction_model) = agent_config.model_policy.compaction_model.clone() {
+        consolidator_builder = consolidator_builder.with_model_compaction(compaction_model);
+    }
+    let consolidator = Arc::new(consolidator_builder);
 
     let scheduler = ConsolidationScheduler::new(
         vec![consolidator],
