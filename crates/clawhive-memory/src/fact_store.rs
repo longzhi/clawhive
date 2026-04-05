@@ -567,7 +567,7 @@ impl FactStore {
                     tx.execute(
                         "INSERT INTO fact_history (id, fact_id, event, old_content, new_content, reason, created_at) \
                          VALUES (?1, ?2, 'ARCHIVE', ?3, NULL, 'confidence_decay_archive', ?4)",
-                        params![Uuid::new_v4().to_string(), fact.id, fact.status, now],
+                        params![Uuid::new_v4().to_string(), fact.id, fact.content, now],
                     )?;
                     archived_count += 1;
                 } else {

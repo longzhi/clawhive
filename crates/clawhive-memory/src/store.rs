@@ -76,6 +76,8 @@ impl FlushPhase {
         }
     }
 
+    // Inherent method kept alongside FromStr impl for call-site ergonomics
+    // (avoids requiring `use std::str::FromStr` at every call site)
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {

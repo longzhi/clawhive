@@ -557,7 +557,7 @@ impl HippocampusConsolidator {
         let mut pruned = 0usize;
 
         for candidate in candidates {
-            let response = self
+            let response = match self
                 .request_consolidation(
                     STALE_SECTION_CONFIRM_SYSTEM_PROMPT,
                     format!(
@@ -568,7 +568,18 @@ impl HippocampusConsolidator {
                         candidate.content,
                     ),
                 )
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(error) => {
+                    tracing::warn!(
+                        section = %candidate.section,
+                        %error,
+                        "LLM confirmation failed for stale section; skipping candidate"
+                    );
+                    continue;
+                }
+            };
 
             let decision = response.text.trim().to_ascii_uppercase();
             if !(decision.contains("STALE") || decision.contains("YES")) {
@@ -3439,10 +3450,9 @@ Working on Clawhive memory safety.
         assert_eq!(report.orphans_detected, 1);
         assert_eq!(report.orphans_cleaned, 1);
         assert!(report.health_report_generated);
-        assert!(report
-            .errors
-            .iter()
-            .any(|error| error.contains("stale_prune:")));
+        // After the per-candidate error handling fix, LLM failures in
+        // prune_stale_sections are caught per-candidate (warn + continue)
+        // instead of propagating. The pipeline completes cleanly.
         Ok(())
     }
 
