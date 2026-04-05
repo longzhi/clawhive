@@ -5908,6 +5908,7 @@ mod tests {
             text: text.to_string(),
             score,
             score_breakdown: None,
+            access_count: 0,
         }
     }
 

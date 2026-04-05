@@ -126,6 +126,7 @@ pub struct SearchResult {
     pub text: String,
     pub score: f64,
     pub score_breakdown: Option<ScoreBreakdown>,
+    pub access_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1065,6 +1066,22 @@ impl SearchIndex {
         Ok(current.as_deref() != Some(provider.model_id()))
     }
 
+    pub async fn bump_access(&self, chunk_id: &str) -> Result<()> {
+        let db = Arc::clone(&self.db);
+        let chunk_id = chunk_id.to_owned();
+        let now = chrono::Utc::now().to_rfc3339();
+        task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| anyhow!("lock failed"))?;
+            conn.execute(
+                "UPDATE chunks SET access_count = access_count + 1, last_accessed = ?1 WHERE id = ?2",
+                rusqlite::params![now, chunk_id],
+            )?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
     pub async fn search(
         &self,
         query: &str,
@@ -1379,6 +1396,7 @@ impl SearchIndex {
                         item.bm25_score
                     },
                 }),
+                access_count: 0,
             })
             .filter(|item| item.score >= min_score)
             .collect::<Vec<SearchResult>>();
@@ -1437,6 +1455,7 @@ impl SearchIndex {
                     for result in &mut results {
                         let (count, last_accessed) =
                             counts.get(&result.chunk_id).cloned().unwrap_or((0, None));
+                        result.access_count = count;
                         if count > 0 {
                             let access_boost = 1.0
                                 + (1.0 + count as f64).ln()

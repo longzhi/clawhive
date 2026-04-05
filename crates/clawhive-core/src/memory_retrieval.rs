@@ -689,6 +689,7 @@ mod tests {
             text: "demo".to_string(),
             score,
             score_breakdown: None,
+            access_count: 0,
         }
     }
 
@@ -946,6 +947,7 @@ mod tests {
             text: "User prefers Chinese replies for all future answers".to_string(),
             score: 0.9,
             score_breakdown: None,
+            access_count: 0,
         };
 
         let hits = dedup_memory_hits(vec![
@@ -970,6 +972,7 @@ mod tests {
                 text: "ActionBook 采用 CDP 抽取文章结构".to_string(),
                 score: 1.1,
                 score_breakdown: None,
+                access_count: 0,
             })),
             MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-daily".to_string(),
@@ -981,6 +984,7 @@ mod tests {
                 text: "今天讨论了 ActionBook 的 CDP 文章抽取方案".to_string(),
                 score: 0.95,
                 score_breakdown: None,
+                access_count: 0,
             })),
         ];
         let chunk_canonical_ids = HashMap::from([
@@ -1010,6 +1014,7 @@ mod tests {
                 text: "Use incremental patch consolidation for memory".to_string(),
                 score: 1.2,
                 score_breakdown: None,
+                access_count: 0,
             })),
             MemoryHit::Chunk(Box::new(SearchResult {
                 chunk_id: "chunk-new".to_string(),
@@ -1021,6 +1026,7 @@ mod tests {
                 text: "Use section-based consolidation for memory".to_string(),
                 score: 0.9,
                 score_breakdown: None,
+                access_count: 0,
             })),
         ];
         let chunk_canonical_ids = HashMap::from([
@@ -1077,6 +1083,7 @@ mod tests {
                 text: "The project uses section-based consolidation for memory".to_string(),
                 score: 1.05,
                 score_breakdown: None,
+                access_count: 0,
             })),
         ];
         let fact_canonical_ids = HashMap::from([(

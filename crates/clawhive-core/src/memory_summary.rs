@@ -55,8 +55,8 @@ Return a JSON array only. Each item must contain:
 - "importance": 0.0 to 1.0
 - "fact_type": optional for "fact" items; one of "preference", "decision", "event", "person", "rule", "procedure"
 - "duplicate_key": optional short key for deduplication
-- "affect": optional affect tag for emotional weight; one of "neutral", "frustrated", "excited", "uncertain", "urgent", "satisfied"
-- "affect_intensity": optional 0.0 to 1.0, stronger affect means stronger salience
+- "affect": affect tag for emotional weight; one of "neutral", "frustrated", "excited", "uncertain", "urgent", "satisfied". Default to "neutral" when no strong emotion is present
+- "affect_intensity": 0.0 to 1.0 emotional strength. Use 0.0 for neutral statements, 0.3-0.5 for mild emotion, 0.6-0.8 for strong, 0.9-1.0 for extreme
 
 Rules:
 - Prefer under-selection over over-selection

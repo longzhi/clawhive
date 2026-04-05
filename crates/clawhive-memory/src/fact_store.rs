@@ -274,6 +274,30 @@ impl FactStore {
         .await?
     }
 
+    pub async fn find_by_id(&self, fact_id: &str) -> Result<Option<Fact>> {
+        let id = fact_id.to_owned();
+        let db = Arc::clone(&self.db);
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let result = conn.query_row(
+                "SELECT id, agent_id, content, fact_type, importance, confidence, COALESCE(salience, 50), status, \
+                 occurred_at, recorded_at, source_type, source_session, access_count, \
+                 last_accessed, superseded_by, supersede_reason, COALESCE(affect, 'neutral'), COALESCE(affect_intensity, 0.0), created_at, updated_at \
+                 FROM facts WHERE id = ?1",
+                params![id],
+                row_to_fact,
+            );
+            match result {
+                Ok(fact) => Ok(Some(fact)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await?
+    }
+
     pub async fn find_by_content(&self, agent_id: &str, content: &str) -> Result<Option<Fact>> {
         let id = generate_fact_id(agent_id, content);
         let db = Arc::clone(&self.db);

@@ -370,6 +370,15 @@ impl ToolExecutor for MemoryWriteTool {
                     "occurred_at": {
                         "type": "string",
                         "description": "When this fact occurred (ISO 8601). Defaults to now"
+                    },
+                    "affect": {
+                        "type": "string",
+                        "enum": ["neutral", "frustrated", "excited", "uncertain", "urgent", "satisfied"],
+                        "description": "Emotional tone of this fact. Defaults to neutral"
+                    },
+                    "affect_intensity": {
+                        "type": "number",
+                        "description": "Emotional strength 0.0-1.0. Use 0.0 for neutral, 0.3-0.5 mild, 0.6-0.8 strong, 0.9-1.0 extreme"
                     }
                 },
                 "required": ["content", "fact_type"]
@@ -390,6 +399,11 @@ impl ToolExecutor for MemoryWriteTool {
             .and_then(|value| u8::try_from(value).ok())
             .unwrap_or_else(|| fact_store::default_salience_for_type(fact_type));
         let occurred_at = input["occurred_at"].as_str().map(String::from);
+        let affect = input["affect"].as_str().unwrap_or("neutral").to_owned();
+        let affect_intensity = input["affect_intensity"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
         let has_correction_phrase = super::orchestrator::contains_correction_phrase(content);
 
         let active_facts = self.fact_store.get_active_facts(&self.agent_id).await?;
@@ -445,8 +459,8 @@ impl ToolExecutor for MemoryWriteTool {
                     superseded_by: None,
                     salience,
                     supersede_reason: None,
-                    affect: "neutral".to_owned(),
-                    affect_intensity: 0.0,
+                    affect: affect.clone(),
+                    affect_intensity,
                     created_at: now.clone(),
                     updated_at: now,
                 };
@@ -511,8 +525,8 @@ impl ToolExecutor for MemoryWriteTool {
             superseded_by: None,
             salience,
             supersede_reason: None,
-            affect: "neutral".to_owned(),
-            affect_intensity: 0.0,
+            affect,
+            affect_intensity,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -869,6 +883,7 @@ mod tests {
             text: "very long full chunk text that should not be printed directly".to_string(),
             score: 0.9,
             score_breakdown: None,
+            access_count: 0,
         };
 
         let rendered = format_memory_hit(&MemoryHit::Chunk(Box::new(chunk)));
