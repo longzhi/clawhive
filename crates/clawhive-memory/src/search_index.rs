@@ -21,6 +21,8 @@ struct SessionIndexUnit {
     change_hash: String,
     turn_start: usize,
     turn_end: usize,
+    /// The actual conversation timestamp (from session entry), not the indexing time.
+    timestamp: Option<String>,
 }
 
 #[derive(Clone)]
@@ -261,6 +263,19 @@ impl SearchIndex {
         change_hash: &str,
         provider: &dyn EmbeddingProvider,
     ) -> Result<usize> {
+        self.index_content_with_timestamp(path, content, source, change_hash, provider, None)
+            .await
+    }
+
+    async fn index_content_with_timestamp(
+        &self,
+        path: &str,
+        content: &str,
+        source: &str,
+        change_hash: &str,
+        provider: &dyn EmbeddingProvider,
+        created_at_override: Option<&str>,
+    ) -> Result<usize> {
         self.ensure_vec_table(provider.dimensions())?;
 
         let db = Arc::clone(&self.db);
@@ -454,7 +469,9 @@ impl SearchIndex {
         }
 
         let now_ts = chrono::Utc::now().timestamp();
-        let now_rfc = chrono::Utc::now().to_rfc3339();
+        let now_rfc = created_at_override
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
         let size = content.len() as i64;
         let mut rows = Vec::with_capacity(text_chunks.len());
         for (idx, chunk) in text_chunks.iter().enumerate() {
@@ -721,12 +738,13 @@ impl SearchIndex {
 
         for unit in &units {
             total += self
-                .index_content(
+                .index_content_with_timestamp(
                     &unit.path,
                     &unit.content,
                     "session",
                     &unit.change_hash,
                     provider,
+                    unit.timestamp.as_deref(),
                 )
                 .await?;
         }
@@ -1102,8 +1120,10 @@ impl SearchIndex {
         let candidate_limit = (target_results.saturating_mul(4)).max(1);
         let use_vectors = provider.is_semantic();
 
-        let mut vector_candidates: Vec<(String, String, String, i64, i64, String, f64)> =
-            Vec::new();
+        // (chunk_id, path, source, start_line, end_line, text, score, created_at)
+        type SearchCandidate = (String, String, String, i64, i64, String, f64, String);
+
+        let mut vector_candidates: Vec<SearchCandidate> = Vec::new();
 
         if use_vectors {
             let embedded = provider.embed(&[query.to_owned()]).await?;
@@ -1137,7 +1157,7 @@ impl SearchIndex {
                 let over_fetch_limit = candidate_limit * 4;
                 let mut stmt = conn.prepare(
                     r#"
-                    SELECT v.chunk_id, c.path, c.source, c.start_line, c.end_line, c.text, v.distance
+                    SELECT v.chunk_id, c.path, c.source, c.start_line, c.end_line, c.text, v.distance, COALESCE(c.created_at, '') AS created_at
                     FROM chunks_vec v
                     JOIN chunks c ON c.id = v.chunk_id
                     WHERE v.embedding MATCH ?1 AND k = ?2
@@ -1152,6 +1172,7 @@ impl SearchIndex {
                         r.get::<_, i64>(4)?,
                         r.get::<_, String>(5)?,
                         r.get::<_, f64>(6)?,
+                        r.get::<_, String>(7)?,
                     ))
                 })?;
 
@@ -1181,21 +1202,21 @@ impl SearchIndex {
                 };
 
                 let mut out = Vec::new();
-                for (chunk_id, path, source, start_line, end_line, text, distance) in vec_results {
+                for (chunk_id, path, source, start_line, end_line, text, distance, created_at) in vec_results {
                     if owned_agent_ids.get(&chunk_id) == Some(&agent_id) {
                         let score = (1.0_f64 - distance).max(0.0_f64);
-                        out.push((chunk_id, path, source, start_line, end_line, text, score));
+                        out.push((chunk_id, path, source, start_line, end_line, text, score, created_at));
                     }
                 }
                 out.sort_by(|a, b| b.6.total_cmp(&a.6));
                 out.truncate(candidate_limit);
-                return Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(
+                return Ok::<Vec<(String, String, String, i64, i64, String, f64, String)>, anyhow::Error>(
                     out,
                 );
             }
 
             let mut stmt = conn.prepare(
-                "SELECT id, path, source, start_line, end_line, text, embedding FROM chunks WHERE agent_id = ?1",
+                "SELECT id, path, source, start_line, end_line, text, embedding, COALESCE(created_at, '') FROM chunks WHERE agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![agent_id], |r| {
                 Ok((
@@ -1206,22 +1227,23 @@ impl SearchIndex {
                     r.get::<_, i64>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
                 ))
             })?;
 
             let mut out = Vec::new();
             for row in rows {
-                let (chunk_id, path, source, start_line, end_line, text, embedding_json) = row?;
+                let (chunk_id, path, source, start_line, end_line, text, embedding_json, created_at) = row?;
                 if embedding_json.trim().is_empty() {
                     continue;
                 }
                 let embedding = json_to_embedding(&embedding_json)?;
                 let score = cosine_similarity(&query_embedding, &embedding) as f64;
-                out.push((chunk_id, path, source, start_line, end_line, text, score));
+                out.push((chunk_id, path, source, start_line, end_line, text, score, created_at));
             }
             out.sort_by(|a, b| b.6.total_cmp(&a.6));
             out.truncate(candidate_limit);
-            Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
+            Ok::<Vec<(String, String, String, i64, i64, String, f64, String)>, anyhow::Error>(out)
         })
         .await??;
 
@@ -1253,7 +1275,7 @@ impl SearchIndex {
                     .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
                 let mut stmt = conn.prepare(
                     r#"
-                    SELECT f.id, c.path, c.source, c.start_line, c.end_line, c.text, bm25(chunks_fts) AS rank
+                    SELECT f.id, c.path, c.source, c.start_line, c.end_line, c.text, bm25(chunks_fts) AS rank, COALESCE(c.created_at, '') AS created_at
                     FROM chunks_fts f
                     JOIN chunks c ON c.id = f.id
                     WHERE chunks_fts MATCH ?1 AND c.agent_id = ?2
@@ -1272,19 +1294,20 @@ impl SearchIndex {
                             r.get::<_, i64>(4)?,
                             r.get::<_, String>(5)?,
                             r.get::<_, f64>(6)?,
+                            r.get::<_, String>(7)?,
                         ))
                     },
                 )?;
 
                 let mut out = Vec::new();
                 for row in rows {
-                    let (chunk_id, path, source, start_line, end_line, text, rank) = row?;
+                    let (chunk_id, path, source, start_line, end_line, text, rank, created_at) = row?;
                     let bm25_score = 1.0_f64 / (1.0_f64 + (-rank).max(0.0_f64));
                     out.push((
-                        chunk_id, path, source, start_line, end_line, text, bm25_score,
+                        chunk_id, path, source, start_line, end_line, text, bm25_score, created_at,
                     ));
                 }
-                Ok::<Vec<(String, String, String, i64, i64, String, f64)>, anyhow::Error>(out)
+                Ok::<Vec<(String, String, String, i64, i64, String, f64, String)>, anyhow::Error>(out)
             })
             .await?
             {
@@ -1316,10 +1339,12 @@ impl SearchIndex {
             text: String,
             vector_score: f64,
             bm25_score: f64,
+            created_at: String,
         }
 
         let mut merged = std::collections::HashMap::<String, MergeItem>::new();
-        for (chunk_id, path, source, start_line, end_line, text, vector_score) in vector_candidates
+        for (chunk_id, path, source, start_line, end_line, text, vector_score, created_at) in
+            vector_candidates
         {
             merged.insert(
                 chunk_id.clone(),
@@ -1332,10 +1357,13 @@ impl SearchIndex {
                     text,
                     vector_score,
                     bm25_score: 0.0,
+                    created_at,
                 },
             );
         }
-        for (chunk_id, path, source, start_line, end_line, text, bm25_score) in bm25_candidates {
+        for (chunk_id, path, source, start_line, end_line, text, bm25_score, created_at) in
+            bm25_candidates
+        {
             if let Some(item) = merged.get_mut(&chunk_id) {
                 item.bm25_score = bm25_score;
             } else {
@@ -1350,6 +1378,7 @@ impl SearchIndex {
                         text,
                         vector_score: 0.0,
                         bm25_score,
+                        created_at,
                     },
                 );
             }
@@ -1357,7 +1386,9 @@ impl SearchIndex {
 
         let mut results = merged
             .into_values()
-            .filter(|item| path_matches_time_range(&item.path, time_range.as_ref()))
+            .filter(|item| {
+                path_matches_time_range(&item.path, time_range.as_ref(), &item.created_at)
+            })
             .map(|item| SearchResult {
                 chunk_id: item.chunk_id,
                 path: item.path,
@@ -1571,12 +1602,22 @@ fn build_session_index_units(
             content.len(),
             last_timestamp_millis
         );
+        let timestamp = if last_timestamp_millis > 0 {
+            Some(
+                chrono::DateTime::from_timestamp_millis(last_timestamp_millis)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
         units.push(SessionIndexUnit {
             path: format!("sessions/{session_id}#turn:{turn_index}"),
             content,
             change_hash,
             turn_start: turn_index,
             turn_end: turn_index,
+            timestamp,
         });
         current_lines.clear();
     };
@@ -1637,6 +1678,7 @@ fn merge_session_turn_units(
     let mut merged = Vec::new();
     let mut current = turns[0].clone();
     let mut current_tokens = session_topic_tokens(&current.content);
+    // Note: when merging turns, we keep the timestamp of the first turn in the group
 
     for next in turns.into_iter().skip(1) {
         let next_tokens = session_topic_tokens(&next.content);
@@ -1708,7 +1750,7 @@ fn extract_date_from_path(path: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(re_pattern, "%Y-%m-%d").ok()
 }
 
-fn path_matches_time_range(path: &str, time_range: Option<&TimeRange>) -> bool {
+fn path_matches_time_range(path: &str, time_range: Option<&TimeRange>, created_at: &str) -> bool {
     let Some(range) = time_range else {
         return true;
     };
@@ -1722,6 +1764,20 @@ fn path_matches_time_range(path: &str, time_range: Option<&TimeRange>) -> bool {
             return true;
         };
         return date_in_time_range(date, range);
+    }
+
+    // For session chunks and other non-daily paths, filter by created_at timestamp
+    if !created_at.is_empty() {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(created_at) {
+            return date_in_time_range(dt.date_naive(), range);
+        }
+        // Also try parsing without timezone (e.g. "2026-04-04T12:00:00Z" variants)
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%dT%H:%M:%SZ") {
+            return date_in_time_range(dt.date(), range);
+        }
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%dT%H:%M:%S") {
+            return date_in_time_range(dt.date(), range);
+        }
     }
 
     true
