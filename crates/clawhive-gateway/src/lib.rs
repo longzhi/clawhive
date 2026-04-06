@@ -2080,6 +2080,47 @@ mod tests {
         assert!(out.text.contains("No active task"));
     }
 
+    #[tokio::test]
+    async fn turn_lifecycle_second_stop_after_same_session_completion_is_noop() {
+        let (gw, _tmp) = make_gateway().await;
+        let inbound = make_test_inbound("/stop");
+        let session_key = SessionKey::from_inbound(&inbound);
+        let token = gw.register_active_turn(&session_key.0).await;
+
+        let first_stop = gw
+            .handle_inbound(inbound)
+            .await
+            .unwrap()
+            .expect("expected first stop response");
+        assert!(first_stop.text.contains("Task stopped"));
+        assert!(token.is_cancelled());
+
+        gw.unregister_active_turn(&session_key.0).await;
+
+        let second_stop = gw
+            .handle_inbound(make_test_inbound("/stop"))
+            .await
+            .unwrap()
+            .expect("expected second stop response");
+        assert!(second_stop.text.contains("No active task"));
+        assert!(gw.active_turns.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_lifecycle_cleans_up_active_turn_after_normal_completion() {
+        let (gw, _tmp) = make_gateway().await;
+        add_catch_all_binding(&gw);
+
+        let outbound = gw
+            .handle_inbound(make_test_inbound("normal completion"))
+            .await
+            .unwrap()
+            .expect("expected routed response");
+
+        assert!(outbound.text.contains("stub:anthropic:claude-sonnet-4-5"));
+        assert!(gw.active_turns.lock().await.is_empty());
+    }
+
     #[test]
     fn rate_limit_config_default_values() {
         let config = RateLimitConfig::default();
