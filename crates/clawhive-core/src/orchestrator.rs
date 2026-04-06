@@ -1679,6 +1679,19 @@ impl Orchestrator {
                         attachments: vec![],
                     });
                 }
+                super::slash_commands::SlashCommand::Stop => {
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: "Use /stop from the chat channel to cancel the active task."
+                            .to_string(),
+                        at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
+                    });
+                }
                 super::slash_commands::SlashCommand::SkillAnalyze { source } => {
                     return self
                         .handle_skill_analyze_or_install_command(inbound, source, false)

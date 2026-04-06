@@ -6,6 +6,7 @@ use clawhive_bus::{BusPublisher, EventBus, Topic};
 use clawhive_core::{ApprovalRegistry, Orchestrator, RoutingConfig};
 use clawhive_schema::*;
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub mod reload;
@@ -87,6 +88,7 @@ pub struct Gateway {
     bus: BusPublisher,
     rate_limiter: RateLimiter,
     approval_registry: Option<Arc<ApprovalRegistry>>,
+    active_turns: Arc<TokioMutex<StdHashMap<String, CancellationToken>>>,
     /// Tracks the last active channel per agent for heartbeat delivery.
     last_active_channels: Arc<TokioMutex<StdHashMap<String, ChannelTarget>>>,
 }
@@ -111,8 +113,21 @@ impl Gateway {
             bus,
             rate_limiter,
             approval_registry,
+            active_turns: Arc::new(TokioMutex::new(StdHashMap::new())),
             last_active_channels: Arc::new(TokioMutex::new(StdHashMap::new())),
         }
+    }
+
+    pub async fn register_active_turn(&self, session_key: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        let mut active_turns = self.active_turns.lock().await;
+        active_turns.insert(session_key.to_string(), token.clone());
+        token
+    }
+
+    pub async fn unregister_active_turn(&self, session_key: &str) {
+        let mut active_turns = self.active_turns.lock().await;
+        active_turns.remove(session_key);
     }
 
     async fn try_handle_approve(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
@@ -177,6 +192,37 @@ impl Gateway {
             Ok(()) => Some(make_reply(format!("✅ Approval resolved: {decision:?}"))),
             Err(e) => Some(make_reply(format!("❌ {e}"))),
         }
+    }
+
+    async fn try_handle_stop(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
+        if !inbound.text.trim().eq_ignore_ascii_case("/stop") {
+            return None;
+        }
+
+        let make_reply = |text: &str| OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type.clone(),
+            connector_id: inbound.connector_id.clone(),
+            conversation_scope: inbound.conversation_scope.clone(),
+            text: text.to_string(),
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        };
+
+        let session_key = SessionKey::from_inbound(inbound);
+        let token = {
+            let active_turns = self.active_turns.lock().await;
+            active_turns.get(&session_key.0).cloned()
+        };
+
+        Some(match token {
+            Some(token) => {
+                token.cancel();
+                make_reply("⏹️ Task stopped.")
+            }
+            None => make_reply("No active task to stop."),
+        })
     }
 
     pub fn resolve_agent(&self, inbound: &InboundMessage) -> Option<String> {
@@ -282,6 +328,10 @@ impl Gateway {
     pub async fn handle_inbound(&self, inbound: InboundMessage) -> Result<Option<OutboundMessage>> {
         if let Some(approval_response) = self.try_handle_approve(&inbound).await {
             return Ok(Some(approval_response));
+        }
+
+        if let Some(stop_response) = self.try_handle_stop(&inbound).await {
+            return Ok(Some(stop_response));
         }
 
         if !self.rate_limiter.check(&inbound.user_scope).await {
@@ -1127,6 +1177,7 @@ mod tests {
     use clawhive_runtime::NativeExecutor;
     use clawhive_scheduler::ScheduleManager;
     use clawhive_schema::{ApprovalDecision, BusMessage, InboundMessage};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -1167,6 +1218,24 @@ mod tests {
             None,
             Some(routing),
         ));
+    }
+
+    fn make_test_inbound(text: &str) -> InboundMessage {
+        InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:stop".into(),
+            user_scope: "user:stop".into(),
+            text: text.into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+            message_id: None,
+            attachments: vec![],
+            message_source: None,
+        }
     }
 
     async fn make_gateway() -> (Gateway, tempfile::TempDir) {
@@ -1831,6 +1900,83 @@ mod tests {
             .unwrap()
             .expect("expected routing match");
         assert!(out.text.contains("Usage: /approve"));
+    }
+
+    #[tokio::test]
+    async fn stop_command_cancels_active_turn() {
+        let (gw, _tmp) = make_gateway().await;
+        let inbound = make_test_inbound("/stop");
+        let session_key = SessionKey::from_inbound(&inbound);
+        let token = gw.register_active_turn(&session_key.0).await;
+
+        let out = gw
+            .handle_inbound(inbound)
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(token.is_cancelled());
+        assert!(out.text.contains("Task stopped"));
+    }
+
+    #[tokio::test]
+    async fn stop_command_without_active_turn_returns_hint() {
+        let (gw, _tmp) = make_gateway().await;
+
+        let out = gw
+            .handle_inbound(make_test_inbound("/stop"))
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(out.text.contains("No active task"));
+    }
+
+    #[tokio::test]
+    async fn stop_command_is_case_insensitive() {
+        let (gw, _tmp) = make_gateway().await;
+        let uppercase = make_test_inbound("/STOP");
+        let uppercase_session = SessionKey::from_inbound(&uppercase);
+        let uppercase_token = gw.register_active_turn(&uppercase_session.0).await;
+
+        let uppercase_out = gw
+            .handle_inbound(uppercase)
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(uppercase_token.is_cancelled());
+        assert!(uppercase_out.text.contains("Task stopped"));
+
+        let mixed = make_test_inbound(" /Stop ");
+        let mixed_session = SessionKey::from_inbound(&mixed);
+        let mixed_token = gw.register_active_turn(&mixed_session.0).await;
+
+        let mixed_out = gw
+            .handle_inbound(mixed)
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(mixed_token.is_cancelled());
+        assert!(mixed_out.text.contains("Task stopped"));
+    }
+
+    #[tokio::test]
+    async fn unregister_active_turn_removes_registered_token() {
+        let (gw, _tmp) = make_gateway().await;
+        let session_key = SessionKey::from_inbound(&make_test_inbound("ping"));
+        let _token: CancellationToken = gw.register_active_turn(&session_key.0).await;
+
+        gw.unregister_active_turn(&session_key.0).await;
+
+        let out = gw
+            .handle_inbound(make_test_inbound("/stop"))
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(out.text.contains("No active task"));
     }
 
     #[test]
