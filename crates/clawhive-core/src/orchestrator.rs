@@ -2662,6 +2662,26 @@ impl Orchestrator {
                     .await;
             }
 
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    "tool_use_loop: cancellation detected after compaction"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
+            }
+
             let req = LlmRequest {
                 model: primary.into(),
                 system: system.clone(),
@@ -2974,7 +2994,26 @@ impl Orchestrator {
             };
             let ctx = ctx.with_scheduled_task(is_scheduled_task);
 
-            // Execute tools in parallel
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    "tool_use_loop: cancellation detected before tool execution"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
+            }
+
             let tool_futures: Vec<_> = tool_uses
                 .into_iter()
                 .map(|(id, name, input)| {
@@ -3084,11 +3123,33 @@ impl Orchestrator {
                 );
             }
 
+            successful_tool_calls_total += successful_tool_calls;
+
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    successful_tool_calls = successful_tool_calls_total,
+                    "tool_use_loop: cancellation detected after tool execution"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
+            }
+
             messages.push(LlmMessage {
                 role: "user".into(),
                 content: tool_results,
             });
-            successful_tool_calls_total += successful_tool_calls;
 
             let _ = successful_tool_calls;
 
