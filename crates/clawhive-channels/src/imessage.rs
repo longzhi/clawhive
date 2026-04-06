@@ -139,21 +139,25 @@ impl IMessageBot {
                         tracing::debug!("iMessage from {}: {}", sender, text);
 
                         let inbound = adapter.to_inbound(&sender, &text);
+                        let progress_delay =
+                            gateway.resolve_turn_lifecycle(&inbound).progress_delay_secs;
                         let gateway = gateway.clone();
                         let progress_sender = sender.clone();
                         tokio::spawn(async move {
                             let turn_complete = Arc::new(tokio::sync::Notify::new());
                             let progress_complete = turn_complete.clone();
-                            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                                        if let Err(e) = send_imessage(&progress_sender, PROGRESS_MESSAGE) {
-                                            tracing::warn!("Failed to send iMessage progress message: {e}");
+                            let _progress_guard = (progress_delay > 0).then(|| {
+                                AbortOnDrop(tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_secs(progress_delay)) => {
+                                            if let Err(e) = send_imessage(&progress_sender, PROGRESS_MESSAGE) {
+                                                tracing::warn!("Failed to send iMessage progress message: {e}");
+                                            }
                                         }
+                                        _ = progress_complete.notified() => {}
                                     }
-                                    _ = progress_complete.notified() => {}
-                                }
-                            }));
+                                }))
+                            });
 
                             let result = gateway.handle_inbound(inbound).await;
                             turn_complete.notify_waiters();

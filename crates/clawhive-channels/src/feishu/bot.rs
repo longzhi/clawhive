@@ -16,7 +16,7 @@ use super::codec::*;
 use super::listeners;
 use super::message::*;
 use super::types::*;
-use crate::common::AbortOnDrop;
+use crate::common::{infer_mime_from_filename, AbortOnDrop};
 
 const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
@@ -355,6 +355,10 @@ impl FeishuBot {
 
         let attachments = Self::download_inbound_attachments(event, client).await;
         let inbound = adapter.to_inbound(event, attachments);
+        let progress_delay = self
+            .gateway
+            .resolve_turn_lifecycle(&inbound)
+            .progress_delay_secs;
         let gw = self.gateway.clone();
         let client = client.clone();
 
@@ -365,17 +369,19 @@ impl FeishuBot {
             let progress_complete = turn_complete.clone();
             let progress_client = client.clone();
             let progress_message_id = message_id.clone();
-            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-                        let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
-                        if let Err(e) = progress_client.reply_message(&progress_message_id, "text", &content).await {
-                            tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu progress message");
+            let _progress_guard = (progress_delay > 0).then(|| {
+                AbortOnDrop(tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                            let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
+                            if let Err(e) = progress_client.reply_message(&progress_message_id, "text", &content).await {
+                                tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu progress message");
+                            }
                         }
+                        _ = progress_complete.notified() => {}
                     }
-                    _ = progress_complete.notified() => {}
-                }
-            }));
+                }))
+            });
 
             let result = gw.handle_inbound(inbound).await;
             turn_complete.notify_waiters();
@@ -517,16 +523,8 @@ impl FeishuBot {
                         .download_resource(&msg.message_id, &file.file_key, "file")
                         .await
                     {
-                        Ok(bytes) => {
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                            attachments.push(Attachment {
-                                kind: AttachmentKind::Document,
-                                url: b64,
-                                mime_type: None,
-                                file_name: file.file_name,
-                                size: Some(bytes.len() as u64),
-                            });
-                        }
+                        Ok(bytes) => attachments
+                            .push(Self::build_inbound_file_attachment(bytes, file.file_name)),
                         Err(e) => {
                             tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to download inbound file")
                         }
@@ -537,6 +535,18 @@ impl FeishuBot {
         }
 
         attachments
+    }
+
+    fn build_inbound_file_attachment(bytes: Vec<u8>, file_name: Option<String>) -> Attachment {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let mime_type = infer_mime_from_filename(file_name.as_deref());
+        Attachment {
+            kind: AttachmentKind::Document,
+            url: b64,
+            mime_type,
+            file_name,
+            size: Some(bytes.len() as u64),
+        }
     }
 
     async fn download_image(
@@ -640,6 +650,10 @@ impl FeishuBot {
             message_source: None,
         };
 
+        let progress_delay = self
+            .gateway
+            .resolve_turn_lifecycle(&inbound)
+            .progress_delay_secs;
         let gw = self.gateway.clone();
         let client = client.clone();
         tokio::spawn(async move {
@@ -647,17 +661,19 @@ impl FeishuBot {
             let progress_complete = turn_complete.clone();
             let progress_client = client.clone();
             let progress_msg_id = msg_id.clone();
-            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-                        let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
-                        if let Err(e) = progress_client.reply_message(&progress_msg_id, "text", &content).await {
-                            tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu approval progress message");
+            let _progress_guard = (progress_delay > 0).then(|| {
+                AbortOnDrop(tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                            let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
+                            if let Err(e) = progress_client.reply_message(&progress_msg_id, "text", &content).await {
+                                tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu approval progress message");
+                            }
                         }
+                        _ = progress_complete.notified() => {}
                     }
-                    _ = progress_complete.notified() => {}
-                }
-            }));
+                }))
+            });
 
             let result = gw.handle_inbound(inbound).await;
             turn_complete.notify_waiters();
@@ -736,6 +752,10 @@ impl FeishuBot {
             message_source: None,
         };
 
+        let progress_delay = self
+            .gateway
+            .resolve_turn_lifecycle(&inbound)
+            .progress_delay_secs;
         let gw = self.gateway.clone();
         let client = client.clone();
         tokio::spawn(async move {
@@ -743,17 +763,19 @@ impl FeishuBot {
             let progress_complete = turn_complete.clone();
             let progress_client = client.clone();
             let progress_msg_id = msg_id.clone();
-            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-                        let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
-                        if let Err(e) = progress_client.reply_message(&progress_msg_id, "text", &content).await {
-                            tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu skill progress message");
+            let _progress_guard = (progress_delay > 0).then(|| {
+                AbortOnDrop(tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                            let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
+                            if let Err(e) = progress_client.reply_message(&progress_msg_id, "text", &content).await {
+                                tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu skill progress message");
+                            }
                         }
+                        _ = progress_complete.notified() => {}
                     }
-                    _ = progress_complete.notified() => {}
-                }
-            }));
+                }))
+            });
 
             let result = gw.handle_inbound(inbound).await;
             turn_complete.notify_waiters();
@@ -944,6 +966,19 @@ mod tests {
         event.event.message.chat_type = "p2p".to_string();
         let inbound = adapter.to_inbound(&event, vec![]);
         assert_eq!(inbound.conversation_scope, "dm:oc_chat1");
+    }
+
+    #[test]
+    fn inbound_file_attachment_infers_pdf_mime_from_file_name() {
+        let attachment = FeishuBot::build_inbound_file_attachment(
+            b"pdf".to_vec(),
+            Some("lease.PDF".to_string()),
+        );
+
+        assert_eq!(attachment.kind, AttachmentKind::Document);
+        assert_eq!(attachment.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(attachment.file_name.as_deref(), Some("lease.PDF"));
+        assert_eq!(attachment.size, Some(3));
     }
 
     fn make_test_event(chat_id: &str, user_id: &str, msg_id: &str, text: &str) -> FeishuEvent {

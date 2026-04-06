@@ -15,6 +15,7 @@ pub mod reload;
 pub mod supervisor;
 pub mod webhook;
 
+pub use clawhive_core::TurnLifecycleConfig;
 pub use reload::*;
 
 #[derive(Debug, Clone)]
@@ -176,10 +177,21 @@ fn spawn_turn_timeout(cancel_token: CancellationToken, turn_timeout_secs: u64) -
     })
 }
 
-fn agent_turn_timeout_secs(view: &clawhive_core::ConfigView, agent_id: &str) -> Result<u64> {
+fn agent_turn_lifecycle(
+    view: &clawhive_core::ConfigView,
+    agent_id: &str,
+) -> Result<TurnLifecycleConfig> {
     view.agent(agent_id)
-        .map(|agent| agent.turn_lifecycle().turn_timeout_secs)
+        .map(|agent| agent.turn_lifecycle())
         .ok_or_else(|| anyhow!("agent not found: {agent_id}"))
+}
+
+fn fallback_turn_lifecycle() -> TurnLifecycleConfig {
+    TurnLifecycleConfig {
+        turn_timeout_secs: 1800,
+        typing_ttl_secs: 120,
+        progress_delay_secs: 60,
+    }
 }
 
 impl Gateway {
@@ -325,6 +337,13 @@ impl Gateway {
         Self::resolve_agent_from_routing(&view.routing, inbound)
     }
 
+    pub fn resolve_turn_lifecycle(&self, inbound: &InboundMessage) -> TurnLifecycleConfig {
+        let view = self.orchestrator.config_view();
+        Self::resolve_agent_from_routing(&view.routing, inbound)
+            .and_then(|agent_id| view.agent(&agent_id).map(|agent| agent.turn_lifecycle()))
+            .unwrap_or_else(fallback_turn_lifecycle)
+    }
+
     fn resolve_agent_from_routing(
         routing: &RoutingConfig,
         inbound: &InboundMessage,
@@ -364,7 +383,7 @@ impl Gateway {
     ) -> Result<OutboundMessage> {
         let view = self.orchestrator.config_view();
         let session_key = SessionKey::from_inbound(&inbound).0;
-        let turn_timeout_secs = agent_turn_timeout_secs(view.as_ref(), agent_id)?;
+        let turn_timeout_secs = agent_turn_lifecycle(view.as_ref(), agent_id)?.turn_timeout_secs;
         let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
         let guard = ActiveTurnGuard::new(
             Arc::clone(&self.active_turns),
@@ -458,7 +477,7 @@ impl Gateway {
         };
 
         let session_key = SessionKey::from_inbound(&inbound).0;
-        let turn_timeout_secs = agent_turn_timeout_secs(view.as_ref(), &agent_id)?;
+        let turn_timeout_secs = agent_turn_lifecycle(view.as_ref(), &agent_id)?.turn_timeout_secs;
         let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
         let guard = ActiveTurnGuard::new(
             Arc::clone(&self.active_turns),
@@ -1349,6 +1368,21 @@ mod tests {
         ));
     }
 
+    fn apply_test_agents(gateway: &Gateway, mutate: impl FnOnce(&mut Vec<FullAgentConfig>)) {
+        let current = gateway.orchestrator().config_view();
+        let mut agents = current
+            .agents
+            .values()
+            .map(|agent| agent.as_ref().clone())
+            .collect::<Vec<_>>();
+        mutate(&mut agents);
+        gateway.orchestrator().apply_config_view(clone_test_view(
+            current.as_ref(),
+            Some(agents),
+            None,
+        ));
+    }
+
     fn make_test_inbound(text: &str) -> InboundMessage {
         InboundMessage {
             trace_id: uuid::Uuid::new_v4(),
@@ -1666,6 +1700,38 @@ mod tests {
         };
 
         assert_eq!(gw.resolve_agent(&inbound), Some("clawhive-builder".into()));
+    }
+
+    #[tokio::test]
+    async fn resolve_turn_lifecycle_returns_resolved_agent_lifecycle() {
+        let (gw, _tmp) = make_gateway().await;
+        add_catch_all_binding(&gw);
+        apply_test_agents(&gw, |agents| {
+            let agent = agents
+                .iter_mut()
+                .find(|agent| agent.agent_id == "clawhive-main")
+                .expect("test agent should exist");
+            agent.turn_timeout_secs = Some(120);
+            agent.typing_ttl_secs = Some(17);
+            agent.progress_delay_secs = Some(0);
+        });
+
+        let lifecycle = gw.resolve_turn_lifecycle(&make_test_inbound("ping"));
+
+        assert_eq!(lifecycle.turn_timeout_secs, 120);
+        assert_eq!(lifecycle.typing_ttl_secs, 17);
+        assert_eq!(lifecycle.progress_delay_secs, 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_turn_lifecycle_falls_back_when_routing_does_not_match() {
+        let (gw, _tmp) = make_gateway().await;
+
+        let lifecycle = gw.resolve_turn_lifecycle(&make_test_inbound("ping"));
+
+        assert_eq!(lifecycle.turn_timeout_secs, 1800);
+        assert_eq!(lifecycle.typing_ttl_secs, 120);
+        assert_eq!(lifecycle.progress_delay_secs, 60);
     }
 
     #[tokio::test]

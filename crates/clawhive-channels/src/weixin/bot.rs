@@ -161,6 +161,10 @@ impl WeixinBot {
                         let client_clone = client.clone();
                         let from_user = msg.from_user_id.clone();
                         let ctx_token = msg.context_token.clone();
+                        let progress_delay = self
+                            .gateway
+                            .resolve_turn_lifecycle(&inbound)
+                            .progress_delay_secs;
 
                         tokio::spawn(async move {
                             // Send typing indicator
@@ -173,25 +177,27 @@ impl WeixinBot {
                             let progress_client = client_clone.clone();
                             let progress_user = from_user.clone();
                             let progress_ctx = ctx_token.clone();
-                            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                                        if !progress_ctx.is_empty() {
-                                            if let Err(e) = progress_client
-                                                .send_text(&progress_user, PROGRESS_MESSAGE, &progress_ctx)
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    target: "clawhive::channel::weixin",
-                                                    error = %e,
-                                                    "failed to send weixin progress message"
-                                                );
+                            let _progress_guard = (progress_delay > 0).then(|| {
+                                AbortOnDrop(tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_secs(progress_delay)) => {
+                                            if !progress_ctx.is_empty() {
+                                                if let Err(e) = progress_client
+                                                    .send_text(&progress_user, PROGRESS_MESSAGE, &progress_ctx)
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        target: "clawhive::channel::weixin",
+                                                        error = %e,
+                                                        "failed to send weixin progress message"
+                                                    );
+                                                }
                                             }
                                         }
+                                        _ = progress_complete.notified() => {}
                                     }
-                                    _ = progress_complete.notified() => {}
-                                }
-                            }));
+                                }))
+                            });
 
                             let result = gw.handle_inbound(inbound).await;
                             turn_complete.notify_waiters();

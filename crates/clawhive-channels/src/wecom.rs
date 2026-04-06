@@ -297,6 +297,10 @@ impl WeComBot {
                                             .unwrap_or_default();
                                         let msgid = body.msgid.clone();
                                         let inbound = adapter.to_inbound(&body, &req_id);
+                                        let progress_delay = self
+                                            .gateway
+                                            .resolve_turn_lifecycle(&inbound)
+                                            .progress_delay_secs;
                                         let gw = self.gateway.clone();
                                         let write_reply = write.clone();
 
@@ -307,10 +311,10 @@ impl WeComBot {
                                             let progress_req_id = req_id.clone();
                                             let progress_msgid = msgid.clone();
                                             let progress_write = write_reply.clone();
-                                            let _progress_guard = AbortOnDrop(tokio::spawn(
-                                                async move {
+                                            let _progress_guard = (progress_delay > 0).then(|| {
+                                                AbortOnDrop(tokio::spawn(async move {
                                                     tokio::select! {
-                                                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                                                        _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
                                                             let progress = WeComReplyMessage::text(
                                                                 &progress_req_id,
                                                                 &progress_msgid,
@@ -339,8 +343,8 @@ impl WeComBot {
                                                         }
                                                         _ = progress_complete.notified() => {}
                                                     }
-                                                },
-                                            ));
+                                                }))
+                                            });
 
                                             let result = gw.handle_inbound(inbound).await;
                                             turn_complete.notify_waiters();

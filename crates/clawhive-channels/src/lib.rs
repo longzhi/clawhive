@@ -70,4 +70,28 @@ mod tests {
         assert!(!discord.contains("struct AbortOnDrop"));
         assert!(!telegram.contains("struct AbortOnDrop"));
     }
+
+    #[test]
+    fn adapters_resolve_turn_lifecycle_instead_of_shared_hardcoded_defaults() {
+        let discord = include_str!("discord.rs");
+        let telegram = include_str!("telegram.rs");
+        let slack = include_str!("slack.rs");
+        let whatsapp = include_str!("whatsapp.rs");
+        let dingtalk = include_str!("dingtalk.rs");
+        let wecom = include_str!("wecom.rs");
+        let imessage = include_str!("imessage.rs");
+        let weixin = include_str!("weixin/bot.rs");
+        let feishu = include_str!("feishu/bot.rs");
+
+        for source in [
+            discord, telegram, slack, whatsapp, dingtalk, wecom, imessage, weixin, feishu,
+        ] {
+            assert!(source.contains("resolve_turn_lifecycle(&inbound)"));
+        }
+
+        assert!(!discord.contains("default_typing_ttl"));
+        assert!(!discord.contains("default_progress_delay"));
+        assert!(!telegram.contains("default_typing_ttl"));
+        assert!(!telegram.contains("default_progress_delay"));
+    }
 }

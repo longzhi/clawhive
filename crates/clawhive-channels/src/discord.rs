@@ -18,7 +18,7 @@ use serenity::model::application::CommandDataOptionValue;
 use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
 
-use crate::common::{default_progress_delay, default_typing_ttl, AbortOnDrop, PROGRESS_MESSAGE};
+use crate::common::{infer_mime_from_filename, AbortOnDrop, PROGRESS_MESSAGE};
 
 pub struct DiscordAdapter {
     connector_id: String,
@@ -334,14 +334,8 @@ impl EventHandler for DiscordHandler {
         // Extract attachments — download images and supported documents as base64
         for att in &msg.attachments {
             let content_type = att.content_type.as_deref();
-            let is_inline_document = content_type.is_some_and(is_inline_document_content_type);
-            let kind = match content_type {
-                Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
-                Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
-                Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
-                _ if is_inline_document => AttachmentKind::Document,
-                _ => AttachmentKind::Other,
-            };
+            let kind = infer_inbound_attachment_kind(content_type, &att.filename);
+            let mime_type = infer_inbound_attachment_mime_type(content_type, &att.filename);
             // Download images and inline-able documents (text/PDF) so the orchestrator
             // receives bytes instead of a remote URL placeholder.
             let url_or_data = if should_download_inbound_attachment(&kind) {
@@ -358,13 +352,16 @@ impl EventHandler for DiscordHandler {
             inbound.attachments.push(Attachment {
                 kind,
                 url: url_or_data,
-                mime_type: att.content_type.clone(),
+                mime_type,
                 file_name: Some(att.filename.clone()),
                 size: Some(att.size as u64),
             });
         }
 
         let _ = channel_id.broadcast_typing(&ctx.http).await;
+        let lifecycle = self.gateway.resolve_turn_lifecycle(&inbound);
+        let typing_ttl = lifecycle.typing_ttl_secs;
+        let progress_delay = lifecycle.progress_delay_secs;
 
         let gateway = self.gateway.clone();
         let http = ctx.http.clone();
@@ -384,7 +381,8 @@ impl EventHandler for DiscordHandler {
                 let http = http_typing.clone();
                 let mut turn_done_rx = turn_done_rx.clone();
                 async move {
-                    let deadline = tokio::time::Instant::now() + default_typing_ttl();
+                    let deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(typing_ttl);
                     loop {
                         if tokio::time::Instant::now() >= deadline {
                             break;
@@ -406,23 +404,25 @@ impl EventHandler for DiscordHandler {
                     }
                 }
             }));
-            let _progress_handle = tokio::spawn({
-                let http = http.clone();
-                let mut turn_done_rx = turn_done_rx.clone();
-                async move {
-                    tokio::select! {
-                        _ = tokio::time::sleep(default_progress_delay()) => {
-                            if !*turn_done_rx.borrow() {
-                                if let Err(err) = channel_id.say(&http, PROGRESS_MESSAGE).await {
-                                    tracing::warn!("failed to send discord progress message: {err}");
+            let _progress_handle = (progress_delay > 0).then(|| {
+                tokio::spawn({
+                    let http = http.clone();
+                    let mut turn_done_rx = turn_done_rx.clone();
+                    async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                                if !*turn_done_rx.borrow() {
+                                    if let Err(err) = channel_id.say(&http, PROGRESS_MESSAGE).await {
+                                        tracing::warn!("failed to send discord progress message: {err}");
+                                    }
                                 }
                             }
-                        }
-                        changed = turn_done_rx.changed() => {
-                            let _ = changed;
+                            changed = turn_done_rx.changed() => {
+                                let _ = changed;
+                            }
                         }
                     }
-                }
+                })
             });
 
             match main_handle.await {
@@ -1012,6 +1012,29 @@ fn is_inline_document_content_type(ct: &str) -> bool {
     is_text_content_type(ct) || ct == "application/pdf"
 }
 
+fn infer_inbound_attachment_kind(content_type: Option<&str>, file_name: &str) -> AttachmentKind {
+    let inferred_mime = content_type
+        .map(str::to_owned)
+        .or_else(|| infer_mime_from_filename(Some(file_name)));
+
+    match inferred_mime.as_deref() {
+        Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
+        Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
+        Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
+        Some(ct) if is_inline_document_content_type(ct) => AttachmentKind::Document,
+        _ => AttachmentKind::Other,
+    }
+}
+
+fn infer_inbound_attachment_mime_type(
+    content_type: Option<&str>,
+    file_name: &str,
+) -> Option<String> {
+    content_type
+        .map(ToOwned::to_owned)
+        .or_else(|| infer_mime_from_filename(Some(file_name)))
+}
+
 fn should_download_inbound_attachment(kind: &AttachmentKind) -> bool {
     matches!(kind, AttachmentKind::Image | AttachmentKind::Document)
 }
@@ -1318,6 +1341,30 @@ mod tests {
         assert!(!is_inline_document_content_type(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         ));
+    }
+
+    #[test]
+    fn infer_inbound_attachment_recovers_pdf_without_content_type() {
+        assert_eq!(
+            infer_inbound_attachment_kind(None, "TA Dated 20 August 2024_20240820_0001.pdf"),
+            AttachmentKind::Document
+        );
+        assert_eq!(
+            infer_inbound_attachment_mime_type(None, "TA Dated 20 August 2024_20240820_0001.pdf"),
+            Some("application/pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_inbound_attachment_recovers_text_without_content_type() {
+        assert_eq!(
+            infer_inbound_attachment_kind(None, "notes.txt"),
+            AttachmentKind::Document
+        );
+        assert_eq!(
+            infer_inbound_attachment_mime_type(None, "notes.txt"),
+            Some("text/plain".to_string())
+        );
     }
 
     #[test]

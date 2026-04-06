@@ -14,7 +14,7 @@ use teloxide::types::{
 use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
 
-use crate::common::{default_progress_delay, default_typing_ttl, AbortOnDrop, PROGRESS_MESSAGE};
+use crate::common::{infer_mime_from_filename, AbortOnDrop, PROGRESS_MESSAGE};
 
 pub struct TelegramAdapter {
     connector_id: String,
@@ -285,7 +285,7 @@ impl TelegramBot {
                         .mime_type
                         .as_ref()
                         .map(|m| m.to_string())
-                        .or_else(|| mime_from_filename(doc.file_name.as_deref()))
+                        .or_else(|| infer_mime_from_filename(doc.file_name.as_deref()))
                         .unwrap_or_else(|| "application/octet-stream".to_string());
 
                     let kind = if mime.starts_with("image/") {
@@ -370,6 +370,9 @@ impl TelegramBot {
                 }
 
                 let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+                let lifecycle = gateway.resolve_turn_lifecycle(&inbound);
+                let typing_ttl = lifecycle.typing_ttl_secs;
+                let progress_delay = lifecycle.progress_delay_secs;
 
                 let bot_typing = bot.clone();
                 tokio::spawn(async move {
@@ -386,7 +389,8 @@ impl TelegramBot {
                         let bot = bot_typing.clone();
                         let mut turn_done_rx = turn_done_rx.clone();
                         async move {
-                            let deadline = tokio::time::Instant::now() + default_typing_ttl();
+                            let deadline = tokio::time::Instant::now()
+                                + std::time::Duration::from_secs(typing_ttl);
                             loop {
                                 if tokio::time::Instant::now() >= deadline {
                                     break;
@@ -413,30 +417,32 @@ impl TelegramBot {
                             }
                         }
                     }));
-                    let _progress_handle = tokio::spawn({
-                        let bot = bot.clone();
-                        let mut turn_done_rx = turn_done_rx.clone();
-                        async move {
-                            tokio::select! {
-                                _ = tokio::time::sleep(default_progress_delay()) => {
-                                    if !*turn_done_rx.borrow() {
-                                        if let Err(send_err) = bot.send_message(chat_id, PROGRESS_MESSAGE).await {
-                                            tracing::warn!(
-                                                trace_id = %trace_id,
-                                                chat_id = chat_id.0,
-                                                user_id,
-                                                message_id,
-                                                error = %send_err,
-                                                "failed to send telegram progress message"
-                                            );
+                    let _progress_handle = (progress_delay > 0).then(|| {
+                        tokio::spawn({
+                            let bot = bot.clone();
+                            let mut turn_done_rx = turn_done_rx.clone();
+                            async move {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                                        if !*turn_done_rx.borrow() {
+                                            if let Err(send_err) = bot.send_message(chat_id, PROGRESS_MESSAGE).await {
+                                                tracing::warn!(
+                                                    trace_id = %trace_id,
+                                                    chat_id = chat_id.0,
+                                                    user_id,
+                                                    message_id,
+                                                    error = %send_err,
+                                                    "failed to send telegram progress message"
+                                                );
+                                            }
                                         }
                                     }
-                                }
-                                changed = turn_done_rx.changed() => {
-                                    let _ = changed;
+                                    changed = turn_done_rx.changed() => {
+                                        let _ = changed;
+                                    }
                                 }
                             }
-                        }
+                        })
                     });
 
                     match main_handle.await {
@@ -1070,44 +1076,6 @@ async fn download_photo(bot: &Bot, file_id: &str) -> anyhow::Result<(String, Str
 
     let base64_data = base64::engine::general_purpose::STANDARD.encode(&buf);
     Ok((base64_data, mime.to_string()))
-}
-
-/// Infer MIME type from a filename extension.
-fn mime_from_filename(name: Option<&str>) -> Option<String> {
-    let ext = name?.rsplit('.').next()?;
-    let mime = match ext.to_lowercase().as_str() {
-        "txt" | "log" => "text/plain",
-        "md" | "markdown" => "text/markdown",
-        "json" => "application/json",
-        "yaml" | "yml" => "application/x-yaml",
-        "toml" => "application/toml",
-        "xml" => "application/xml",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" | "mjs" => "application/javascript",
-        "ts" | "tsx" => "text/typescript",
-        "py" => "text/x-python",
-        "rs" => "text/x-rust",
-        "go" => "text/x-go",
-        "java" => "text/x-java",
-        "c" | "h" => "text/x-c",
-        "cpp" | "cc" | "cxx" | "hpp" => "text/x-c++",
-        "sh" | "bash" | "zsh" => "application/x-sh",
-        "csv" => "text/csv",
-        "sql" => "text/x-sql",
-        "pdf" => "application/pdf",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "mp4" => "video/mp4",
-        "mp3" => "audio/mpeg",
-        "ogg" | "oga" => "audio/ogg",
-        "wav" => "audio/wav",
-        _ => return None,
-    };
-    Some(mime.to_string())
 }
 
 /// Maximum length for a single Telegram message.
