@@ -15,8 +15,10 @@ use serenity::all::{
 };
 use serenity::async_trait;
 use serenity::model::application::CommandDataOptionValue;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
+
+use crate::common::{default_progress_delay, default_typing_ttl, AbortOnDrop, PROGRESS_MESSAGE};
 
 pub struct DiscordAdapter {
     connector_id: String,
@@ -369,84 +371,115 @@ impl EventHandler for DiscordHandler {
         let http_typing = ctx.http.clone();
         let user_msg_id = msg.id.get().to_string();
         tokio::spawn(async move {
-            // Spawn typing indicator with drop guard — ensures cleanup on panic or timeout
+            let (turn_done_tx, turn_done_rx) = watch::channel(false);
+            let main_handle = tokio::spawn({
+                let turn_done_tx = turn_done_tx.clone();
+                async move {
+                    let result = gateway.handle_inbound(inbound).await;
+                    let _ = turn_done_tx.send(true);
+                    result
+                }
+            });
             let _typing_guard = AbortOnDrop(tokio::spawn({
                 let http = http_typing.clone();
+                let mut turn_done_rx = turn_done_rx.clone();
                 async move {
+                    let deadline = tokio::time::Instant::now() + default_typing_ttl();
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                        if channel_id.broadcast_typing(&http).await.is_err() {
+                        if tokio::time::Instant::now() >= deadline {
                             break;
+                        }
+                        let wait = std::time::Duration::from_secs(8)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                        tokio::select! {
+                            _ = tokio::time::sleep(wait) => {
+                                if channel_id.broadcast_typing(&http).await.is_err() {
+                                    break;
+                                }
+                            }
+                            changed = turn_done_rx.changed() => {
+                                if changed.is_err() || *turn_done_rx.borrow() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             }));
-
-            // 5-minute timeout to prevent typing indicator from running forever
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                gateway.handle_inbound(inbound),
-            )
-            .await;
-
-            // _typing_guard dropped here (or on panic), aborting the typing loop
-
-            match result {
-                Ok(Ok(Some(outbound))) => {
-                    let has_attachments = !outbound.attachments.is_empty();
-                    let has_text = !outbound.text.trim().is_empty();
-
-                    if has_text && has_attachments && outbound.text.len() <= DISCORD_MAX_LEN {
-                        if let Err(err) = send_attachments(
-                            channel_id,
-                            &http,
-                            &outbound.attachments,
-                            Some(outbound.text.as_str()),
-                        )
-                        .await
-                        {
-                            tracing::error!("failed to send discord attachments: {err}");
-                        }
-                    } else {
-                        if has_text {
-                            let reply = outbound.text.as_str();
-                            let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
-                            if let Err(err) =
-                                send_chunked(channel_id, &http, reply, Some(reply_to)).await
-                            {
-                                tracing::error!("failed to send discord reply: {err}");
-                            }
-                        } else if !has_attachments {
-                            let reply = "Sorry, I got an empty response. Please try again.";
-                            if let Err(err) = send_chunked(channel_id, &http, reply, None).await {
-                                tracing::error!("failed to send discord reply: {err}");
+            let _progress_handle = tokio::spawn({
+                let http = http.clone();
+                let mut turn_done_rx = turn_done_rx.clone();
+                async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(default_progress_delay()) => {
+                            if !*turn_done_rx.borrow() {
+                                if let Err(err) = channel_id.say(&http, PROGRESS_MESSAGE).await {
+                                    tracing::warn!("failed to send discord progress message: {err}");
+                                }
                             }
                         }
+                        changed = turn_done_rx.changed() => {
+                            let _ = changed;
+                        }
+                    }
+                }
+            });
 
-                        if has_attachments {
-                            if let Err(err) =
-                                send_attachments(channel_id, &http, &outbound.attachments, None)
-                                    .await
+            match main_handle.await {
+                Ok(result) => match result {
+                    Ok(Some(outbound)) => {
+                        let has_attachments = !outbound.attachments.is_empty();
+                        let has_text = !outbound.text.trim().is_empty();
+
+                        if has_text && has_attachments && outbound.text.len() <= DISCORD_MAX_LEN {
+                            if let Err(err) = send_attachments(
+                                channel_id,
+                                &http,
+                                &outbound.attachments,
+                                Some(outbound.text.as_str()),
+                            )
+                            .await
                             {
                                 tracing::error!("failed to send discord attachments: {err}");
                             }
+                        } else {
+                            if has_text {
+                                let reply = outbound.text.as_str();
+                                let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
+                                if let Err(err) =
+                                    send_chunked(channel_id, &http, reply, Some(reply_to)).await
+                                {
+                                    tracing::error!("failed to send discord reply: {err}");
+                                }
+                            } else if !has_attachments {
+                                let reply = "Sorry, I got an empty response. Please try again.";
+                                if let Err(err) = send_chunked(channel_id, &http, reply, None).await
+                                {
+                                    tracing::error!("failed to send discord reply: {err}");
+                                }
+                            }
+
+                            if has_attachments {
+                                if let Err(err) =
+                                    send_attachments(channel_id, &http, &outbound.attachments, None)
+                                        .await
+                                {
+                                    tracing::error!("failed to send discord attachments: {err}");
+                                }
+                            }
                         }
                     }
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(err)) => {
-                    tracing::error!("discord gateway error: {err}");
-                    let user_msg = format!("Error: {err}");
-                    if let Err(send_err) = channel_id.say(&http, &user_msg).await {
-                        tracing::error!("failed to send discord error message: {send_err}");
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::error!("discord gateway error: {err}");
+                        let user_msg = format!("Error: {err}");
+                        if let Err(send_err) = channel_id.say(&http, &user_msg).await {
+                            tracing::error!("failed to send discord error message: {send_err}");
+                        }
                     }
-                }
-                Err(_timeout) => {
-                    tracing::error!("discord handle_inbound timed out after 300s");
-                    let user_msg = "⏱️ Sorry, the request timed out. Please try again.";
-                    if let Err(send_err) = channel_id.say(&http, user_msg).await {
-                        tracing::error!("failed to send discord timeout message: {send_err}");
-                    }
+                },
+                Err(err) => {
+                    tracing::error!("discord inbound task join error: {err}");
                 }
             }
         });
@@ -653,16 +686,6 @@ fn split_message(text: &str) -> Vec<&str> {
         rest = &rest[split_at..];
     }
     chunks
-}
-
-/// Drop guard that aborts a spawned task when dropped.
-/// Ensures typing indicator loops are cleaned up on panic, timeout, or normal exit.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// Send a potentially long message as multiple chunks.

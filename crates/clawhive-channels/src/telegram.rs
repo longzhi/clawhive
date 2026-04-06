@@ -11,8 +11,10 @@ use teloxide::types::{
     BotCommand, CallbackQuery, ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
     Message, MessageEntityKind, MessageId, ParseMode, ReactionType,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
+
+use crate::common::{default_progress_delay, default_typing_ttl, AbortOnDrop, PROGRESS_MESSAGE};
 
 pub struct TelegramAdapter {
     connector_id: String,
@@ -371,34 +373,75 @@ impl TelegramBot {
 
                 let bot_typing = bot.clone();
                 tokio::spawn(async move {
-                    // Spawn typing indicator with drop guard — ensures cleanup on panic or timeout
+                    let (turn_done_tx, turn_done_rx) = watch::channel(false);
+                    let main_handle = tokio::spawn({
+                        let turn_done_tx = turn_done_tx.clone();
+                        async move {
+                            let result = gateway.handle_inbound(inbound).await;
+                            let _ = turn_done_tx.send(true);
+                            result
+                        }
+                    });
                     let _typing_guard = AbortOnDrop(tokio::spawn({
                         let bot = bot_typing.clone();
+                        let mut turn_done_rx = turn_done_rx.clone();
                         async move {
+                            let deadline = tokio::time::Instant::now() + default_typing_ttl();
                             loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                                if bot
-                                    .send_chat_action(chat_id, ChatAction::Typing)
-                                    .await
-                                    .is_err()
-                                {
+                                if tokio::time::Instant::now() >= deadline {
                                     break;
+                                }
+                                let wait = std::time::Duration::from_secs(4).min(
+                                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                                );
+                                tokio::select! {
+                                    _ = tokio::time::sleep(wait) => {
+                                        if bot
+                                            .send_chat_action(chat_id, ChatAction::Typing)
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    changed = turn_done_rx.changed() => {
+                                        if changed.is_err() || *turn_done_rx.borrow() {
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }));
+                    let _progress_handle = tokio::spawn({
+                        let bot = bot.clone();
+                        let mut turn_done_rx = turn_done_rx.clone();
+                        async move {
+                            tokio::select! {
+                                _ = tokio::time::sleep(default_progress_delay()) => {
+                                    if !*turn_done_rx.borrow() {
+                                        if let Err(send_err) = bot.send_message(chat_id, PROGRESS_MESSAGE).await {
+                                            tracing::warn!(
+                                                trace_id = %trace_id,
+                                                chat_id = chat_id.0,
+                                                user_id,
+                                                message_id,
+                                                error = %send_err,
+                                                "failed to send telegram progress message"
+                                            );
+                                        }
+                                    }
+                                }
+                                changed = turn_done_rx.changed() => {
+                                    let _ = changed;
+                                }
+                            }
+                        }
+                    });
 
-                    // 5-minute timeout to prevent typing indicator from running forever
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(300),
-                        gateway.handle_inbound(inbound),
-                    )
-                    .await;
-
-                    // _typing_guard dropped here (or on panic), aborting the typing loop
-
-                    match result {
-                        Ok(Ok(Some(outbound))) => {
+                    match main_handle.await {
+                        Ok(result) => match result {
+                        Ok(Some(outbound)) => {
                             match attachment_text_mode(
                                 &outbound.text,
                                 !outbound.attachments.is_empty(),
@@ -480,8 +523,8 @@ impl TelegramBot {
                                 }
                             }
                         }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(err)) => {
+                        Ok(None) => {}
+                        Err(err) => {
                             tracing::error!(
                                 trace_id = %trace_id,
                                 chat_id = chat_id.0,
@@ -502,25 +545,16 @@ impl TelegramBot {
                                 );
                             }
                         }
-                        Err(_timeout) => {
+                        },
+                        Err(err) => {
                             tracing::error!(
                                 trace_id = %trace_id,
                                 chat_id = chat_id.0,
                                 user_id,
                                 message_id,
-                                "telegram handle_inbound timed out after 300s"
+                                error = %err,
+                                "telegram inbound task join error"
                             );
-                            let user_msg = "⏱️ Sorry, the request timed out. Please try again.";
-                            if let Err(send_err) = bot.send_message(chat_id, user_msg).await {
-                                tracing::error!(
-                                    trace_id = %trace_id,
-                                    chat_id = chat_id.0,
-                                    user_id,
-                                    message_id,
-                                    error = %send_err,
-                                    "failed to send telegram timeout message"
-                                );
-                            }
                         }
                     }
                 });
@@ -730,16 +764,6 @@ pub fn detect_mention(msg: &Message) -> (bool, Option<String>) {
     }
 
     (false, None)
-}
-
-/// Drop guard that aborts a spawned task when dropped.
-/// Ensures typing indicator loops are cleaned up on panic, timeout, or normal exit.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// Spawn a listener for DeliverAnnounce messages (for scheduled task delivery)

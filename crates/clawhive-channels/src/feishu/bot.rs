@@ -16,6 +16,9 @@ use super::codec::*;
 use super::listeners;
 use super::message::*;
 use super::types::*;
+use crate::common::AbortOnDrop;
+
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
 pub struct FeishuAdapter {
     connector_id: String,
@@ -358,7 +361,26 @@ impl FeishuBot {
         tokio::spawn(async move {
             let placeholder_id: Option<String> = None;
 
-            match gw.handle_inbound(inbound).await {
+            let turn_complete = Arc::new(tokio::sync::Notify::new());
+            let progress_complete = turn_complete.clone();
+            let progress_client = client.clone();
+            let progress_message_id = message_id.clone();
+            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
+                        if let Err(e) = progress_client.reply_message(&progress_message_id, "text", &content).await {
+                            tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu progress message");
+                        }
+                    }
+                    _ = progress_complete.notified() => {}
+                }
+            }));
+
+            let result = gw.handle_inbound(inbound).await;
+            turn_complete.notify_waiters();
+
+            match result {
                 Ok(Some(outbound)) => {
                     let text = outbound.text.trim();
 
@@ -621,7 +643,26 @@ impl FeishuBot {
         let gw = self.gateway.clone();
         let client = client.clone();
         tokio::spawn(async move {
-            match gw.handle_inbound(inbound).await {
+            let turn_complete = Arc::new(tokio::sync::Notify::new());
+            let progress_complete = turn_complete.clone();
+            let progress_client = client.clone();
+            let progress_msg_id = msg_id.clone();
+            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
+                        if let Err(e) = progress_client.reply_message(&progress_msg_id, "text", &content).await {
+                            tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu approval progress message");
+                        }
+                    }
+                    _ = progress_complete.notified() => {}
+                }
+            }));
+
+            let result = gw.handle_inbound(inbound).await;
+            turn_complete.notify_waiters();
+
+            match result {
                 Ok(Some(outbound)) => {
                     let result_text = if outbound.text.trim().is_empty() {
                         format!("Decision recorded: {decision}")
@@ -698,7 +739,26 @@ impl FeishuBot {
         let gw = self.gateway.clone();
         let client = client.clone();
         tokio::spawn(async move {
-            match gw.handle_inbound(inbound).await {
+            let turn_complete = Arc::new(tokio::sync::Notify::new());
+            let progress_complete = turn_complete.clone();
+            let progress_client = client.clone();
+            let progress_msg_id = msg_id.clone();
+            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        let content = serde_json::json!({"text": PROGRESS_MESSAGE}).to_string();
+                        if let Err(e) = progress_client.reply_message(&progress_msg_id, "text", &content).await {
+                            tracing::warn!(target: "clawhive::channel::feishu", error = %e, "failed to send feishu skill progress message");
+                        }
+                    }
+                    _ = progress_complete.notified() => {}
+                }
+            }));
+
+            let result = gw.handle_inbound(inbound).await;
+            turn_complete.notify_waiters();
+
+            match result {
                 Ok(Some(outbound)) => {
                     let result_text = if outbound.text.trim().is_empty() {
                         "Skill installed successfully.".to_string()

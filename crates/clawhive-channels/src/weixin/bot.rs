@@ -14,8 +14,10 @@ use uuid::Uuid;
 
 use super::api::ILinkClient;
 use super::types::WeixinSession;
+use crate::common::AbortOnDrop;
 
 const MAX_TEXT_LEN: usize = 4000;
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
 pub struct WeixinBot {
     connector_id: String,
@@ -166,7 +168,35 @@ impl WeixinBot {
                                 let _ = client_clone.send_typing(&from_user, &ctx_token).await;
                             }
 
-                            match gw.handle_inbound(inbound).await {
+                            let turn_complete = Arc::new(tokio::sync::Notify::new());
+                            let progress_complete = turn_complete.clone();
+                            let progress_client = client_clone.clone();
+                            let progress_user = from_user.clone();
+                            let progress_ctx = ctx_token.clone();
+                            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                                        if !progress_ctx.is_empty() {
+                                            if let Err(e) = progress_client
+                                                .send_text(&progress_user, PROGRESS_MESSAGE, &progress_ctx)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    target: "clawhive::channel::weixin",
+                                                    error = %e,
+                                                    "failed to send weixin progress message"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    _ = progress_complete.notified() => {}
+                                }
+                            }));
+
+                            let result = gw.handle_inbound(inbound).await;
+                            turn_complete.notify_waiters();
+
+                            match result {
                                 Ok(Some(outbound)) => {
                                     if let Err(e) = send_outbound_reply(
                                         &client_clone,

@@ -22,6 +22,10 @@ use whatsapp_rust_sqlite_storage::SqliteStore;
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
+use crate::common::AbortOnDrop;
+
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
+
 pub struct WhatsAppAdapter {
     connector_id: String,
 }
@@ -369,76 +373,103 @@ pub async fn start_whatsapp(
                             .and_then(|i| i.emoji.clone());
                         let prefix = build_bot_prefix(agent_emoji.as_deref());
 
-                        match gateway.handle_inbound(inbound).await {
-                            Ok(Some(outbound)) => {
-                                let _ = client.chatstate().send_paused(&info.source.chat).await;
-
-                                let has_text = !outbound.text.trim().is_empty();
-                                let has_attachments = !outbound.attachments.is_empty();
-
-                                if !has_text && !has_attachments {
-                                    return;
-                                }
-
-                                let prefixed_text = format!("{prefix}{}", outbound.text);
-
-                                if has_attachments {
-                                    for (i, att) in outbound.attachments.iter().enumerate() {
-                                        let caption = if i == 0 && has_text {
-                                            Some(prefixed_text.as_str())
-                                        } else {
-                                            None
+                        let gateway = gateway.clone();
+                        let client = client.clone();
+                        let reply_chat = info.source.chat.clone();
+                        tokio::spawn(async move {
+                            let turn_complete = Arc::new(tokio::sync::Notify::new());
+                            let progress_complete = turn_complete.clone();
+                            let progress_client = client.clone();
+                            let progress_chat = reply_chat.clone();
+                            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                                        let progress = wa::Message {
+                                            conversation: Some(PROGRESS_MESSAGE.to_string()),
+                                            ..Default::default()
                                         };
-                                        if let Err(e) = send_attachment(
-                                            &client,
-                                            &info.source.chat,
-                                            att,
-                                            caption,
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(
-                                                error = %e,
-                                                "failed to send WhatsApp attachment"
+                                        if let Err(e) = progress_client.send_message(progress_chat, progress).await {
+                                            tracing::warn!(error = %e, "failed to send WhatsApp progress message");
+                                        }
+                                    }
+                                    _ = progress_complete.notified() => {}
+                                }
+                            }));
+
+                            let result = gateway.handle_inbound(inbound).await;
+                            turn_complete.notify_waiters();
+
+                            match result {
+                                Ok(Some(outbound)) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
+
+                                    let has_text = !outbound.text.trim().is_empty();
+                                    let has_attachments = !outbound.attachments.is_empty();
+
+                                    if !has_text && !has_attachments {
+                                        return;
+                                    }
+
+                                    let prefixed_text = format!("{prefix}{}", outbound.text);
+
+                                    if has_attachments {
+                                        for (i, att) in outbound.attachments.iter().enumerate() {
+                                            let caption = if i == 0 && has_text {
+                                                Some(prefixed_text.as_str())
+                                            } else {
+                                                None
+                                            };
+                                            if let Err(e) = send_attachment(
+                                                &client,
+                                                &reply_chat,
+                                                att,
+                                                caption,
+                                            )
+                                            .await
+                                            {
+                                                tracing::error!(
+                                                    error = %e,
+                                                    "failed to send WhatsApp attachment"
+                                                );
+                                            }
+                                        }
+
+                                        if has_text {
+                                            tracing::info!(
+                                                sender = %sender_jid,
+                                                chat = %chat_jid,
+                                                attachments = outbound.attachments.len(),
+                                                "WhatsApp reply with attachments sent"
                                             );
+                                            return;
                                         }
                                     }
 
-                                    if has_text {
-                                        tracing::info!(
-                                            sender = %sender_jid,
-                                            chat = %chat_jid,
-                                            attachments = outbound.attachments.len(),
-                                            "WhatsApp reply with attachments sent"
-                                        );
-                                        return;
+                                    if has_text && !has_attachments {
+                                        let reply = wa::Message {
+                                            conversation: Some(prefixed_text),
+                                            ..Default::default()
+                                        };
+                                        if let Err(e) = client.send_message(reply_chat.clone(), reply).await {
+                                            tracing::error!("Failed to send WhatsApp reply: {e}");
+                                        } else {
+                                            tracing::info!(
+                                                sender = %sender_jid,
+                                                chat = %chat_jid,
+                                                "WhatsApp reply sent"
+                                            );
+                                        }
                                     }
                                 }
-
-                                if has_text && !has_attachments {
-                                    let reply = wa::Message {
-                                        conversation: Some(prefixed_text),
-                                        ..Default::default()
-                                    };
-                                    if let Err(e) =
-                                        client.send_message(info.source.chat.clone(), reply).await
-                                    {
-                                        tracing::error!("Failed to send WhatsApp reply: {e}");
-                                    } else {
-                                        tracing::info!(
-                                            sender = %sender_jid,
-                                            chat = %chat_jid,
-                                            "WhatsApp reply sent"
-                                        );
-                                    }
+                                Ok(None) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
+                                }
+                                Err(err) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
+                                    tracing::error!("Gateway error for WhatsApp message: {err}");
                                 }
                             }
-                            Ok(None) => {}
-                            Err(err) => {
-                                let _ = client.chatstate().send_paused(&info.source.chat).await;
-                                tracing::error!("Gateway error for WhatsApp message: {err}");
-                            }
-                        }
+                        });
                     }
                     Event::Connected(_) => {
                         tracing::info!("WhatsApp connected");

@@ -13,6 +13,10 @@ use clawhive_schema::{InboundMessage, OutboundMessage};
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
+use crate::common::AbortOnDrop;
+
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
+
 /// iMessage adapter for macOS.
 pub struct IMessageAdapter {
     connector_id: String,
@@ -135,10 +139,29 @@ impl IMessageBot {
                         tracing::debug!("iMessage from {}: {}", sender, text);
 
                         let inbound = adapter.to_inbound(&sender, &text);
+                        let gateway = gateway.clone();
+                        let progress_sender = sender.clone();
+                        tokio::spawn(async move {
+                            let turn_complete = Arc::new(tokio::sync::Notify::new());
+                            let progress_complete = turn_complete.clone();
+                            let _progress_guard = AbortOnDrop(tokio::spawn(async move {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                                        if let Err(e) = send_imessage(&progress_sender, PROGRESS_MESSAGE) {
+                                            tracing::warn!("Failed to send iMessage progress message: {e}");
+                                        }
+                                    }
+                                    _ = progress_complete.notified() => {}
+                                }
+                            }));
 
-                        if let Err(e) = gateway.handle_inbound(inbound).await {
-                            tracing::error!("Failed to handle iMessage: {e}");
-                        }
+                            let result = gateway.handle_inbound(inbound).await;
+                            turn_complete.notify_waiters();
+
+                            if let Err(e) = result {
+                                tracing::error!("Failed to handle iMessage: {e}");
+                            }
+                        });
 
                         last_rowid = rowid.max(last_rowid);
                     }
