@@ -218,6 +218,40 @@ impl MemoryStore {
         .await;
     }
 
+    /// Returns the `latest_daily_date` field from the most recent successful
+    /// consolidation trace for the given agent, if any.
+    pub async fn last_consolidation_daily_date(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<chrono::NaiveDate>> {
+        let db = Arc::clone(&self.db);
+        let agent_id = agent_id.to_owned();
+        task::spawn_blocking(move || {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
+            let details_json: Option<String> = conn
+                .query_row(
+                    "SELECT details FROM memory_trace \
+                     WHERE agent_id = ?1 AND operation = 'consolidation' \
+                     ORDER BY timestamp DESC LIMIT 1",
+                    params![agent_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if let Some(json_str) = details_json {
+                let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
+                if let Some(date_str) = parsed.get("latest_daily_date").and_then(|v| v.as_str()) {
+                    let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
+                    return Ok(Some(date));
+                }
+            }
+            Ok(None)
+        })
+        .await?
+    }
+
     pub fn db(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.db)
     }

@@ -239,6 +239,24 @@ impl HippocampusConsolidator {
         self.search_index.as_ref()
     }
 
+    async fn last_consolidation_daily_date(&self) -> Option<chrono::NaiveDate> {
+        if let Some(ref store) = self.memory_store {
+            match store.last_consolidation_daily_date(&self.agent_id).await {
+                Ok(date) => date,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        error = %error,
+                        "Failed to query last consolidation date"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     pub async fn consolidate(&self) -> Result<ConsolidationReport> {
         if let Some(ref store) = self.memory_store {
             if let Err(error) = store
@@ -250,10 +268,37 @@ impl HippocampusConsolidator {
         }
 
         let current_memory = self.file_store.read_long_term().await?;
-        let recent_daily = self
-            .file_store
-            .read_recent_daily(self.lookback_days)
-            .await?;
+
+        // Incremental: only read daily files after last successful consolidation.
+        // Falls back to lookback_days window when no prior consolidation record exists.
+        let (recent_daily, incremental) = match self.last_consolidation_daily_date().await {
+            Some(since) => {
+                let files = self.file_store.read_daily_since(since).await?;
+                if files.is_empty() {
+                    tracing::info!(
+                        agent_id = %self.agent_id,
+                        since = %since,
+                        "No new daily files since last consolidation; skipping"
+                    );
+                }
+                (files, true)
+            }
+            None => {
+                tracing::info!(
+                    agent_id = %self.agent_id,
+                    lookback_days = self.lookback_days,
+                    "No prior consolidation record; using lookback window"
+                );
+                let files = self
+                    .file_store
+                    .read_recent_daily(self.lookback_days)
+                    .await?;
+                (files, false)
+            }
+        };
+        let _ = incremental;
+        // Newest daily file date — recorded in trace for next incremental run.
+        let latest_daily_date = recent_daily.first().map(|(d, _)| *d);
 
         if recent_daily.is_empty() {
             let report = ConsolidationReport {
@@ -274,7 +319,12 @@ impl HippocampusConsolidator {
         }
 
         let mut report = match self
-            .consolidate_by_section(&current_memory, &daily_sections, recent_daily.len())
+            .consolidate_by_section(
+                &current_memory,
+                &daily_sections,
+                recent_daily.len(),
+                latest_daily_date,
+            )
             .await
         {
             Ok(report) => report,
@@ -283,8 +333,13 @@ impl HippocampusConsolidator {
                     error = %error,
                     "Section-based consolidation failed, falling back to legacy consolidation"
                 );
-                self.legacy_consolidate(&current_memory, &daily_sections, recent_daily.len())
-                    .await?
+                self.legacy_consolidate(
+                    &current_memory,
+                    &daily_sections,
+                    recent_daily.len(),
+                    latest_daily_date,
+                )
+                .await?
             }
         };
 
@@ -307,6 +362,7 @@ impl HippocampusConsolidator {
         current_memory: &str,
         daily_sections: &str,
         daily_files_read: usize,
+        latest_daily_date: Option<chrono::NaiveDate>,
     ) -> Result<ConsolidationReport> {
         let response = self
             .request_consolidation(
@@ -331,7 +387,13 @@ impl HippocampusConsolidator {
 
                 let updated_memory = apply_patch(current_memory, &patch);
                 return self
-                    .finalize_updated_memory(updated_memory, current_memory, daily_files_read, &[])
+                    .finalize_updated_memory(
+                        updated_memory,
+                        current_memory,
+                        daily_files_read,
+                        &[],
+                        latest_daily_date,
+                    )
                     .await;
             }
             Err(first_error) => {
@@ -368,6 +430,7 @@ impl HippocampusConsolidator {
                                 current_memory,
                                 daily_files_read,
                                 &[],
+                                latest_daily_date,
                             )
                             .await;
                     }
@@ -414,8 +477,14 @@ impl HippocampusConsolidator {
             });
         }
 
-        self.finalize_updated_memory(updated_memory, current_memory, daily_files_read, &[])
-            .await
+        self.finalize_updated_memory(
+            updated_memory,
+            current_memory,
+            daily_files_read,
+            &[],
+            latest_daily_date,
+        )
+        .await
     }
 
     async fn consolidate_by_section(
@@ -423,6 +492,7 @@ impl HippocampusConsolidator {
         current_memory: &str,
         daily_sections: &str,
         daily_files_read: usize,
+        latest_daily_date: Option<chrono::NaiveDate>,
     ) -> Result<ConsolidationReport> {
         let candidates = self.extract_promotion_candidates(daily_sections).await?;
         let memory_candidates = dedup_memory_candidates(candidates);
@@ -492,6 +562,7 @@ impl HippocampusConsolidator {
             current_memory,
             daily_files_read,
             &memory_candidates,
+            latest_daily_date,
         )
         .await
     }
@@ -665,6 +736,7 @@ impl HippocampusConsolidator {
         current_memory: &str,
         daily_files_read: usize,
         memory_candidates: &[PromotionCandidate],
+        latest_daily_date: Option<chrono::NaiveDate>,
     ) -> Result<ConsolidationReport> {
         if let Err(error) = validate_consolidation_output(&updated_memory, current_memory) {
             tracing::warn!(error = %error, "Skipping consolidation write due to invalid LLM output");
@@ -772,17 +844,21 @@ impl HippocampusConsolidator {
             .await;
 
         if let Some(ref store) = self.memory_store {
+            let mut trace_details = serde_json::json!({
+                "daily_files_read": daily_files_read,
+                "reindexed": reindexed,
+                "facts_extracted": 0,
+                "memory_chars": updated_memory.len(),
+            });
+            if let Some(date) = latest_daily_date {
+                trace_details["latest_daily_date"] =
+                    serde_json::Value::String(date.format("%Y-%m-%d").to_string());
+            }
             store
                 .record_trace(
                     &self.agent_id,
                     "consolidation",
-                    &serde_json::json!({
-                        "daily_files_read": daily_files_read,
-                        "reindexed": reindexed,
-                        "facts_extracted": 0,
-                        "memory_chars": updated_memory.len(),
-                    })
-                    .to_string(),
+                    &trace_details.to_string(),
                     None,
                 )
                 .await;

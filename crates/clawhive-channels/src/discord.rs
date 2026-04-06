@@ -329,19 +329,20 @@ impl EventHandler for DiscordHandler {
             None
         };
 
-        // Extract attachments — download images and text files, encode as base64
+        // Extract attachments — download images and supported documents as base64
         for att in &msg.attachments {
             let content_type = att.content_type.as_deref();
-            let is_text = content_type.is_some_and(is_text_content_type);
+            let is_inline_document = content_type.is_some_and(is_inline_document_content_type);
             let kind = match content_type {
                 Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
                 Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
                 Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
-                _ if is_text => AttachmentKind::Document,
+                _ if is_inline_document => AttachmentKind::Document,
                 _ => AttachmentKind::Other,
             };
-            // Download images (LLM vision) and text files (LLM context) as base64
-            let url_or_data = if kind == AttachmentKind::Image || is_text {
+            // Download images and inline-able documents (text/PDF) so the orchestrator
+            // receives bytes instead of a remote URL placeholder.
+            let url_or_data = if should_download_inbound_attachment(&kind) {
                 match download_attachment(&self.http_client, &att.url).await {
                     Ok(base64_data) => base64_data,
                     Err(e) => {
@@ -984,6 +985,14 @@ fn is_text_content_type(ct: &str) -> bool {
         || ct == "application/x-sh"
 }
 
+fn is_inline_document_content_type(ct: &str) -> bool {
+    is_text_content_type(ct) || ct == "application/pdf"
+}
+
+fn should_download_inbound_attachment(kind: &AttachmentKind) -> bool {
+    matches!(kind, AttachmentKind::Image | AttachmentKind::Document)
+}
+
 /// Download a Discord attachment and return its content as a base64-encoded string.
 async fn download_attachment(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
     use base64::Engine;
@@ -1277,6 +1286,24 @@ mod tests {
         assert_eq!(audio, "audio.mpeg");
         assert_eq!(document, "document.plain");
         assert_eq!(other, "file.bin");
+    }
+
+    #[test]
+    fn inline_document_content_type_includes_pdf() {
+        assert!(is_inline_document_content_type("text/plain"));
+        assert!(is_inline_document_content_type("application/pdf"));
+        assert!(!is_inline_document_content_type(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ));
+    }
+
+    #[test]
+    fn should_download_inbound_attachment_for_images_and_documents() {
+        assert!(should_download_inbound_attachment(&AttachmentKind::Image));
+        assert!(should_download_inbound_attachment(
+            &AttachmentKind::Document
+        ));
+        assert!(!should_download_inbound_attachment(&AttachmentKind::Other));
     }
 
     #[tokio::test]
