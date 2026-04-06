@@ -46,4 +46,6 @@ deploy.sh
 temp/
 tasks/
 docs/plans/
+docs/solutions/
+docs/brainstorms/
 adr/

@@ -357,5 +357,6 @@ Naming: `adr/NNNN-short-slug.md` (e.g., `adr/0001-sqlite-vec-for-memory-search.m
 | User guides, tutorials, API reference | `docs/` (Starlight site) |
 | Architecture decisions with rationale | `adr/` (append-only) |
 | Agent/developer onboarding, code conventions | `AGENTS.md` |
+| Documented solutions (bugs, patterns, practices) | `docs/solutions/` (YAML frontmatter, by category) |
 | Development plans, proposals | GitHub Issues / PRs |
 | Research, analysis, spike notes | GitHub Issues / PRs |
