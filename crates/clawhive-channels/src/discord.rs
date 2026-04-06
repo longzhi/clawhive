@@ -199,6 +199,7 @@ impl EventHandler for DiscordHandler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("stop").description("Cancel the current task"),
             CreateCommand::new("status").description("Show session status"),
             CreateCommand::new("model")
                 .description("Show or change current model")

@@ -111,6 +111,7 @@ impl TelegramBot {
         // Register bot commands menu with Telegram
         let commands = vec![
             BotCommand::new("new", "Start a fresh session"),
+            BotCommand::new("stop", "Cancel the current task"),
             BotCommand::new("status", "Show session status"),
             BotCommand::new("model", "Show or change model (e.g. /model openai/gpt-5.2)"),
             BotCommand::new("help", "Show available commands"),
