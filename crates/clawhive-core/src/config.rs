@@ -862,6 +862,35 @@ pub struct FullAgentConfig {
     /// Maximum tool-use loop iterations. Defaults to 50.
     #[serde(default)]
     pub max_iterations: Option<u32>,
+    /// Maximum seconds an agent turn may run before cooperative abort. Default 1800 (30 min), range 60-7200.
+    #[serde(default)]
+    pub turn_timeout_secs: Option<u64>,
+    /// How long the typing indicator stays active (seconds). Default 120. Clamped to turn_timeout.
+    #[serde(default)]
+    pub typing_ttl_secs: Option<u64>,
+    /// Seconds of silence before sending a progress message. Default 60. Set to 0 to disable.
+    #[serde(default)]
+    pub progress_delay_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TurnLifecycleConfig {
+    pub turn_timeout_secs: u64,
+    pub typing_ttl_secs: u64,
+    pub progress_delay_secs: u64,
+}
+
+impl FullAgentConfig {
+    pub fn turn_lifecycle(&self) -> TurnLifecycleConfig {
+        let turn_timeout = self.turn_timeout_secs.unwrap_or(1800).clamp(60, 7200);
+        let typing_ttl = self.typing_ttl_secs.unwrap_or(120);
+        let progress_delay = self.progress_delay_secs.unwrap_or(60);
+        TurnLifecycleConfig {
+            turn_timeout_secs: turn_timeout,
+            typing_ttl_secs: typing_ttl.min(turn_timeout),
+            progress_delay_secs: progress_delay,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1475,6 +1504,9 @@ auth:
                 sandbox: None,
                 max_response_tokens: None,
                 max_iterations: None,
+                turn_timeout_secs: None,
+                typing_ttl_secs: None,
+                progress_delay_secs: None,
             }],
         };
         let err = validate_config(&config).unwrap_err();
@@ -1592,5 +1624,48 @@ auth:
                 None => std::env::remove_var("CLAWHIVE_TEST_GROUP_ALLOW_FROM"),
             }
         }
+    }
+
+    #[test]
+    fn turn_lifecycle_defaults() {
+        let yaml = "agent_id: a\nenabled: true\nmodel_policy:\n  primary: m\n  fallbacks: []\n";
+        let agent: FullAgentConfig = serde_yaml::from_str(yaml).unwrap();
+        let lc = agent.turn_lifecycle();
+        assert_eq!(lc.turn_timeout_secs, 1800);
+        assert_eq!(lc.typing_ttl_secs, 120);
+        assert_eq!(lc.progress_delay_secs, 60);
+    }
+
+    #[test]
+    fn turn_lifecycle_explicit_values() {
+        let yaml = "agent_id: a\nenabled: true\nmodel_policy:\n  primary: m\n  fallbacks: []\nturn_timeout_secs: 900\ntyping_ttl_secs: 60\nprogress_delay_secs: 30\n";
+        let agent: FullAgentConfig = serde_yaml::from_str(yaml).unwrap();
+        let lc = agent.turn_lifecycle();
+        assert_eq!(lc.turn_timeout_secs, 900);
+        assert_eq!(lc.typing_ttl_secs, 60);
+        assert_eq!(lc.progress_delay_secs, 30);
+    }
+
+    #[test]
+    fn turn_lifecycle_clamps_timeout_low() {
+        let yaml = "agent_id: a\nenabled: true\nmodel_policy:\n  primary: m\n  fallbacks: []\nturn_timeout_secs: 10\n";
+        let agent: FullAgentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.turn_lifecycle().turn_timeout_secs, 60);
+    }
+
+    #[test]
+    fn turn_lifecycle_clamps_timeout_high() {
+        let yaml = "agent_id: a\nenabled: true\nmodel_policy:\n  primary: m\n  fallbacks: []\nturn_timeout_secs: 99999\n";
+        let agent: FullAgentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.turn_lifecycle().turn_timeout_secs, 7200);
+    }
+
+    #[test]
+    fn turn_lifecycle_typing_ttl_clamped_by_timeout() {
+        let yaml = "agent_id: a\nenabled: true\nmodel_policy:\n  primary: m\n  fallbacks: []\nturn_timeout_secs: 90\ntyping_ttl_secs: 200\n";
+        let agent: FullAgentConfig = serde_yaml::from_str(yaml).unwrap();
+        let lc = agent.turn_lifecycle();
+        assert_eq!(lc.turn_timeout_secs, 90);
+        assert_eq!(lc.typing_ttl_secs, 90);
     }
 }
