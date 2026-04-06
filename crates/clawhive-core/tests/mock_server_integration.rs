@@ -189,7 +189,11 @@ async fn mock_server_e2e_chat() {
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus).await;
 
     let out = orch
-        .handle_inbound(test_inbound("hi"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("hi"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("Hello from mock!"));
@@ -212,7 +216,14 @@ async fn mock_server_records_sessions() {
 
     let inbound = test_inbound("session input");
     let _key = SessionKey::from_inbound(&inbound);
-    let out = orch.handle_inbound(inbound, "clawhive-main").await.unwrap();
+    let out = orch
+        .handle_inbound(
+            inbound,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     assert!(out.text.contains("session reply"));
     // Session recording is handled by orchestrator internally
 }
@@ -234,7 +245,14 @@ async fn mock_server_creates_session() {
 
     let inbound = test_inbound("session input");
     let key = SessionKey::from_inbound(&inbound);
-    let _ = orch.handle_inbound(inbound, "clawhive-main").await.unwrap();
+    let _ = orch
+        .handle_inbound(
+            inbound,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
     let session = memory.get_session(&key.0).await.unwrap();
     assert!(session.is_some());
@@ -258,7 +276,11 @@ async fn mock_server_publishes_bus_events() {
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus).await;
 
     let _ = orch
-        .handle_inbound(test_inbound("bus input"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("bus input"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -294,7 +316,11 @@ async fn mock_server_handles_api_error() {
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus).await;
 
     let err = orch
-        .handle_inbound(test_inbound("error input"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("error input"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap_err();
     let err_text = err.to_string();
@@ -486,11 +512,25 @@ async fn mock_server_multi_turn_session() {
 
     let first = test_inbound("first");
     let _key = SessionKey::from_inbound(&first);
-    let first_out = orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    let first_out = orch
+        .handle_inbound(
+            first,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     assert!(first_out.text.contains("multi turn"));
 
     let second = test_inbound("second");
-    let second_out = orch.handle_inbound(second, "clawhive-main").await.unwrap();
+    let second_out = orch
+        .handle_inbound(
+            second,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     assert!(second_out.text.contains("multi turn"));
     // Multi-turn sessions are handled by orchestrator internally
 }
@@ -519,11 +559,25 @@ async fn mock_server_includes_session_history() {
 
     // First turn
     let first = test_inbound("hello");
-    let _ = orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    let _ = orch
+        .handle_inbound(
+            first,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
     // Second turn — session history should now include the first turn
     let second = test_inbound("follow up");
-    let _ = orch.handle_inbound(second, "clawhive-main").await.unwrap();
+    let _ = orch
+        .handle_inbound(
+            second,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
     // Verify: the session JSONL should have 4 messages (user+assistant x2)
     // Sessions are written to the agent's workspace directory
@@ -563,7 +617,11 @@ async fn expired_session_keeps_jsonl_history() {
     let key_str = "telegram:tg_main:chat:1:user:1";
 
     let _ = orch
-        .handle_inbound(test_inbound("first turn"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("first turn"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -573,7 +631,11 @@ async fn expired_session_keeps_jsonl_history() {
     memory.upsert_session(record).await.unwrap();
 
     let _ = orch
-        .handle_inbound(test_inbound("second turn"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("second turn"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -633,7 +695,11 @@ async fn mock_server_tool_use_loop() {
     let (orch, _tmp) = make_orchestrator_with_provider(provider, memory, &bus).await;
 
     let out = orch
-        .handle_inbound(test_inbound("search my memory"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("search my memory"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("Here is what I found"));

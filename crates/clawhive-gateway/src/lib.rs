@@ -1,11 +1,13 @@
 use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clawhive_bus::{BusPublisher, EventBus, Topic};
 use clawhive_core::{ApprovalRegistry, Orchestrator, RoutingConfig};
 use clawhive_schema::*;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -99,6 +101,68 @@ pub struct ChannelTarget {
     pub channel_type: String,
     pub connector_id: String,
     pub conversation_scope: String,
+}
+
+struct ActiveTurnGuard {
+    active_turns: Arc<TokioMutex<StdHashMap<String, CancellationToken>>>,
+    session_key: String,
+    timeout_handle: Option<JoinHandle<()>>,
+    cleaned: bool,
+}
+
+impl ActiveTurnGuard {
+    fn new(
+        active_turns: Arc<TokioMutex<StdHashMap<String, CancellationToken>>>,
+        session_key: String,
+        timeout_handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            active_turns,
+            session_key,
+            timeout_handle: Some(timeout_handle),
+            cleaned: false,
+        }
+    }
+
+    async fn cleanup(mut self, gateway: &Gateway) {
+        self.abort_timeout();
+        gateway.unregister_active_turn(&self.session_key).await;
+        self.cleaned = true;
+    }
+
+    fn abort_timeout(&mut self) {
+        if let Some(timeout_handle) = self.timeout_handle.take() {
+            timeout_handle.abort();
+        }
+    }
+}
+
+impl Drop for ActiveTurnGuard {
+    fn drop(&mut self) {
+        self.abort_timeout();
+        if self.cleaned {
+            return;
+        }
+        let active_turns = Arc::clone(&self.active_turns);
+        let session_key = self.session_key.clone();
+        tokio::spawn(async move {
+            let mut active_turns = active_turns.lock().await;
+            active_turns.remove(&session_key);
+        });
+    }
+}
+
+fn spawn_turn_timeout(cancel_token: CancellationToken, turn_timeout_secs: u64) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(turn_timeout_secs)).await;
+        cancel_token.cancel();
+    })
+}
+
+fn agent_turn_timeout_secs(view: &clawhive_core::ConfigView, agent_id: &str) -> Result<u64> {
+    view.agent(agent_id)
+        .map(|agent| agent.turn_lifecycle().turn_timeout_secs)
+        .ok_or_else(|| anyhow!("agent not found: {agent_id}"))
 }
 
 impl Gateway {
@@ -268,8 +332,19 @@ impl Gateway {
         agent_id: &str,
     ) -> Result<OutboundMessage> {
         let view = self.orchestrator.config_view();
-        self.handle_inbound_for_agent_with_view(view, inbound, agent_id)
-            .await
+        let session_key = SessionKey::from_inbound(&inbound).0;
+        let turn_timeout_secs = agent_turn_timeout_secs(view.as_ref(), agent_id)?;
+        let cancel_token = self.register_active_turn(&session_key).await;
+        let guard = ActiveTurnGuard::new(
+            Arc::clone(&self.active_turns),
+            session_key,
+            spawn_turn_timeout(cancel_token.clone(), turn_timeout_secs),
+        );
+        let result = self
+            .handle_inbound_for_agent_with_view(view, inbound, agent_id, cancel_token)
+            .await;
+        guard.cleanup(self).await;
+        result
     }
 
     pub async fn handle_inbound_for_agent_with_view(
@@ -277,6 +352,7 @@ impl Gateway {
         view: Arc<clawhive_core::ConfigView>,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<OutboundMessage> {
         let trace_id = inbound.trace_id;
 
@@ -308,7 +384,7 @@ impl Gateway {
 
         match self
             .orchestrator
-            .handle_with_view(view, inbound, agent_id)
+            .handle_with_view(view, inbound, agent_id, cancel_token)
             .await
         {
             Ok(outbound) => Ok(outbound),
@@ -349,9 +425,21 @@ impl Gateway {
             return Ok(None);
         };
 
-        self.handle_inbound_for_agent_with_view(view, inbound, &agent_id)
+        let session_key = SessionKey::from_inbound(&inbound).0;
+        let turn_timeout_secs = agent_turn_timeout_secs(view.as_ref(), &agent_id)?;
+        let cancel_token = self.register_active_turn(&session_key).await;
+        let guard = ActiveTurnGuard::new(
+            Arc::clone(&self.active_turns),
+            session_key,
+            spawn_turn_timeout(cancel_token.clone(), turn_timeout_secs),
+        );
+
+        let result = self
+            .handle_inbound_for_agent_with_view(view, inbound, &agent_id, cancel_token)
             .await
-            .map(Some)
+            .map(Some);
+        guard.cleanup(self).await;
+        result
     }
 
     pub fn orchestrator(&self) -> &Arc<Orchestrator> {
@@ -585,11 +673,15 @@ async fn handle_scheduled_task(
             let session_key = SessionKey::from_inbound(&inbound).0;
 
             // SystemEvent gets a 10-minute timeout (same default as AgentTurn)
+            let view = gateway.orchestrator.config_view();
+            let cancel_token = CancellationToken::new();
+            let timeout_handle = spawn_turn_timeout(cancel_token.clone(), 600);
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(600),
-                gateway.handle_inbound_for_agent(inbound, &agent_id),
+                Duration::from_secs(600),
+                gateway.handle_inbound_for_agent_with_view(view, inbound, &agent_id, cancel_token),
             )
             .await;
+            timeout_handle.abort();
 
             match result {
                 Ok(Ok(outbound)) => {
@@ -765,11 +857,15 @@ async fn handle_scheduled_task(
             let session_key = SessionKey::from_inbound(&inbound).0;
 
             let effective_timeout = timeout_seconds.clamp(30, 3600);
+            let view = gateway.orchestrator.config_view();
+            let cancel_token = CancellationToken::new();
+            let timeout_handle = spawn_turn_timeout(cancel_token.clone(), effective_timeout);
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(effective_timeout),
-                gateway.handle_inbound_for_agent(inbound, &agent_id),
+                Duration::from_secs(effective_timeout),
+                gateway.handle_inbound_for_agent_with_view(view, inbound, &agent_id, cancel_token),
             )
             .await;
+            timeout_handle.abort();
 
             match result {
                 Ok(Ok(outbound)) => {
@@ -1570,7 +1666,12 @@ mod tests {
         };
 
         let out = gw
-            .handle_inbound_for_agent_with_view(pinned, inbound, "clawhive-main")
+            .handle_inbound_for_agent_with_view(
+                pinned,
+                inbound,
+                "clawhive-main",
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 

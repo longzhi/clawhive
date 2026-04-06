@@ -22,6 +22,7 @@ use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use clawhive_runtime::TaskExecutor;
 use clawhive_schema::*;
 use futures_core::Stream;
+use tokio_util::sync::CancellationToken;
 
 use crate::config_view::ConfigView;
 
@@ -1606,9 +1607,11 @@ impl Orchestrator {
         &self,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<OutboundMessage> {
         let view = self.config_view();
-        self.handle_with_view(view, inbound, agent_id).await
+        self.handle_with_view(view, inbound, agent_id, cancel_token)
+            .await
     }
 
     pub async fn handle_with_view(
@@ -1616,6 +1619,7 @@ impl Orchestrator {
         view: Arc<ConfigView>,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<OutboundMessage> {
         let agent = view
             .agent(agent_id)
@@ -1990,6 +1994,7 @@ impl Orchestrator {
                 must_use_web_search,
                 is_scheduled_task,
                 agent.model_policy.thinking_level,
+                cancel_token,
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
@@ -2141,7 +2146,7 @@ impl Orchestrator {
         agent_id: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>>> {
         let view = self.config_view();
-        self.handle_inbound_stream_with_view(view, inbound, agent_id)
+        self.handle_inbound_stream_with_view(view, inbound, agent_id, CancellationToken::new())
             .await
     }
 
@@ -2150,6 +2155,7 @@ impl Orchestrator {
         view: Arc<ConfigView>,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>>> {
         let agent = view
             .agent(agent_id)
@@ -2370,6 +2376,7 @@ impl Orchestrator {
                 must_use_web_search,
                 false, // is_scheduled_task
                 agent.model_policy.thinking_level,
+                cancel_token,
             )
             .await?;
 
@@ -2472,6 +2479,7 @@ impl Orchestrator {
         must_use_web_search: bool,
         is_scheduled_task: bool,
         thinking_level: Option<clawhive_provider::ThinkingLevel>,
+        _cancel_token: CancellationToken,
     ) -> Result<(
         clawhive_provider::LlmResponse,
         Vec<LlmMessage>,
@@ -3150,6 +3158,7 @@ impl Orchestrator {
                 false, // must_use_web_search
                 false, // is_scheduled_task
                 agent.model_policy.thinking_level,
+                CancellationToken::new(),
             )
             .await?;
 
