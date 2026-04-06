@@ -257,6 +257,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                             }
                             Ok(ClientMessage::Cancel) => {
                                 let Some(trace_id) = last_active_trace_id else {
+                                    tracing::warn!("chat ws: cancel requested but no active trace_id");
                                     let _ = out_tx.send(ServerMessage::Error {
                                         trace_id: None,
                                         message: "No active request to cancel".to_string(),
@@ -264,6 +265,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                     continue;
                                 };
 
+                                tracing::info!(trace_id = %trace_id, "chat ws: publishing CancelTask");
                                 if let Err(error) = state
                                     .bus
                                     .publisher()
