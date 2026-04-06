@@ -58,6 +58,9 @@ fn test_full_agent() -> FullAgentConfig {
         sandbox: None,
         max_response_tokens: None,
         max_iterations: None,
+        turn_timeout_secs: None,
+        typing_ttl_secs: None,
+        progress_delay_secs: None,
     }
 }
 
@@ -158,7 +161,11 @@ fn extract_confirm_token(text: &str) -> String {
 async fn request_install_token(orch: &Orchestrator, source: &std::path::Path) -> String {
     let cmd = format!("/skill install {}", source.display());
     let out = orch
-        .handle_inbound(test_inbound(&cmd), "clawhive-main")
+        .handle_inbound(
+            test_inbound(&cmd),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     extract_confirm_token(&out.text)
@@ -174,6 +181,7 @@ async fn default_policy_allows_any_user_scope_to_install() {
         .handle_inbound(
             test_inbound(&format!("/skill confirm {token}")),
             "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -196,6 +204,7 @@ async fn high_risk_confirm_registers_pending_and_waits_for_human_decision() {
             .handle_inbound(
                 test_inbound(&format!("/skill confirm {token}")),
                 "clawhive-main",
+                tokio_util::sync::CancellationToken::new(),
             )
             .await
     });
@@ -250,6 +259,7 @@ async fn denied_human_approval_blocks_high_risk_install() {
             .handle_inbound(
                 test_inbound(&format!("/skill confirm {token}")),
                 "clawhive-main",
+                tokio_util::sync::CancellationToken::new(),
             )
             .await
     });
@@ -286,6 +296,7 @@ async fn allow_once_human_approval_allows_high_risk_install() {
             .handle_inbound(
                 test_inbound(&format!("/skill confirm {token}")),
                 "clawhive-main",
+                tokio_util::sync::CancellationToken::new(),
             )
             .await
     });

@@ -15,8 +15,10 @@ use serenity::all::{
 };
 use serenity::async_trait;
 use serenity::model::application::CommandDataOptionValue;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
+
+use crate::common::{infer_mime_from_filename, AbortOnDrop, PROGRESS_MESSAGE};
 
 pub struct DiscordAdapter {
     connector_id: String,
@@ -332,14 +334,8 @@ impl EventHandler for DiscordHandler {
         // Extract attachments — download images and supported documents as base64
         for att in &msg.attachments {
             let content_type = att.content_type.as_deref();
-            let is_inline_document = content_type.is_some_and(is_inline_document_content_type);
-            let kind = match content_type {
-                Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
-                Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
-                Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
-                _ if is_inline_document => AttachmentKind::Document,
-                _ => AttachmentKind::Other,
-            };
+            let kind = infer_inbound_attachment_kind(content_type, &att.filename);
+            let mime_type = infer_inbound_attachment_mime_type(content_type, &att.filename);
             // Download images and inline-able documents (text/PDF) so the orchestrator
             // receives bytes instead of a remote URL placeholder.
             let url_or_data = if should_download_inbound_attachment(&kind) {
@@ -356,97 +352,134 @@ impl EventHandler for DiscordHandler {
             inbound.attachments.push(Attachment {
                 kind,
                 url: url_or_data,
-                mime_type: att.content_type.clone(),
+                mime_type,
                 file_name: Some(att.filename.clone()),
                 size: Some(att.size as u64),
             });
         }
 
         let _ = channel_id.broadcast_typing(&ctx.http).await;
+        let lifecycle = self.gateway.resolve_turn_lifecycle(&inbound);
+        let typing_ttl = lifecycle.typing_ttl_secs;
+        let progress_delay = lifecycle.progress_delay_secs;
 
         let gateway = self.gateway.clone();
         let http = ctx.http.clone();
         let http_typing = ctx.http.clone();
         let user_msg_id = msg.id.get().to_string();
         tokio::spawn(async move {
-            // Spawn typing indicator with drop guard — ensures cleanup on panic or timeout
+            let (turn_done_tx, turn_done_rx) = watch::channel(false);
+            let main_handle = tokio::spawn({
+                let turn_done_tx = turn_done_tx.clone();
+                async move {
+                    let result = gateway.handle_inbound(inbound).await;
+                    let _ = turn_done_tx.send(true);
+                    result
+                }
+            });
             let _typing_guard = AbortOnDrop(tokio::spawn({
                 let http = http_typing.clone();
+                let mut turn_done_rx = turn_done_rx.clone();
                 async move {
+                    let deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(typing_ttl);
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                        if channel_id.broadcast_typing(&http).await.is_err() {
+                        if tokio::time::Instant::now() >= deadline {
                             break;
+                        }
+                        let wait = std::time::Duration::from_secs(8)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                        tokio::select! {
+                            _ = tokio::time::sleep(wait) => {
+                                if channel_id.broadcast_typing(&http).await.is_err() {
+                                    break;
+                                }
+                            }
+                            changed = turn_done_rx.changed() => {
+                                if changed.is_err() || *turn_done_rx.borrow() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             }));
-
-            // 5-minute timeout to prevent typing indicator from running forever
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                gateway.handle_inbound(inbound),
-            )
-            .await;
-
-            // _typing_guard dropped here (or on panic), aborting the typing loop
-
-            match result {
-                Ok(Ok(Some(outbound))) => {
-                    let has_attachments = !outbound.attachments.is_empty();
-                    let has_text = !outbound.text.trim().is_empty();
-
-                    if has_text && has_attachments && outbound.text.len() <= DISCORD_MAX_LEN {
-                        if let Err(err) = send_attachments(
-                            channel_id,
-                            &http,
-                            &outbound.attachments,
-                            Some(outbound.text.as_str()),
-                        )
-                        .await
-                        {
-                            tracing::error!("failed to send discord attachments: {err}");
-                        }
-                    } else {
-                        if has_text {
-                            let reply = outbound.text.as_str();
-                            let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
-                            if let Err(err) =
-                                send_chunked(channel_id, &http, reply, Some(reply_to)).await
-                            {
-                                tracing::error!("failed to send discord reply: {err}");
+            let _progress_handle = (progress_delay > 0).then(|| {
+                tokio::spawn({
+                    let http = http.clone();
+                    let mut turn_done_rx = turn_done_rx.clone();
+                    async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                                if !*turn_done_rx.borrow() {
+                                    if let Err(err) = channel_id.say(&http, PROGRESS_MESSAGE).await {
+                                        tracing::warn!("failed to send discord progress message: {err}");
+                                    }
+                                }
                             }
-                        } else if !has_attachments {
-                            let reply = "Sorry, I got an empty response. Please try again.";
-                            if let Err(err) = send_chunked(channel_id, &http, reply, None).await {
-                                tracing::error!("failed to send discord reply: {err}");
+                            changed = turn_done_rx.changed() => {
+                                let _ = changed;
                             }
                         }
+                    }
+                })
+            });
 
-                        if has_attachments {
-                            if let Err(err) =
-                                send_attachments(channel_id, &http, &outbound.attachments, None)
-                                    .await
+            match main_handle.await {
+                Ok(result) => match result {
+                    Ok(Some(outbound)) => {
+                        let has_attachments = !outbound.attachments.is_empty();
+                        let has_text = !outbound.text.trim().is_empty();
+
+                        if has_text && has_attachments && outbound.text.len() <= DISCORD_MAX_LEN {
+                            if let Err(err) = send_attachments(
+                                channel_id,
+                                &http,
+                                &outbound.attachments,
+                                Some(outbound.text.as_str()),
+                            )
+                            .await
                             {
                                 tracing::error!("failed to send discord attachments: {err}");
                             }
+                        } else {
+                            if has_text {
+                                let reply = outbound.text.as_str();
+                                let reply_to = outbound.reply_to.as_deref().unwrap_or(&user_msg_id);
+                                if let Err(err) =
+                                    send_chunked(channel_id, &http, reply, Some(reply_to)).await
+                                {
+                                    tracing::error!("failed to send discord reply: {err}");
+                                }
+                            } else if !has_attachments {
+                                let reply = "Sorry, I got an empty response. Please try again.";
+                                if let Err(err) = send_chunked(channel_id, &http, reply, None).await
+                                {
+                                    tracing::error!("failed to send discord reply: {err}");
+                                }
+                            }
+
+                            if has_attachments {
+                                if let Err(err) =
+                                    send_attachments(channel_id, &http, &outbound.attachments, None)
+                                        .await
+                                {
+                                    tracing::error!("failed to send discord attachments: {err}");
+                                }
+                            }
                         }
                     }
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(err)) => {
-                    tracing::error!("discord gateway error: {err}");
-                    let user_msg = format!("Error: {err}");
-                    if let Err(send_err) = channel_id.say(&http, &user_msg).await {
-                        tracing::error!("failed to send discord error message: {send_err}");
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::error!("discord gateway error: {err}");
+                        let user_msg = format!("Error: {err}");
+                        if let Err(send_err) = channel_id.say(&http, &user_msg).await {
+                            tracing::error!("failed to send discord error message: {send_err}");
+                        }
                     }
-                }
-                Err(_timeout) => {
-                    tracing::error!("discord handle_inbound timed out after 300s");
-                    let user_msg = "⏱️ Sorry, the request timed out. Please try again.";
-                    if let Err(send_err) = channel_id.say(&http, user_msg).await {
-                        tracing::error!("failed to send discord timeout message: {send_err}");
-                    }
+                },
+                Err(err) => {
+                    tracing::error!("discord inbound task join error: {err}");
                 }
             }
         });
@@ -653,16 +686,6 @@ fn split_message(text: &str) -> Vec<&str> {
         rest = &rest[split_at..];
     }
     chunks
-}
-
-/// Drop guard that aborts a spawned task when dropped.
-/// Ensures typing indicator loops are cleaned up on panic, timeout, or normal exit.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// Send a potentially long message as multiple chunks.
@@ -989,6 +1012,29 @@ fn is_inline_document_content_type(ct: &str) -> bool {
     is_text_content_type(ct) || ct == "application/pdf"
 }
 
+fn infer_inbound_attachment_kind(content_type: Option<&str>, file_name: &str) -> AttachmentKind {
+    let inferred_mime = content_type
+        .map(str::to_owned)
+        .or_else(|| infer_mime_from_filename(Some(file_name)));
+
+    match inferred_mime.as_deref() {
+        Some(ct) if ct.starts_with("image/") => AttachmentKind::Image,
+        Some(ct) if ct.starts_with("video/") => AttachmentKind::Video,
+        Some(ct) if ct.starts_with("audio/") => AttachmentKind::Audio,
+        Some(ct) if is_inline_document_content_type(ct) => AttachmentKind::Document,
+        _ => AttachmentKind::Other,
+    }
+}
+
+fn infer_inbound_attachment_mime_type(
+    content_type: Option<&str>,
+    file_name: &str,
+) -> Option<String> {
+    content_type
+        .map(ToOwned::to_owned)
+        .or_else(|| infer_mime_from_filename(Some(file_name)))
+}
+
 fn should_download_inbound_attachment(kind: &AttachmentKind) -> bool {
     matches!(kind, AttachmentKind::Image | AttachmentKind::Document)
 }
@@ -1295,6 +1341,30 @@ mod tests {
         assert!(!is_inline_document_content_type(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         ));
+    }
+
+    #[test]
+    fn infer_inbound_attachment_recovers_pdf_without_content_type() {
+        assert_eq!(
+            infer_inbound_attachment_kind(None, "TA Dated 20 August 2024_20240820_0001.pdf"),
+            AttachmentKind::Document
+        );
+        assert_eq!(
+            infer_inbound_attachment_mime_type(None, "TA Dated 20 August 2024_20240820_0001.pdf"),
+            Some("application/pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_inbound_attachment_recovers_text_without_content_type() {
+        assert_eq!(
+            infer_inbound_attachment_kind(None, "notes.txt"),
+            AttachmentKind::Document
+        );
+        assert_eq!(
+            infer_inbound_attachment_mime_type(None, "notes.txt"),
+            Some("text/plain".to_string())
+        );
     }
 
     #[test]

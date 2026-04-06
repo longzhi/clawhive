@@ -1,17 +1,21 @@
 use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clawhive_bus::{BusPublisher, EventBus, Topic};
 use clawhive_core::{ApprovalRegistry, Orchestrator, RoutingConfig};
 use clawhive_schema::*;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub mod reload;
 pub mod supervisor;
 pub mod webhook;
 
+pub use clawhive_core::TurnLifecycleConfig;
 pub use reload::*;
 
 #[derive(Debug, Clone)]
@@ -87,8 +91,16 @@ pub struct Gateway {
     bus: BusPublisher,
     rate_limiter: RateLimiter,
     approval_registry: Option<Arc<ApprovalRegistry>>,
+    active_turns: Arc<TokioMutex<StdHashMap<String, ActiveTurn>>>,
+    turn_id_counter: std::sync::atomic::AtomicU64,
     /// Tracks the last active channel per agent for heartbeat delivery.
     last_active_channels: Arc<TokioMutex<StdHashMap<String, ChannelTarget>>>,
+}
+
+#[derive(Clone)]
+struct ActiveTurn {
+    turn_id: u64,
+    token: CancellationToken,
 }
 
 /// Channel target info for delivering messages.
@@ -97,6 +109,89 @@ pub struct ChannelTarget {
     pub channel_type: String,
     pub connector_id: String,
     pub conversation_scope: String,
+}
+
+struct ActiveTurnGuard {
+    active_turns: Arc<TokioMutex<StdHashMap<String, ActiveTurn>>>,
+    session_key: String,
+    turn_id: u64,
+    timeout_handle: Option<JoinHandle<()>>,
+    cleaned: bool,
+}
+
+impl ActiveTurnGuard {
+    fn new(
+        active_turns: Arc<TokioMutex<StdHashMap<String, ActiveTurn>>>,
+        session_key: String,
+        turn_id: u64,
+        timeout_handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            active_turns,
+            session_key,
+            turn_id,
+            timeout_handle: Some(timeout_handle),
+            cleaned: false,
+        }
+    }
+
+    async fn cleanup(mut self, gateway: &Gateway) {
+        self.abort_timeout();
+        gateway
+            .unregister_active_turn(&self.session_key, self.turn_id)
+            .await;
+        self.cleaned = true;
+    }
+
+    fn abort_timeout(&mut self) {
+        if let Some(timeout_handle) = self.timeout_handle.take() {
+            timeout_handle.abort();
+        }
+    }
+}
+
+impl Drop for ActiveTurnGuard {
+    fn drop(&mut self) {
+        self.abort_timeout();
+        if self.cleaned {
+            return;
+        }
+        let active_turns = Arc::clone(&self.active_turns);
+        let session_key = self.session_key.clone();
+        let turn_id = self.turn_id;
+        tokio::spawn(async move {
+            let mut active_turns = active_turns.lock().await;
+            if let Some(entry) = active_turns.get(&session_key) {
+                if entry.turn_id == turn_id {
+                    active_turns.remove(&session_key);
+                }
+            }
+        });
+    }
+}
+
+fn spawn_turn_timeout(cancel_token: CancellationToken, turn_timeout_secs: u64) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(turn_timeout_secs)).await;
+        cancel_token.cancel();
+    })
+}
+
+fn agent_turn_lifecycle(
+    view: &clawhive_core::ConfigView,
+    agent_id: &str,
+) -> Result<TurnLifecycleConfig> {
+    view.agent(agent_id)
+        .map(|agent| agent.turn_lifecycle())
+        .ok_or_else(|| anyhow!("agent not found: {agent_id}"))
+}
+
+fn fallback_turn_lifecycle() -> TurnLifecycleConfig {
+    TurnLifecycleConfig {
+        turn_timeout_secs: 1800,
+        typing_ttl_secs: 120,
+        progress_delay_secs: 60,
+    }
 }
 
 impl Gateway {
@@ -111,7 +206,34 @@ impl Gateway {
             bus,
             rate_limiter,
             approval_registry,
+            active_turns: Arc::new(TokioMutex::new(StdHashMap::new())),
+            turn_id_counter: std::sync::atomic::AtomicU64::new(0),
             last_active_channels: Arc::new(TokioMutex::new(StdHashMap::new())),
+        }
+    }
+
+    pub async fn register_active_turn(&self, session_key: &str) -> (CancellationToken, u64) {
+        let token = CancellationToken::new();
+        let turn_id = self
+            .turn_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut active_turns = self.active_turns.lock().await;
+        active_turns.insert(
+            session_key.to_string(),
+            ActiveTurn {
+                turn_id,
+                token: token.clone(),
+            },
+        );
+        (token, turn_id)
+    }
+
+    pub async fn unregister_active_turn(&self, session_key: &str, turn_id: u64) {
+        let mut active_turns = self.active_turns.lock().await;
+        if let Some(entry) = active_turns.get(session_key) {
+            if entry.turn_id == turn_id {
+                active_turns.remove(session_key);
+            }
         }
     }
 
@@ -179,9 +301,47 @@ impl Gateway {
         }
     }
 
+    async fn try_handle_stop(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
+        if !inbound.text.trim().eq_ignore_ascii_case("/stop") {
+            return None;
+        }
+
+        let make_reply = |text: &str| OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type.clone(),
+            connector_id: inbound.connector_id.clone(),
+            conversation_scope: inbound.conversation_scope.clone(),
+            text: text.to_string(),
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        };
+
+        let session_key = SessionKey::from_inbound(inbound);
+        let token = {
+            let active_turns = self.active_turns.lock().await;
+            active_turns.get(&session_key.0).map(|t| t.token.clone())
+        };
+
+        Some(match token {
+            Some(token) => {
+                token.cancel();
+                make_reply("⏹️ Task stopped.")
+            }
+            None => make_reply("No active task to stop."),
+        })
+    }
+
     pub fn resolve_agent(&self, inbound: &InboundMessage) -> Option<String> {
         let view = self.orchestrator.config_view();
         Self::resolve_agent_from_routing(&view.routing, inbound)
+    }
+
+    pub fn resolve_turn_lifecycle(&self, inbound: &InboundMessage) -> TurnLifecycleConfig {
+        let view = self.orchestrator.config_view();
+        Self::resolve_agent_from_routing(&view.routing, inbound)
+            .and_then(|agent_id| view.agent(&agent_id).map(|agent| agent.turn_lifecycle()))
+            .unwrap_or_else(fallback_turn_lifecycle)
     }
 
     fn resolve_agent_from_routing(
@@ -222,8 +382,20 @@ impl Gateway {
         agent_id: &str,
     ) -> Result<OutboundMessage> {
         let view = self.orchestrator.config_view();
-        self.handle_inbound_for_agent_with_view(view, inbound, agent_id)
-            .await
+        let session_key = SessionKey::from_inbound(&inbound).0;
+        let turn_timeout_secs = agent_turn_lifecycle(view.as_ref(), agent_id)?.turn_timeout_secs;
+        let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
+        let guard = ActiveTurnGuard::new(
+            Arc::clone(&self.active_turns),
+            session_key,
+            turn_id,
+            spawn_turn_timeout(cancel_token.clone(), turn_timeout_secs),
+        );
+        let result = self
+            .handle_inbound_for_agent_with_view(view, inbound, agent_id, cancel_token)
+            .await;
+        guard.cleanup(self).await;
+        result
     }
 
     pub async fn handle_inbound_for_agent_with_view(
@@ -231,6 +403,7 @@ impl Gateway {
         view: Arc<clawhive_core::ConfigView>,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<OutboundMessage> {
         let trace_id = inbound.trace_id;
 
@@ -262,7 +435,7 @@ impl Gateway {
 
         match self
             .orchestrator
-            .handle_with_view(view, inbound, agent_id)
+            .handle_with_view(view, inbound, agent_id, cancel_token)
             .await
         {
             Ok(outbound) => Ok(outbound),
@@ -284,6 +457,10 @@ impl Gateway {
             return Ok(Some(approval_response));
         }
 
+        if let Some(stop_response) = self.try_handle_stop(&inbound).await {
+            return Ok(Some(stop_response));
+        }
+
         if !self.rate_limiter.check(&inbound.user_scope).await {
             return Err(anyhow::anyhow!("rate limited: too many requests"));
         }
@@ -299,9 +476,22 @@ impl Gateway {
             return Ok(None);
         };
 
-        self.handle_inbound_for_agent_with_view(view, inbound, &agent_id)
+        let session_key = SessionKey::from_inbound(&inbound).0;
+        let turn_timeout_secs = agent_turn_lifecycle(view.as_ref(), &agent_id)?.turn_timeout_secs;
+        let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
+        let guard = ActiveTurnGuard::new(
+            Arc::clone(&self.active_turns),
+            session_key,
+            turn_id,
+            spawn_turn_timeout(cancel_token.clone(), turn_timeout_secs),
+        );
+
+        let result = self
+            .handle_inbound_for_agent_with_view(view, inbound, &agent_id, cancel_token)
             .await
-            .map(Some)
+            .map(Some);
+        guard.cleanup(self).await;
+        result
     }
 
     pub fn orchestrator(&self) -> &Arc<Orchestrator> {
@@ -535,11 +725,15 @@ async fn handle_scheduled_task(
             let session_key = SessionKey::from_inbound(&inbound).0;
 
             // SystemEvent gets a 10-minute timeout (same default as AgentTurn)
+            let view = gateway.orchestrator.config_view();
+            let cancel_token = CancellationToken::new();
+            let timeout_handle = spawn_turn_timeout(cancel_token.clone(), 600);
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(600),
-                gateway.handle_inbound_for_agent(inbound, &agent_id),
+                Duration::from_secs(600),
+                gateway.handle_inbound_for_agent_with_view(view, inbound, &agent_id, cancel_token),
             )
             .await;
+            timeout_handle.abort();
 
             match result {
                 Ok(Ok(outbound)) => {
@@ -715,11 +909,15 @@ async fn handle_scheduled_task(
             let session_key = SessionKey::from_inbound(&inbound).0;
 
             let effective_timeout = timeout_seconds.clamp(30, 3600);
+            let view = gateway.orchestrator.config_view();
+            let cancel_token = CancellationToken::new();
+            let timeout_handle = spawn_turn_timeout(cancel_token.clone(), effective_timeout);
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(effective_timeout),
-                gateway.handle_inbound_for_agent(inbound, &agent_id),
+                Duration::from_secs(effective_timeout),
+                gateway.handle_inbound_for_agent_with_view(view, inbound, &agent_id, cancel_token),
             )
             .await;
+            timeout_handle.abort();
 
             match result {
                 Ok(Ok(outbound)) => {
@@ -1127,6 +1325,7 @@ mod tests {
     use clawhive_runtime::NativeExecutor;
     use clawhive_scheduler::ScheduleManager;
     use clawhive_schema::{ApprovalDecision, BusMessage, InboundMessage};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -1167,6 +1366,39 @@ mod tests {
             None,
             Some(routing),
         ));
+    }
+
+    fn apply_test_agents(gateway: &Gateway, mutate: impl FnOnce(&mut Vec<FullAgentConfig>)) {
+        let current = gateway.orchestrator().config_view();
+        let mut agents = current
+            .agents
+            .values()
+            .map(|agent| agent.as_ref().clone())
+            .collect::<Vec<_>>();
+        mutate(&mut agents);
+        gateway.orchestrator().apply_config_view(clone_test_view(
+            current.as_ref(),
+            Some(agents),
+            None,
+        ));
+    }
+
+    fn make_test_inbound(text: &str) -> InboundMessage {
+        InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:stop".into(),
+            user_scope: "user:stop".into(),
+            text: text.into(),
+            at: chrono::Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+            message_id: None,
+            attachments: vec![],
+            message_source: None,
+        }
     }
 
     async fn make_gateway() -> (Gateway, tempfile::TempDir) {
@@ -1213,6 +1445,9 @@ mod tests {
             sandbox: None,
             max_response_tokens: None,
             max_iterations: None,
+            turn_timeout_secs: None,
+            typing_ttl_secs: None,
+            progress_delay_secs: None,
         }];
         let personas = HashMap::new();
         let tool_registry = build_tool_registry(
@@ -1310,6 +1545,9 @@ mod tests {
             sandbox: None,
             max_response_tokens: None,
             max_iterations: None,
+            turn_timeout_secs: None,
+            typing_ttl_secs: None,
+            progress_delay_secs: None,
         }];
         let personas = HashMap::new();
         let tool_registry = build_tool_registry(
@@ -1465,6 +1703,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_turn_lifecycle_returns_resolved_agent_lifecycle() {
+        let (gw, _tmp) = make_gateway().await;
+        add_catch_all_binding(&gw);
+        apply_test_agents(&gw, |agents| {
+            let agent = agents
+                .iter_mut()
+                .find(|agent| agent.agent_id == "clawhive-main")
+                .expect("test agent should exist");
+            agent.turn_timeout_secs = Some(120);
+            agent.typing_ttl_secs = Some(17);
+            agent.progress_delay_secs = Some(0);
+        });
+
+        let lifecycle = gw.resolve_turn_lifecycle(&make_test_inbound("ping"));
+
+        assert_eq!(lifecycle.turn_timeout_secs, 120);
+        assert_eq!(lifecycle.typing_ttl_secs, 17);
+        assert_eq!(lifecycle.progress_delay_secs, 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_turn_lifecycle_falls_back_when_routing_does_not_match() {
+        let (gw, _tmp) = make_gateway().await;
+
+        let lifecycle = gw.resolve_turn_lifecycle(&make_test_inbound("ping"));
+
+        assert_eq!(lifecycle.turn_timeout_secs, 1800);
+        assert_eq!(lifecycle.typing_ttl_secs, 120);
+        assert_eq!(lifecycle.progress_delay_secs, 60);
+    }
+
+    #[tokio::test]
     async fn handle_inbound_for_agent_with_view_uses_pinned_snapshot() {
         let (gw, _tmp) = make_gateway().await;
         let pinned = gw.orchestrator().config_view();
@@ -1495,7 +1765,12 @@ mod tests {
         };
 
         let out = gw
-            .handle_inbound_for_agent_with_view(pinned, inbound, "clawhive-main")
+            .handle_inbound_for_agent_with_view(
+                pinned,
+                inbound,
+                "clawhive-main",
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -1825,6 +2100,124 @@ mod tests {
             .unwrap()
             .expect("expected routing match");
         assert!(out.text.contains("Usage: /approve"));
+    }
+
+    #[tokio::test]
+    async fn stop_command_cancels_active_turn() {
+        let (gw, _tmp) = make_gateway().await;
+        let inbound = make_test_inbound("/stop");
+        let session_key = SessionKey::from_inbound(&inbound);
+        let (token, _turn_id) = gw.register_active_turn(&session_key.0).await;
+
+        let out = gw
+            .handle_inbound(inbound)
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(token.is_cancelled());
+        assert!(out.text.contains("Task stopped"));
+    }
+
+    #[tokio::test]
+    async fn stop_command_without_active_turn_returns_hint() {
+        let (gw, _tmp) = make_gateway().await;
+
+        let out = gw
+            .handle_inbound(make_test_inbound("/stop"))
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(out.text.contains("No active task"));
+    }
+
+    #[tokio::test]
+    async fn stop_command_is_case_insensitive() {
+        let (gw, _tmp) = make_gateway().await;
+        let uppercase = make_test_inbound("/STOP");
+        let uppercase_session = SessionKey::from_inbound(&uppercase);
+        let (uppercase_token, _) = gw.register_active_turn(&uppercase_session.0).await;
+
+        let uppercase_out = gw
+            .handle_inbound(uppercase)
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(uppercase_token.is_cancelled());
+        assert!(uppercase_out.text.contains("Task stopped"));
+
+        let mixed = make_test_inbound(" /Stop ");
+        let mixed_session = SessionKey::from_inbound(&mixed);
+        let (mixed_token, _) = gw.register_active_turn(&mixed_session.0).await;
+
+        let mixed_out = gw
+            .handle_inbound(mixed)
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(mixed_token.is_cancelled());
+        assert!(mixed_out.text.contains("Task stopped"));
+    }
+
+    #[tokio::test]
+    async fn unregister_active_turn_removes_registered_token() {
+        let (gw, _tmp) = make_gateway().await;
+        let session_key = SessionKey::from_inbound(&make_test_inbound("ping"));
+        let (_token, turn_id) = gw.register_active_turn(&session_key.0).await;
+
+        gw.unregister_active_turn(&session_key.0, turn_id).await;
+
+        let out = gw
+            .handle_inbound(make_test_inbound("/stop"))
+            .await
+            .unwrap()
+            .expect("expected stop response");
+
+        assert!(out.text.contains("No active task"));
+    }
+
+    #[tokio::test]
+    async fn turn_lifecycle_second_stop_after_same_session_completion_is_noop() {
+        let (gw, _tmp) = make_gateway().await;
+        let inbound = make_test_inbound("/stop");
+        let session_key = SessionKey::from_inbound(&inbound);
+        let (token, turn_id) = gw.register_active_turn(&session_key.0).await;
+
+        let first_stop = gw
+            .handle_inbound(inbound)
+            .await
+            .unwrap()
+            .expect("expected first stop response");
+        assert!(first_stop.text.contains("Task stopped"));
+        assert!(token.is_cancelled());
+
+        gw.unregister_active_turn(&session_key.0, turn_id).await;
+
+        let second_stop = gw
+            .handle_inbound(make_test_inbound("/stop"))
+            .await
+            .unwrap()
+            .expect("expected second stop response");
+        assert!(second_stop.text.contains("No active task"));
+        assert!(gw.active_turns.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_lifecycle_cleans_up_active_turn_after_normal_completion() {
+        let (gw, _tmp) = make_gateway().await;
+        add_catch_all_binding(&gw);
+
+        let outbound = gw
+            .handle_inbound(make_test_inbound("normal completion"))
+            .await
+            .unwrap()
+            .expect("expected routed response");
+
+        assert!(outbound.text.contains("stub:anthropic:claude-sonnet-4-5"));
+        assert!(gw.active_turns.lock().await.is_empty());
     }
 
     #[test]

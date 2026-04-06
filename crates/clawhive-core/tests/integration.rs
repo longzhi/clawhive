@@ -377,6 +377,9 @@ fn test_full_agent(agent_id: &str, primary: &str, fallbacks: Vec<&str>) -> FullA
         sandbox: None,
         max_response_tokens: None,
         max_iterations: None,
+        turn_timeout_secs: None,
+        typing_ttl_secs: None,
+        progress_delay_secs: None,
     }
 }
 
@@ -544,7 +547,11 @@ async fn orchestrator_uses_search_index_for_memory_context() {
     .build();
 
     let out = orch
-        .handle_inbound(test_inbound("cobalt architecture"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("cobalt architecture"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("## Relevant Memory"));
@@ -632,7 +639,11 @@ async fn orchestrator_injects_active_facts_into_memory_context() {
     .build();
 
     let out = orch
-        .handle_inbound(test_inbound("what do you know about me?"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("what do you know about me?"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -713,7 +724,11 @@ async fn orchestrator_prefers_long_term_memory_and_can_drop_session_noise_in_pro
     .build();
 
     let out = orch
-        .handle_inbound(test_inbound("cobalt architecture"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("cobalt architecture"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(
@@ -815,7 +830,11 @@ async fn orchestrator_dedupes_matching_fact_and_memory_chunk_in_prompt_context()
     .build();
 
     let out = orch
-        .handle_inbound(test_inbound("Chinese replies"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("Chinese replies"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -912,7 +931,11 @@ async fn orchestrator_does_not_inject_irrelevant_facts_when_memory_hits_exist() 
     .build();
 
     let out = orch
-        .handle_inbound(test_inbound("cobalt architecture"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("cobalt architecture"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -1007,7 +1030,11 @@ async fn orchestrator_keeps_file_fallback_when_facts_exist_but_search_misses() {
     .build();
 
     let out = orch
-        .handle_inbound(test_inbound("cobalt architecture"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("cobalt architecture"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -1085,15 +1112,27 @@ async fn fallback_summary_appends_for_multiple_expired_sessions_on_same_day() {
     .search_index(search_index)
     .build();
 
-    orch.handle_inbound(test_inbound("first turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("third turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("first turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("third turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     wait_until(Duration::from_secs(3), || {
         let file_store = file_store.clone();
@@ -1185,7 +1224,13 @@ async fn fallback_summary_links_session_chunk_to_daily_canonical() {
 
     let first = test_inbound("first turn");
     let session_key = SessionKey::from_inbound(&first);
-    orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        first,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let old_session = memory
         .get_session(&session_key.0)
         .await
@@ -1205,9 +1250,13 @@ async fn fallback_summary_links_session_chunk_to_daily_canonical() {
             .unwrap()
     };
     assert!(!chunk_ids.is_empty());
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let canonical_id = clawhive_memory::memory_lineage::generate_canonical_id_with_key(
         "clawhive-main",
@@ -1320,12 +1369,20 @@ async fn fallback_summary_routes_fact_candidates_into_facts_and_memory_candidate
     .search_index(search_index)
     .build();
 
-    orch.handle_inbound(test_inbound("first turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("first turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     wait_until(Duration::from_secs(3), || {
         let file_store = file_store.clone();
@@ -1453,12 +1510,20 @@ async fn fallback_summary_suppresses_content_already_explicitly_remembered() {
     .search_index(search_index)
     .build();
 
-    orch.handle_inbound(test_inbound("first turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("first turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     wait_until(Duration::from_secs(3), || {
         let file_store = file_store.clone();
@@ -1551,15 +1616,27 @@ async fn fallback_summary_suppresses_rewritten_memory_candidate_with_same_duplic
     .search_index(search_index)
     .build();
 
-    orch.handle_inbound(test_inbound("first turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("third turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("first turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("third turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     wait_until(Duration::from_secs(3), || {
         let file_store = file_store.clone();
@@ -1645,9 +1722,13 @@ async fn explicit_reset_flushes_before_clearing_previous_session() {
     .build();
 
     let initial = test_inbound("before reset");
-    orch.handle_inbound(initial.clone(), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        initial.clone(),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let session_key = SessionKey::from_inbound(&initial);
     let previous_session = memory
@@ -1658,7 +1739,11 @@ async fn explicit_reset_flushes_before_clearing_previous_session() {
     let previous_session_id = previous_session.session_id.clone();
 
     let reset_out = orch
-        .handle_inbound(test_inbound("/reset"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("/reset"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(!reset_out.text.is_empty());
@@ -1753,7 +1838,13 @@ async fn stale_reset_boundary_flush_runs_async_and_marks_pending_flush() {
 
     let first = test_inbound("first turn");
     let session_key = SessionKey::from_inbound(&first);
-    orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        first,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let old_session = memory
         .get_session(&session_key.0)
         .await
@@ -1763,9 +1854,13 @@ async fn stale_reset_boundary_flush_runs_async_and_marks_pending_flush() {
     let reader = SessionReader::new(tmp.path());
 
     let started = Instant::now();
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_millis(250),
@@ -1922,7 +2017,11 @@ async fn pending_boundary_flush_recovers_after_restart_on_next_inbound() {
         .unwrap();
 
     let out = orch
-        .handle_inbound(test_inbound("second turn after restart"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("second turn after restart"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("second turn after restart"));
@@ -2016,7 +2115,13 @@ async fn daily_reset_flushes_pending_memory_candidates() {
 
     let first = test_inbound("first turn");
     let session_key = SessionKey::from_inbound(&first);
-    orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        first,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let mut old_session = memory
         .get_session(&session_key.0)
@@ -2027,9 +2132,13 @@ async fn daily_reset_flushes_pending_memory_candidates() {
     memory.upsert_session(old_session.clone()).await.unwrap();
     let old_session_id = old_session.session_id.clone();
 
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let new_session = memory
         .get_session(&session_key.0)
@@ -2126,7 +2235,13 @@ async fn episode_closure_does_not_flush_before_session_end() {
 
     let first = test_inbound("How do I use Rust Vec push?");
     let session_key = SessionKey::from_inbound(&first);
-    orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        first,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let session = memory
         .get_session(&session_key.0)
@@ -2138,6 +2253,7 @@ async fn episode_closure_does_not_flush_before_session_end() {
     orch.handle_inbound(
         test_inbound("How do I inspect RunPod GPU usage?"),
         "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -2236,7 +2352,13 @@ async fn episode_closure_respects_explicit_memory_precheck_for_fact_candidates()
 
     let first = test_inbound("Please remember that I prefer Chinese replies.");
     let session_key = SessionKey::from_inbound(&first);
-    orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        first,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let session = memory
         .get_session(&session_key.0)
         .await
@@ -2272,6 +2394,7 @@ async fn episode_closure_respects_explicit_memory_precheck_for_fact_candidates()
     orch.handle_inbound(
         test_inbound("What about RunPod GPU status?"),
         "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -2364,7 +2487,13 @@ async fn incomplete_closed_episode_defers_write_until_session_boundary_flush() {
 
     let first = test_inbound("请整理 memory 重构方案");
     let session_key = SessionKey::from_inbound(&first);
-    orch.handle_inbound(first, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        first,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let session = memory
         .get_session(&session_key.0)
         .await
@@ -2372,9 +2501,13 @@ async fn incomplete_closed_episode_defers_write_until_session_boundary_flush() {
         .expect("session exists after first inbound");
     let session_id = session.session_id.clone();
 
-    orch.handle_inbound(test_inbound("顺便看一下 RunPod GPU"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("顺便看一下 RunPod GPU"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(400)).await;
     let daily_before_reset = file_store
@@ -2395,9 +2528,13 @@ async fn incomplete_closed_episode_defers_write_until_session_boundary_flush() {
     old_session.last_active = chrono::Utc::now() - chrono::Duration::days(2);
     memory.upsert_session(old_session.clone()).await.unwrap();
 
-    orch.handle_inbound(test_inbound("新的一天继续"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("新的一天继续"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     wait_until(Duration::from_secs(3), || {
         let file_store = file_store.clone();
@@ -2486,7 +2623,13 @@ async fn raw_session_is_indexed_into_chunks_after_inbound() {
 
     let inbound = test_inbound("How do I use Rust Vec push?");
     let session_key = SessionKey::from_inbound(&inbound);
-    orch.handle_inbound(inbound, "clawhive-main").await.unwrap();
+    orch.handle_inbound(
+        inbound,
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     let session = memory
         .get_session(&session_key.0)
@@ -2579,12 +2722,20 @@ async fn boundary_flush_writes_daily_but_not_long_term_or_facts_before_consolida
     .search_index(search_index)
     .build();
 
-    orch.handle_inbound(test_inbound("first turn"), "clawhive-main")
-        .await
-        .unwrap();
-    orch.handle_inbound(test_inbound("second turn"), "clawhive-main")
-        .await
-        .unwrap();
+    orch.handle_inbound(
+        test_inbound("first turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    orch.handle_inbound(
+        test_inbound("second turn"),
+        "clawhive-main",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 
     wait_until(Duration::from_secs(3), || {
         let file_store = file_store.clone();
@@ -2627,7 +2778,11 @@ async fn disabled_agents_are_not_available_to_the_orchestrator() {
 
     let (orch, _tmp) = make_orchestrator(registry, aliases, vec![agent]).await;
     let err = orch
-        .handle_inbound(test_inbound("hello"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("hello"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect_err("disabled agents should not be available");
 
@@ -2699,7 +2854,11 @@ async fn orchestrator_handles_inbound_to_outbound() {
     let (orch, _tmp) = make_orchestrator(registry, aliases, agents).await;
 
     let out = orch
-        .handle_inbound(test_inbound("hello"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("hello"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
@@ -2715,7 +2874,11 @@ async fn tool_use_loop_returns_directly_without_tool_calls() {
     let (orch, _tmp) = make_orchestrator(registry, aliases, agents).await;
 
     let out = orch
-        .handle_inbound(test_inbound("loop"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("loop"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("[think] still processing"));
@@ -2733,7 +2896,11 @@ async fn orchestrator_new_with_full_deps() {
     let (orch, _tmp) = make_orchestrator(registry, aliases, agents).await;
 
     let out = orch
-        .handle_inbound(test_inbound("hello"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("hello"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(out.text.contains("stub:anthropic:claude-sonnet-4-5"));
@@ -2788,7 +2955,14 @@ async fn orchestrator_creates_session() {
 
     let inbound = test_inbound("hello");
     let key = SessionKey::from_inbound(&inbound);
-    let _ = orch.handle_inbound(inbound, "clawhive-main").await.unwrap();
+    let _ = orch
+        .handle_inbound(
+            inbound,
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
     let session = memory.get_session(&key.0).await.unwrap();
     assert!(session.is_some());
@@ -2818,7 +2992,11 @@ async fn orchestrator_unknown_agent_returns_error() {
     let (orch, _tmp) = make_orchestrator(registry, aliases, agents).await;
 
     let err = orch
-        .handle_inbound(test_inbound("hello"), "nonexistent-agent")
+        .handle_inbound(
+            test_inbound("hello"),
+            "nonexistent-agent",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("agent not found"));
@@ -2873,7 +3051,11 @@ async fn orchestrator_publishes_reply_ready() {
     .build();
 
     let _ = orch
-        .handle_inbound(test_inbound("hello"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("hello"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 

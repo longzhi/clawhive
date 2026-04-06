@@ -56,6 +56,9 @@ fn test_full_agent() -> FullAgentConfig {
         sandbox: None,
         max_response_tokens: None,
         max_iterations: None,
+        turn_timeout_secs: None,
+        typing_ttl_secs: None,
+        progress_delay_secs: None,
     }
 }
 
@@ -152,7 +155,11 @@ fn detects_english_install_this_skill_with_url() {
 async fn no_source_returns_usage_hint_without_side_effects() {
     let (orchestrator, tmp) = make_orchestrator().await;
     let out = orchestrator
-        .handle_inbound(test_inbound("install skill"), "clawhive-main")
+        .handle_inbound(
+            test_inbound("install skill"),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 
@@ -176,7 +183,11 @@ async fn detected_nl_install_routes_to_analyze_flow() {
     let msg = format!("install skill from {}", source.display());
 
     let out = orchestrator
-        .handle_inbound(test_inbound(&msg), "clawhive-main")
+        .handle_inbound(
+            test_inbound(&msg),
+            "clawhive-main",
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap();
 

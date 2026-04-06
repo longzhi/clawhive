@@ -22,6 +22,10 @@ use whatsapp_rust_sqlite_storage::SqliteStore;
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
+use crate::common::{infer_mime_from_filename, AbortOnDrop};
+
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
+
 pub struct WhatsAppAdapter {
     connector_id: String,
 }
@@ -350,6 +354,19 @@ pub async fn start_whatsapp(
                             }
                         }
 
+                        if let Some(ref document) = effective_msg.document_message {
+                            match client.download(document.as_ref()).await {
+                                Ok(data) => {
+                                    inbound.attachments.push(
+                                        build_inbound_document_attachment(data, document.as_ref()),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to download WhatsApp document: {e}");
+                                }
+                            }
+                        }
+
                         let _ = client.chatstate().send_composing(&info.source.chat).await;
 
                         let Some(agent_id) = gateway.resolve_agent(&inbound) else {
@@ -369,76 +386,106 @@ pub async fn start_whatsapp(
                             .and_then(|i| i.emoji.clone());
                         let prefix = build_bot_prefix(agent_emoji.as_deref());
 
-                        match gateway.handle_inbound(inbound).await {
-                            Ok(Some(outbound)) => {
-                                let _ = client.chatstate().send_paused(&info.source.chat).await;
+                        let gateway = gateway.clone();
+                        let client = client.clone();
+                        let reply_chat = info.source.chat.clone();
+                        let progress_delay = gateway.resolve_turn_lifecycle(&inbound).progress_delay_secs;
+                        tokio::spawn(async move {
+                            let turn_complete = Arc::new(tokio::sync::Notify::new());
+                            let progress_complete = turn_complete.clone();
+                            let progress_client = client.clone();
+                            let progress_chat = reply_chat.clone();
+                            let _progress_guard = (progress_delay > 0).then(|| {
+                                AbortOnDrop(tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(progress_delay)) => {
+                                            let progress = wa::Message {
+                                                conversation: Some(PROGRESS_MESSAGE.to_string()),
+                                                ..Default::default()
+                                            };
+                                            if let Err(e) = progress_client.send_message(progress_chat, progress).await {
+                                                tracing::warn!(error = %e, "failed to send WhatsApp progress message");
+                                            }
+                                        }
+                                        _ = progress_complete.notified() => {}
+                                    }
+                                }))
+                            });
 
-                                let has_text = !outbound.text.trim().is_empty();
-                                let has_attachments = !outbound.attachments.is_empty();
+                            let result = gateway.handle_inbound(inbound).await;
+                            turn_complete.notify_waiters();
 
-                                if !has_text && !has_attachments {
-                                    return;
-                                }
+                            match result {
+                                Ok(Some(outbound)) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
 
-                                let prefixed_text = format!("{prefix}{}", outbound.text);
+                                    let has_text = !outbound.text.trim().is_empty();
+                                    let has_attachments = !outbound.attachments.is_empty();
 
-                                if has_attachments {
-                                    for (i, att) in outbound.attachments.iter().enumerate() {
-                                        let caption = if i == 0 && has_text {
-                                            Some(prefixed_text.as_str())
-                                        } else {
-                                            None
-                                        };
-                                        if let Err(e) = send_attachment(
-                                            &client,
-                                            &info.source.chat,
-                                            att,
-                                            caption,
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(
-                                                error = %e,
-                                                "failed to send WhatsApp attachment"
+                                    if !has_text && !has_attachments {
+                                        return;
+                                    }
+
+                                    let prefixed_text = format!("{prefix}{}", outbound.text);
+
+                                    if has_attachments {
+                                        for (i, att) in outbound.attachments.iter().enumerate() {
+                                            let caption = if i == 0 && has_text {
+                                                Some(prefixed_text.as_str())
+                                            } else {
+                                                None
+                                            };
+                                            if let Err(e) = send_attachment(
+                                                &client,
+                                                &reply_chat,
+                                                att,
+                                                caption,
+                                            )
+                                            .await
+                                            {
+                                                tracing::error!(
+                                                    error = %e,
+                                                    "failed to send WhatsApp attachment"
+                                                );
+                                            }
+                                        }
+
+                                        if has_text {
+                                            tracing::info!(
+                                                sender = %sender_jid,
+                                                chat = %chat_jid,
+                                                attachments = outbound.attachments.len(),
+                                                "WhatsApp reply with attachments sent"
                                             );
+                                            return;
                                         }
                                     }
 
-                                    if has_text {
-                                        tracing::info!(
-                                            sender = %sender_jid,
-                                            chat = %chat_jid,
-                                            attachments = outbound.attachments.len(),
-                                            "WhatsApp reply with attachments sent"
-                                        );
-                                        return;
+                                    if has_text && !has_attachments {
+                                        let reply = wa::Message {
+                                            conversation: Some(prefixed_text),
+                                            ..Default::default()
+                                        };
+                                        if let Err(e) = client.send_message(reply_chat.clone(), reply).await {
+                                            tracing::error!("Failed to send WhatsApp reply: {e}");
+                                        } else {
+                                            tracing::info!(
+                                                sender = %sender_jid,
+                                                chat = %chat_jid,
+                                                "WhatsApp reply sent"
+                                            );
+                                        }
                                     }
                                 }
-
-                                if has_text && !has_attachments {
-                                    let reply = wa::Message {
-                                        conversation: Some(prefixed_text),
-                                        ..Default::default()
-                                    };
-                                    if let Err(e) =
-                                        client.send_message(info.source.chat.clone(), reply).await
-                                    {
-                                        tracing::error!("Failed to send WhatsApp reply: {e}");
-                                    } else {
-                                        tracing::info!(
-                                            sender = %sender_jid,
-                                            chat = %chat_jid,
-                                            "WhatsApp reply sent"
-                                        );
-                                    }
+                                Ok(None) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
+                                }
+                                Err(err) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
+                                    tracing::error!("Gateway error for WhatsApp message: {err}");
                                 }
                             }
-                            Ok(None) => {}
-                            Err(err) => {
-                                let _ = client.chatstate().send_paused(&info.source.chat).await;
-                                tracing::error!("Gateway error for WhatsApp message: {err}");
-                            }
-                        }
+                        });
                     }
                     Event::Connected(_) => {
                         tracing::info!("WhatsApp connected");
@@ -516,6 +563,22 @@ fn extract_number_from_jid(jid: &str) -> String {
         .next()
         .unwrap_or_default()
         .to_string()
+}
+
+fn build_inbound_document_attachment(data: Vec<u8>, document: &DocumentMessage) -> Attachment {
+    let mime_type = document
+        .mimetype
+        .clone()
+        .or_else(|| infer_mime_from_filename(document.file_name.as_deref()))
+        .or_else(|| Some("application/octet-stream".to_string()));
+
+    Attachment {
+        kind: AttachmentKind::Document,
+        url: BASE64_STANDARD.encode(&data),
+        mime_type,
+        file_name: document.file_name.clone(),
+        size: document.file_length,
+    }
 }
 
 fn parse_chat_jid(conversation_scope: &str) -> Option<&str> {
@@ -924,6 +987,22 @@ mod tests {
         assert_eq!(document.file_name.as_deref(), Some("file.pdf"));
         assert_eq!(document.caption.as_deref(), Some("doc caption"));
         assert_eq!(document.mimetype.as_deref(), Some("application/pdf"));
+    }
+
+    #[test]
+    fn build_inbound_document_attachment_infers_pdf_mime_from_filename() {
+        let document = DocumentMessage {
+            file_name: Some("lease.pdf".to_string()),
+            file_length: Some(42),
+            ..Default::default()
+        };
+
+        let attachment = build_inbound_document_attachment(b"hello".to_vec(), &document);
+
+        assert_eq!(attachment.kind, AttachmentKind::Document);
+        assert_eq!(attachment.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(attachment.file_name.as_deref(), Some("lease.pdf"));
+        assert_eq!(attachment.size, Some(42));
     }
 
     #[test]

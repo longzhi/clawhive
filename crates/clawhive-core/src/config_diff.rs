@@ -140,6 +140,9 @@ mod tests {
                 sandbox: None,
                 max_response_tokens: None,
                 max_iterations: None,
+                turn_timeout_secs: None,
+                typing_ttl_secs: None,
+                progress_delay_secs: None,
             }],
         }
     }

@@ -18,10 +18,11 @@ use clawhive_memory::{
     RecentExplicitMemoryWrite, SessionEntry, SessionMemoryStateRecord, SessionMessage,
 };
 use clawhive_memory::{SessionReader, SessionWriter};
-use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
+use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, LlmResponse, StreamChunk};
 use clawhive_runtime::TaskExecutor;
 use clawhive_schema::*;
 use futures_core::Stream;
+use tokio_util::sync::CancellationToken;
 
 use crate::config_view::ConfigView;
 
@@ -84,6 +85,7 @@ struct BoundaryFlushSnapshot {
 struct ToolLoopMeta {
     successful_tool_calls: usize,
     final_stop_reason: Option<String>,
+    cancelled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1606,9 +1608,11 @@ impl Orchestrator {
         &self,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<OutboundMessage> {
         let view = self.config_view();
-        self.handle_with_view(view, inbound, agent_id).await
+        self.handle_with_view(view, inbound, agent_id, cancel_token)
+            .await
     }
 
     pub async fn handle_with_view(
@@ -1616,6 +1620,7 @@ impl Orchestrator {
         view: Arc<ConfigView>,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<OutboundMessage> {
         let agent = view
             .agent(agent_id)
@@ -1674,6 +1679,19 @@ impl Orchestrator {
                             &agent.model_policy.primary,
                             &session_key.0,
                         ),
+                        at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
+                    });
+                }
+                super::slash_commands::SlashCommand::Stop => {
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: "Use /stop from the chat channel to cancel the active task."
+                            .to_string(),
                         at: chrono::Utc::now(),
                         reply_to: None,
                         attachments: vec![],
@@ -1977,8 +1995,12 @@ impl Orchestrator {
                 must_use_web_search,
                 is_scheduled_task,
                 agent.model_policy.thinking_level,
+                cancel_token,
             )
             .await?;
+        if tool_meta.cancelled {
+            tracing::info!(agent_id = %agent_id, "handle_with_view: tool loop cancelled");
+        }
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
 
         // Check for NO_REPLY suppression
@@ -2128,7 +2150,7 @@ impl Orchestrator {
         agent_id: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>>> {
         let view = self.config_view();
-        self.handle_inbound_stream_with_view(view, inbound, agent_id)
+        self.handle_inbound_stream_with_view(view, inbound, agent_id, CancellationToken::new())
             .await
     }
 
@@ -2137,6 +2159,7 @@ impl Orchestrator {
         view: Arc<ConfigView>,
         inbound: InboundMessage,
         agent_id: &str,
+        cancel_token: CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>>> {
         let agent = view
             .agent(agent_id)
@@ -2339,7 +2362,7 @@ impl Orchestrator {
             .as_ref()
             .map(|s| s.dangerous_allow_private.clone())
             .unwrap_or_default();
-        let (_resp, final_messages, _tool_attachments, _tool_meta) = self
+        let (resp, final_messages, _tool_attachments, tool_meta) = self
             .tool_use_loop(
                 view.as_ref(),
                 agent_id,
@@ -2357,8 +2380,48 @@ impl Orchestrator {
                 must_use_web_search,
                 false, // is_scheduled_task
                 agent.model_policy.thinking_level,
+                cancel_token,
             )
             .await?;
+
+        if tool_meta.cancelled {
+            let abort_text = self.runtime.postprocess_output(&resp.text).await?;
+            let abort_text = filter_no_reply(&abort_text);
+
+            let workspace = self.workspace_state_for(agent_id);
+            let session_text = build_session_text(&inbound.text, &inbound.attachments);
+            let _ = workspace
+                .session_writer
+                .append_message(&session_result.session.session_id, "user", &session_text)
+                .await;
+            let _ = workspace
+                .session_writer
+                .append_message(&session_result.session.session_id, "assistant", &abort_text)
+                .await;
+            self.enqueue_dirty_source(
+                agent_id,
+                DIRTY_KIND_SESSION,
+                &session_result.session.session_id,
+                "session_appended",
+            )
+            .await;
+            {
+                let mut session = session_result.session.clone();
+                session.increment_interaction();
+                let _ = self.session_mgr.persist_session(&session).await;
+            }
+
+            let single_chunk: Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>> =
+                Box::pin(tokio_stream::once(Ok(StreamChunk {
+                    delta: abort_text,
+                    is_final: true,
+                    input_tokens: resp.input_tokens,
+                    output_tokens: resp.output_tokens,
+                    stop_reason: resp.stop_reason.clone(),
+                    content_blocks: resp.content.clone(),
+                })));
+            return Ok(single_chunk);
+        }
 
         let trace_id = inbound.trace_id;
         let bus = self.bus.clone();
@@ -2459,6 +2522,7 @@ impl Orchestrator {
         must_use_web_search: bool,
         is_scheduled_task: bool,
         thinking_level: Option<clawhive_provider::ThinkingLevel>,
+        cancel_token: CancellationToken,
     ) -> Result<(
         clawhive_provider::LlmResponse,
         Vec<LlmMessage>,
@@ -2487,11 +2551,32 @@ impl Orchestrator {
         let mut empty_promise_retries: u32 = 0;
         let mut total_tool_calls: usize = 0;
         let mut successful_tool_calls_total: usize = 0;
+        let mut tool_summaries: Vec<(String, String)> = Vec::new();
         let attachment_collector: Arc<tokio::sync::Mutex<Vec<Attachment>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         for iteration in 0..max_iterations {
             let iteration_no = iteration + 1;
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    successful_tool_calls = successful_tool_calls_total,
+                    "tool_use_loop: cancellation detected before iteration"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
+            }
             tracing::debug!(
                 agent_id = %agent_id,
                 iteration = iteration_no,
@@ -2575,6 +2660,26 @@ impl Orchestrator {
                         None,
                     )
                     .await;
+            }
+
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    "tool_use_loop: cancellation detected after compaction"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
             }
 
             let req = LlmRequest {
@@ -2836,6 +2941,7 @@ impl Orchestrator {
                     ToolLoopMeta {
                         successful_tool_calls: successful_tool_calls_total,
                         final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: false,
                     },
                 ));
             }
@@ -2888,7 +2994,26 @@ impl Orchestrator {
             };
             let ctx = ctx.with_scheduled_task(is_scheduled_task);
 
-            // Execute tools in parallel
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    "tool_use_loop: cancellation detected before tool execution"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
+            }
+
             let tool_futures: Vec<_> = tool_uses
                 .into_iter()
                 .map(|(id, name, input)| {
@@ -2958,6 +3083,16 @@ impl Orchestrator {
 
             let tools_started = std::time::Instant::now();
             let tool_results = futures::future::join_all(tool_futures).await;
+            tool_summaries.extend(tool_names.iter().zip(tool_results.iter()).filter_map(
+                |(name, result)| match result {
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } if !is_error => {
+                        Some((name.clone(), truncate_tool_result_preview(content, 100)))
+                    }
+                    _ => None,
+                },
+            ));
             let successful_tool_calls = tool_results
                 .iter()
                 .filter(|result| {
@@ -2988,11 +3123,33 @@ impl Orchestrator {
                 );
             }
 
+            successful_tool_calls_total += successful_tool_calls;
+
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    iteration = iteration_no,
+                    successful_tool_calls = successful_tool_calls_total,
+                    "tool_use_loop: cancellation detected after tool execution"
+                );
+                let tool_attachments = attachment_collector.lock().await.drain(..).collect();
+                let resp = synthesize_cancelled_response(&tool_summaries);
+                return Ok((
+                    resp.clone(),
+                    messages,
+                    tool_attachments,
+                    ToolLoopMeta {
+                        successful_tool_calls: successful_tool_calls_total,
+                        final_stop_reason: resp.stop_reason.clone(),
+                        cancelled: true,
+                    },
+                ));
+            }
+
             messages.push(LlmMessage {
                 role: "user".into(),
                 content: tool_results,
             });
-            successful_tool_calls_total += successful_tool_calls;
 
             let _ = successful_tool_calls;
 
@@ -3064,6 +3221,7 @@ impl Orchestrator {
             ToolLoopMeta {
                 successful_tool_calls: successful_tool_calls_total,
                 final_stop_reason: resp.stop_reason.clone(),
+                cancelled: false,
             },
         ))
     }
@@ -3137,6 +3295,7 @@ impl Orchestrator {
                 false, // must_use_web_search
                 false, // is_scheduled_task
                 agent.model_policy.thinking_level,
+                CancellationToken::new(),
             )
             .await?;
 
@@ -5711,9 +5870,40 @@ fn build_known_facts_section(facts: &[clawhive_memory::fact_store::Fact], budget
     truncate_text_to_budget(&section, budget)
 }
 
+fn truncate_tool_result_preview(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() || normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+
+    let truncated: String = normalized.chars().take(max_chars).collect();
+    format!("{truncated}…")
+}
+
+fn synthesize_cancelled_response(tool_summaries: &[(String, String)]) -> LlmResponse {
+    let text = if tool_summaries.is_empty() {
+        "[Task stopped by user]".to_string()
+    } else {
+        let mut message = "[Task stopped by user]\n\nCompleted:".to_string();
+        for (name, preview) in tool_summaries {
+            message.push_str(&format!("\n- {name}: {preview}"));
+        }
+        message
+    };
+
+    LlmResponse {
+        text: text.clone(),
+        content: vec![ContentBlock::Text { text }],
+        input_tokens: None,
+        output_tokens: None,
+        stop_reason: Some("cancelled".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
@@ -5724,7 +5914,9 @@ mod tests {
     use clawhive_memory::fact_store::FactStore;
     use clawhive_memory::file_store::MemoryFileStore;
     use clawhive_memory::search_index::SearchResult;
-    use clawhive_memory::{MemoryStore, SessionEntry, SessionMessage, SessionRecord};
+    use clawhive_memory::{
+        MemoryStore, SessionEntry, SessionMessage, SessionReader, SessionRecord,
+    };
     use clawhive_provider::{ContentBlock, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry};
     use clawhive_runtime::NativeExecutor;
     use clawhive_scheduler::{ScheduleManager, SqliteStore};
@@ -5736,6 +5928,11 @@ mod tests {
     struct CompactionOnlyProvider;
 
     struct FailingEmbeddingProvider;
+
+    struct SequenceProvider {
+        responses: tokio::sync::Mutex<Vec<LlmResponse>>,
+        call_count: AtomicUsize,
+    }
 
     #[async_trait]
     impl LlmProvider for CompactionOnlyProvider {
@@ -5778,6 +5975,31 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl LlmProvider for SequenceProvider {
+        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.responses.lock().await;
+            if responses.is_empty() {
+                return Err(anyhow!("unexpected llm call"));
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    impl SequenceProvider {
+        fn new(responses: Vec<LlmResponse>) -> Self {
+            Self {
+                responses: tokio::sync::Mutex::new(responses),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
     fn agent_with_memory_policy(
         memory_policy: Option<crate::config::MemoryPolicyConfig>,
     ) -> FullAgentConfig {
@@ -5802,6 +6024,9 @@ mod tests {
             sandbox: None,
             max_response_tokens: None,
             max_iterations: None,
+            turn_timeout_secs: None,
+            typing_ttl_secs: None,
+            progress_delay_secs: None,
         }
     }
 
@@ -5857,6 +6082,80 @@ mod tests {
             HashMap::new(),
             RoutingConfig {
                 default_agent_id: agent_ids.first().unwrap_or(&"agent-a").to_string(),
+                bindings: vec![],
+            },
+            router,
+            tool_registry,
+            embedding_provider,
+        );
+
+        let orchestrator = OrchestratorBuilder::new(
+            config_view,
+            publisher,
+            Arc::clone(&memory),
+            Arc::new(NativeExecutor),
+            tmp.path().to_path_buf(),
+            schedule_manager,
+        )
+        .build();
+
+        (orchestrator, tmp, memory)
+    }
+
+    async fn make_tool_loop_test_orchestrator(
+        provider: Arc<dyn LlmProvider>,
+        max_iterations: Option<u32>,
+    ) -> (Orchestrator, TempDir, Arc<MemoryStore>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let bus = EventBus::new(16);
+        let publisher = bus.publisher();
+        let file_store = MemoryFileStore::new(tmp.path());
+        let search_index = SearchIndex::new(memory.db(), "agent-a");
+        let embedding_provider: Arc<dyn EmbeddingProvider> =
+            Arc::new(StubEmbeddingProvider::new(8));
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                SqliteStore::open(&tmp.path().join("data/scheduler.db")).unwrap(),
+                Arc::new(EventBus::new(16)),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register("test", provider);
+        let router = LlmRouter::new(
+            registry,
+            HashMap::from([("test".to_string(), "test/model".to_string())]),
+            vec![],
+        );
+
+        let mut agent = test_full_agent("agent-a");
+        agent.workspace = Some(".".to_string());
+        agent.model_policy.primary = "test/model".to_string();
+        agent.max_iterations = max_iterations;
+        let agents = vec![agent];
+        let tool_registry = build_tool_registry(
+            &file_store,
+            &search_index,
+            &memory,
+            &embedding_provider,
+            tmp.path(),
+            tmp.path(),
+            &None,
+            &publisher,
+            Arc::clone(&schedule_manager),
+            None,
+            &router,
+            &agents,
+            &HashMap::new(),
+        );
+        let config_view = ConfigView::new(
+            0,
+            agents,
+            HashMap::new(),
+            RoutingConfig {
+                default_agent_id: "agent-a".to_string(),
                 bindings: vec![],
             },
             router,
@@ -5985,9 +6284,273 @@ mod tests {
         }
     }
 
+    fn llm_text_response(text: &str, stop_reason: &str) -> LlmResponse {
+        LlmResponse {
+            text: text.to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: Some(stop_reason.to_string()),
+        }
+    }
+
+    fn llm_tool_use_response(id: &str, name: &str, input: serde_json::Value) -> LlmResponse {
+        LlmResponse {
+            text: format!("calling {name}"),
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input,
+            }],
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: Some("tool_use".to_string()),
+        }
+    }
+
+    async fn wait_for_call_count(provider: &SequenceProvider, expected: usize) {
+        for _ in 0..50 {
+            if provider.call_count() >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("provider did not reach call count {expected}");
+    }
+
     #[test]
     fn test_clamp_to_budget_empty_results() {
         assert_eq!(clamp_to_budget(&[], 100), "");
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_returns_abort_message_when_cancelled_before_first_iteration() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "should not be called",
+            "end_turn",
+        )]));
+        let (orchestrator, _tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(1)).await;
+        let view = orchestrator.config_view();
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let (resp, _messages, _attachments, meta) = orchestrator
+            .tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-cancelled-before-first-iteration",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("stop now")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                cancel_token,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.call_count(), 0);
+        assert_eq!(resp.text, "[Task stopped by user]");
+        assert_eq!(resp.stop_reason.as_deref(), Some("cancelled"));
+        assert!(meta.cancelled);
+        assert_eq!(meta.successful_tool_calls, 0);
+        assert_eq!(meta.final_stop_reason.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_returns_abort_message_with_completed_tool_summaries() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_tool_use_response(
+            "tool-1",
+            "read_file",
+            json!({"path": "sample.txt"}),
+        )]));
+        let (orchestrator, tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(2)).await;
+        std::fs::write(
+            tmp.path().join("sample.txt"),
+            "previewable contents\nsecond line",
+        )
+        .unwrap();
+        let view = orchestrator.config_view();
+        let cancel_token = CancellationToken::new();
+
+        let cancel_after_first_llm = async {
+            wait_for_call_count(provider.as_ref(), 1).await;
+            cancel_token.cancel();
+        };
+
+        let (result, _) = tokio::join!(
+            orchestrator.tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-cancelled-after-tool",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("read the file")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                cancel_token.clone(),
+            ),
+            cancel_after_first_llm,
+        );
+
+        let (resp, _messages, _attachments, meta) = result.unwrap();
+        assert_eq!(provider.call_count(), 1);
+        assert!(meta.cancelled);
+        assert_eq!(meta.successful_tool_calls, 1);
+        assert_eq!(meta.final_stop_reason.as_deref(), Some("cancelled"));
+        assert!(resp
+            .text
+            .starts_with("[Task stopped by user]\n\nCompleted:"));
+        assert!(resp.text.contains("- read_file: 1: previewable contents"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_sets_cancelled_false_on_normal_completion() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "done", "end_turn",
+        )]));
+        let (orchestrator, _tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider, Some(2)).await;
+        let view = orchestrator.config_view();
+
+        let (resp, _messages, _attachments, meta) = orchestrator
+            .tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-normal-finish",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("finish")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.text, "done");
+        assert!(!meta.cancelled);
+        assert_eq!(meta.final_stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_prioritizes_cancellation_over_max_iteration_path() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "should not be called",
+            "end_turn",
+        )]));
+        let (orchestrator, _tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(1)).await;
+        let view = orchestrator.config_view();
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let (resp, _messages, _attachments, meta) = orchestrator
+            .tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-cancel-priority",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("cancel")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                cancel_token,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.call_count(), 0);
+        assert_eq!(resp.stop_reason.as_deref(), Some("cancelled"));
+        assert!(meta.cancelled);
+    }
+
+    #[tokio::test]
+    async fn handle_with_view_persists_abort_message_to_session() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "should not be called",
+            "end_turn",
+        )]));
+        let (orchestrator, tmp, memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(2)).await;
+        let view = orchestrator.config_view();
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:cancelled".into(),
+            user_scope: "user:1".into(),
+            text: "read and stop".into(),
+            at: Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+            message_id: None,
+            attachments: vec![],
+            message_source: None,
+        };
+        let session_key = SessionKey::from_inbound(&inbound);
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let outbound = orchestrator
+            .handle_with_view(view.clone(), inbound, "agent-a", cancel_token)
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 0);
+        assert_eq!(outbound.text, "[Task stopped by user]");
+
+        let session = memory
+            .get_session(&session_key.0)
+            .await
+            .unwrap()
+            .expect("session record");
+        let reader = SessionReader::new(tmp.path());
+        let messages = reader
+            .load_recent_messages(&session.session_id, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "[Task stopped by user]");
     }
 
     #[test]

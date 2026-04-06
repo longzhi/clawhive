@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
+use crate::common::AbortOnDrop;
+
 const WECOM_WSS_URL: &str = "wss://openws.work.weixin.qq.com";
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
 #[derive(Debug, Deserialize)]
 pub struct WeComMessage {
@@ -294,11 +297,59 @@ impl WeComBot {
                                             .unwrap_or_default();
                                         let msgid = body.msgid.clone();
                                         let inbound = adapter.to_inbound(&body, &req_id);
+                                        let progress_delay = self
+                                            .gateway
+                                            .resolve_turn_lifecycle(&inbound)
+                                            .progress_delay_secs;
                                         let gw = self.gateway.clone();
                                         let write_reply = write.clone();
 
                                         tokio::spawn(async move {
-                                            match gw.handle_inbound(inbound).await {
+                                            let turn_complete =
+                                                Arc::new(tokio::sync::Notify::new());
+                                            let progress_complete = turn_complete.clone();
+                                            let progress_req_id = req_id.clone();
+                                            let progress_msgid = msgid.clone();
+                                            let progress_write = write_reply.clone();
+                                            let _progress_guard = (progress_delay > 0).then(|| {
+                                                AbortOnDrop(tokio::spawn(async move {
+                                                    tokio::select! {
+                                                        _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                                                            let progress = WeComReplyMessage::text(
+                                                                &progress_req_id,
+                                                                &progress_msgid,
+                                                                PROGRESS_MESSAGE,
+                                                                false,
+                                                            );
+                                                            match serde_json::to_string(&progress) {
+                                                                Ok(json) => {
+                                                                    let mut w = progress_write.lock().await;
+                                                                    if let Err(e) = w.send(WsMessage::Text(json.into())).await {
+                                                                        tracing::warn!(
+                                                                            target: "clawhive::channel::wecom",
+                                                                            error = %e,
+                                                                            "failed to send wecom progress message"
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    tracing::warn!(
+                                                                        target: "clawhive::channel::wecom",
+                                                                        error = %e,
+                                                                        "failed to serialize wecom progress message"
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        _ = progress_complete.notified() => {}
+                                                    }
+                                                }))
+                                            });
+
+                                            let result = gw.handle_inbound(inbound).await;
+                                            turn_complete.notify_waiters();
+
+                                            match result {
                                                 Ok(Some(outbound)) => {
                                                     if !outbound.text.trim().is_empty() {
                                                         let reply = WeComReplyMessage::text(

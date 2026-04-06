@@ -14,8 +14,11 @@ use slack_morphism::prelude::*;
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
+use crate::common::AbortOnDrop;
+
 // Type alias for the Slack client
 type HyperClient = SlackClient<SlackClientHyperHttpsConnector>;
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
 /// Adapter for converting between Slack and internal message formats.
 pub struct SlackAdapter {
@@ -212,9 +215,49 @@ impl SlackBot {
 
             tracing::debug!("Slack message from {user} in {channel_id}: {text}");
 
-            if let Err(e) = self.gateway.handle_inbound(inbound).await {
-                tracing::error!("Failed to handle Slack message: {e}");
-            }
+            let gateway = self.gateway.clone();
+            let client = client.clone();
+            let token = token.clone();
+            let channel = channel_id.to_string();
+            let progress_thread_ts = thread_ts.map(|ts| ts.to_string());
+            let progress_delay = self
+                .gateway
+                .resolve_turn_lifecycle(&inbound)
+                .progress_delay_secs;
+            tokio::spawn(async move {
+                let turn_complete = Arc::new(tokio::sync::Notify::new());
+                let progress_complete = turn_complete.clone();
+                let progress_client = client.clone();
+                let progress_token = token.clone();
+                let progress_channel = channel.clone();
+                let _progress_guard = (progress_delay > 0).then(|| {
+                    AbortOnDrop(tokio::spawn(async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(progress_delay)) => {
+                                if let Err(e) = send_slack_message(
+                                    &progress_client,
+                                    &progress_token,
+                                    &progress_channel,
+                                    PROGRESS_MESSAGE,
+                                    progress_thread_ts.as_deref(),
+                                )
+                                .await
+                                {
+                                    tracing::warn!("Failed to send Slack progress message: {e}");
+                                }
+                            }
+                            _ = progress_complete.notified() => {}
+                        }
+                    }))
+                });
+
+                let result = gateway.handle_inbound(inbound).await;
+                turn_complete.notify_waiters();
+
+                if let Err(e) = result {
+                    tracing::error!("Failed to handle Slack message: {e}");
+                }
+            });
         }
 
         Ok(newest_ts)

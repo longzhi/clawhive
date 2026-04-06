@@ -11,8 +11,11 @@ use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
+use crate::common::AbortOnDrop;
+
 const DINGTALK_GATEWAY_URL: &str = "https://api.dingtalk.com/v1.0/gateway/connections/open";
 const BOT_MESSAGES_TOPIC: &str = "/v1.0/im/bot/messages/get";
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -382,8 +385,39 @@ impl DingTalkBot {
                         let gw = self.gateway.clone();
                         let client = client.clone();
                         let conv_id = callback.conversation_id.clone();
+                        let progress_delay = self
+                            .gateway
+                            .resolve_turn_lifecycle(&inbound)
+                            .progress_delay_secs;
                         tokio::spawn(async move {
-                            match gw.handle_inbound(inbound).await {
+                            let turn_complete = Arc::new(tokio::sync::Notify::new());
+                            let progress_complete = turn_complete.clone();
+                            let progress_client = client.clone();
+                            let progress_conv_id = conv_id.clone();
+                            let _progress_guard = (progress_delay > 0).then(|| {
+                                AbortOnDrop(tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
+                                            if let Err(e) = progress_client
+                                                .reply_via_session_webhook(&progress_conv_id, PROGRESS_MESSAGE)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    target: "clawhive::channel::dingtalk",
+                                                    error = %e,
+                                                    "failed to send dingtalk progress message"
+                                                );
+                                            }
+                                        }
+                                        _ = progress_complete.notified() => {}
+                                    }
+                                }))
+                            });
+
+                            let result = gw.handle_inbound(inbound).await;
+                            turn_complete.notify_waiters();
+
+                            match result {
                                 Ok(Some(outbound)) => {
                                     if !outbound.text.trim().is_empty() {
                                         if let Err(e) = client

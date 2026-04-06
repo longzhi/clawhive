@@ -23,6 +23,7 @@ pub enum SlashCommand {
     },
     /// /status - Show session status
     Status,
+    Stop,
     SkillAnalyze {
         source: String,
     },
@@ -74,6 +75,7 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
             Some(SlashCommand::Model { new_model })
         }
         "/status" => Some(SlashCommand::Status),
+        "/stop" => Some(SlashCommand::Stop),
         "/skill" => {
             let action = rest.first().map(|s| s.to_lowercase());
             match action.as_deref() {
@@ -231,6 +233,12 @@ mod tests {
     #[test]
     fn parse_status_command() {
         assert_eq!(parse_command("/status"), Some(SlashCommand::Status));
+    }
+
+    #[test]
+    fn parse_stop_command() {
+        assert_eq!(parse_command("/stop"), Some(SlashCommand::Stop));
+        assert_eq!(parse_command(" /STOP "), Some(SlashCommand::Stop));
     }
 
     #[test]
