@@ -330,6 +330,13 @@ impl SessionKey {
             msg.channel_type, msg.connector_id, msg.conversation_scope, msg.user_scope
         ))
     }
+
+    pub fn is_scheduled_session(&self) -> bool {
+        self.0
+            .split(':')
+            .nth(2)
+            .is_some_and(|scope| scope.starts_with("schedule"))
+    }
 }
 
 // ---------------------------------------------------------------------------

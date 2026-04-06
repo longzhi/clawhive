@@ -2112,21 +2112,27 @@ impl Orchestrator {
             self.drain_dirty_sources(view.as_ref(), agent_id, 8).await;
         }
 
-        let next_turn_index = session_result.session.interaction_count.saturating_add(1);
-        let closed_episode = self
-            .record_session_turn_episode(
-                agent_id,
-                &session_result.session,
-                EpisodeTurnInput {
-                    turn_index: next_turn_index,
-                    user_text: &session_text,
-                    assistant_text: &outbound.text,
-                    successful_tool_calls: tool_meta.successful_tool_calls,
-                    final_stop_reason: tool_meta.final_stop_reason.as_deref(),
-                },
-            )
-            .await;
-        let _ = closed_episode;
+        // Skip episode tracking for scheduled tasks — their outputs should not
+        // enter the memory extraction pipeline (boundary flush → fact extraction
+        // → daily consolidation → MEMORY.md).  Session JSONL is still written
+        // above for audit purposes.
+        if !is_scheduled_task {
+            let next_turn_index = session_result.session.interaction_count.saturating_add(1);
+            let closed_episode = self
+                .record_session_turn_episode(
+                    agent_id,
+                    &session_result.session,
+                    EpisodeTurnInput {
+                        turn_index: next_turn_index,
+                        user_text: &session_text,
+                        assistant_text: &outbound.text,
+                        successful_tool_calls: tool_meta.successful_tool_calls,
+                        final_stop_reason: tool_meta.final_stop_reason.as_deref(),
+                    },
+                )
+                .await;
+            let _ = closed_episode;
+        }
 
         {
             let mut session = session_result.session.clone();
@@ -3376,6 +3382,9 @@ impl Orchestrator {
         session: &Session,
         _agent: &FullAgentConfig,
     ) -> Option<BoundaryFlushSnapshot> {
+        if session.session_key.is_scheduled_session() {
+            return None;
+        }
         let workspace = self.workspace_state_for(agent_id);
         let state = self
             .memory
