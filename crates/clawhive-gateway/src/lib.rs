@@ -90,9 +90,16 @@ pub struct Gateway {
     bus: BusPublisher,
     rate_limiter: RateLimiter,
     approval_registry: Option<Arc<ApprovalRegistry>>,
-    active_turns: Arc<TokioMutex<StdHashMap<String, CancellationToken>>>,
+    active_turns: Arc<TokioMutex<StdHashMap<String, ActiveTurn>>>,
+    turn_id_counter: std::sync::atomic::AtomicU64,
     /// Tracks the last active channel per agent for heartbeat delivery.
     last_active_channels: Arc<TokioMutex<StdHashMap<String, ChannelTarget>>>,
+}
+
+#[derive(Clone)]
+struct ActiveTurn {
+    turn_id: u64,
+    token: CancellationToken,
 }
 
 /// Channel target info for delivering messages.
@@ -104,21 +111,24 @@ pub struct ChannelTarget {
 }
 
 struct ActiveTurnGuard {
-    active_turns: Arc<TokioMutex<StdHashMap<String, CancellationToken>>>,
+    active_turns: Arc<TokioMutex<StdHashMap<String, ActiveTurn>>>,
     session_key: String,
+    turn_id: u64,
     timeout_handle: Option<JoinHandle<()>>,
     cleaned: bool,
 }
 
 impl ActiveTurnGuard {
     fn new(
-        active_turns: Arc<TokioMutex<StdHashMap<String, CancellationToken>>>,
+        active_turns: Arc<TokioMutex<StdHashMap<String, ActiveTurn>>>,
         session_key: String,
+        turn_id: u64,
         timeout_handle: JoinHandle<()>,
     ) -> Self {
         Self {
             active_turns,
             session_key,
+            turn_id,
             timeout_handle: Some(timeout_handle),
             cleaned: false,
         }
@@ -126,7 +136,9 @@ impl ActiveTurnGuard {
 
     async fn cleanup(mut self, gateway: &Gateway) {
         self.abort_timeout();
-        gateway.unregister_active_turn(&self.session_key).await;
+        gateway
+            .unregister_active_turn(&self.session_key, self.turn_id)
+            .await;
         self.cleaned = true;
     }
 
@@ -145,9 +157,14 @@ impl Drop for ActiveTurnGuard {
         }
         let active_turns = Arc::clone(&self.active_turns);
         let session_key = self.session_key.clone();
+        let turn_id = self.turn_id;
         tokio::spawn(async move {
             let mut active_turns = active_turns.lock().await;
-            active_turns.remove(&session_key);
+            if let Some(entry) = active_turns.get(&session_key) {
+                if entry.turn_id == turn_id {
+                    active_turns.remove(&session_key);
+                }
+            }
         });
     }
 }
@@ -178,20 +195,34 @@ impl Gateway {
             rate_limiter,
             approval_registry,
             active_turns: Arc::new(TokioMutex::new(StdHashMap::new())),
+            turn_id_counter: std::sync::atomic::AtomicU64::new(0),
             last_active_channels: Arc::new(TokioMutex::new(StdHashMap::new())),
         }
     }
 
-    pub async fn register_active_turn(&self, session_key: &str) -> CancellationToken {
+    pub async fn register_active_turn(&self, session_key: &str) -> (CancellationToken, u64) {
         let token = CancellationToken::new();
+        let turn_id = self
+            .turn_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut active_turns = self.active_turns.lock().await;
-        active_turns.insert(session_key.to_string(), token.clone());
-        token
+        active_turns.insert(
+            session_key.to_string(),
+            ActiveTurn {
+                turn_id,
+                token: token.clone(),
+            },
+        );
+        (token, turn_id)
     }
 
-    pub async fn unregister_active_turn(&self, session_key: &str) {
+    pub async fn unregister_active_turn(&self, session_key: &str, turn_id: u64) {
         let mut active_turns = self.active_turns.lock().await;
-        active_turns.remove(session_key);
+        if let Some(entry) = active_turns.get(session_key) {
+            if entry.turn_id == turn_id {
+                active_turns.remove(session_key);
+            }
+        }
     }
 
     async fn try_handle_approve(&self, inbound: &InboundMessage) -> Option<OutboundMessage> {
@@ -277,7 +308,7 @@ impl Gateway {
         let session_key = SessionKey::from_inbound(inbound);
         let token = {
             let active_turns = self.active_turns.lock().await;
-            active_turns.get(&session_key.0).cloned()
+            active_turns.get(&session_key.0).map(|t| t.token.clone())
         };
 
         Some(match token {
@@ -334,10 +365,11 @@ impl Gateway {
         let view = self.orchestrator.config_view();
         let session_key = SessionKey::from_inbound(&inbound).0;
         let turn_timeout_secs = agent_turn_timeout_secs(view.as_ref(), agent_id)?;
-        let cancel_token = self.register_active_turn(&session_key).await;
+        let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
         let guard = ActiveTurnGuard::new(
             Arc::clone(&self.active_turns),
             session_key,
+            turn_id,
             spawn_turn_timeout(cancel_token.clone(), turn_timeout_secs),
         );
         let result = self
@@ -427,10 +459,11 @@ impl Gateway {
 
         let session_key = SessionKey::from_inbound(&inbound).0;
         let turn_timeout_secs = agent_turn_timeout_secs(view.as_ref(), &agent_id)?;
-        let cancel_token = self.register_active_turn(&session_key).await;
+        let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
         let guard = ActiveTurnGuard::new(
             Arc::clone(&self.active_turns),
             session_key,
+            turn_id,
             spawn_turn_timeout(cancel_token.clone(), turn_timeout_secs),
         );
 
@@ -2008,7 +2041,7 @@ mod tests {
         let (gw, _tmp) = make_gateway().await;
         let inbound = make_test_inbound("/stop");
         let session_key = SessionKey::from_inbound(&inbound);
-        let token = gw.register_active_turn(&session_key.0).await;
+        let (token, _turn_id) = gw.register_active_turn(&session_key.0).await;
 
         let out = gw
             .handle_inbound(inbound)
@@ -2038,7 +2071,7 @@ mod tests {
         let (gw, _tmp) = make_gateway().await;
         let uppercase = make_test_inbound("/STOP");
         let uppercase_session = SessionKey::from_inbound(&uppercase);
-        let uppercase_token = gw.register_active_turn(&uppercase_session.0).await;
+        let (uppercase_token, _) = gw.register_active_turn(&uppercase_session.0).await;
 
         let uppercase_out = gw
             .handle_inbound(uppercase)
@@ -2051,7 +2084,7 @@ mod tests {
 
         let mixed = make_test_inbound(" /Stop ");
         let mixed_session = SessionKey::from_inbound(&mixed);
-        let mixed_token = gw.register_active_turn(&mixed_session.0).await;
+        let (mixed_token, _) = gw.register_active_turn(&mixed_session.0).await;
 
         let mixed_out = gw
             .handle_inbound(mixed)
@@ -2067,9 +2100,9 @@ mod tests {
     async fn unregister_active_turn_removes_registered_token() {
         let (gw, _tmp) = make_gateway().await;
         let session_key = SessionKey::from_inbound(&make_test_inbound("ping"));
-        let _token: CancellationToken = gw.register_active_turn(&session_key.0).await;
+        let (_token, turn_id) = gw.register_active_turn(&session_key.0).await;
 
-        gw.unregister_active_turn(&session_key.0).await;
+        gw.unregister_active_turn(&session_key.0, turn_id).await;
 
         let out = gw
             .handle_inbound(make_test_inbound("/stop"))
@@ -2085,7 +2118,7 @@ mod tests {
         let (gw, _tmp) = make_gateway().await;
         let inbound = make_test_inbound("/stop");
         let session_key = SessionKey::from_inbound(&inbound);
-        let token = gw.register_active_turn(&session_key.0).await;
+        let (token, turn_id) = gw.register_active_turn(&session_key.0).await;
 
         let first_stop = gw
             .handle_inbound(inbound)
@@ -2095,7 +2128,7 @@ mod tests {
         assert!(first_stop.text.contains("Task stopped"));
         assert!(token.is_cancelled());
 
-        gw.unregister_active_turn(&session_key.0).await;
+        gw.unregister_active_turn(&session_key.0, turn_id).await;
 
         let second_stop = gw
             .handle_inbound(make_test_inbound("/stop"))

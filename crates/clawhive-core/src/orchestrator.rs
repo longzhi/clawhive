@@ -2387,6 +2387,30 @@ impl Orchestrator {
         if tool_meta.cancelled {
             let abort_text = self.runtime.postprocess_output(&resp.text).await?;
             let abort_text = filter_no_reply(&abort_text);
+
+            let workspace = self.workspace_state_for(agent_id);
+            let session_text = build_session_text(&inbound.text, &inbound.attachments);
+            let _ = workspace
+                .session_writer
+                .append_message(&session_result.session.session_id, "user", &session_text)
+                .await;
+            let _ = workspace
+                .session_writer
+                .append_message(&session_result.session.session_id, "assistant", &abort_text)
+                .await;
+            self.enqueue_dirty_source(
+                agent_id,
+                DIRTY_KIND_SESSION,
+                &session_result.session.session_id,
+                "session_appended",
+            )
+            .await;
+            {
+                let mut session = session_result.session.clone();
+                session.increment_interaction();
+                let _ = self.session_mgr.persist_session(&session).await;
+            }
+
             let single_chunk: Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + '_>> =
                 Box::pin(tokio_stream::once(Ok(StreamChunk {
                     delta: abort_text,
