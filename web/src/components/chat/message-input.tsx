@@ -93,11 +93,17 @@ export function MessageInput({ onSend, onCancel }: MessageInputProps) {
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
+    if (trimmed.toLowerCase() === "/stop") {
+      onCancel();
+      setText("");
+      textareaRef.current?.focus();
+      return;
+    }
     if (!canSend) return;
     onSend(trimmed);
     setText("");
     textareaRef.current?.focus();
-  }, [text, canSend, onSend]);
+  }, [text, canSend, onSend, onCancel]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (showCommands) {
