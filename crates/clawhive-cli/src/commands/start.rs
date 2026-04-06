@@ -18,8 +18,8 @@ use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_
 use clawhive_core::*;
 use clawhive_gateway::supervisor::{BotFactory, ChannelSupervisor};
 use clawhive_gateway::{
-    spawn_approval_delivery_listener, spawn_scheduled_task_listener, spawn_wait_task_listener,
-    ReloadCoordinator,
+    spawn_approval_delivery_listener, spawn_cancel_task_listener, spawn_scheduled_task_listener,
+    spawn_wait_task_listener, ReloadCoordinator,
 };
 
 use crate::runtime::bootstrap::{bootstrap, build_embedding_provider, build_router_from_config};
@@ -702,6 +702,10 @@ async fn start_bot(
     let _schedule_listener_handle =
         spawn_scheduled_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Scheduled task gateway listener started");
+
+    let _cancel_task_listener_handle =
+        spawn_cancel_task_listener(gateway.clone(), Arc::clone(&bus));
+    tracing::info!("Cancel task gateway listener started");
 
     let _wait_task_listener_handle = spawn_wait_task_listener(gateway.clone(), Arc::clone(&bus));
     tracing::info!("Wait task gateway listener started");

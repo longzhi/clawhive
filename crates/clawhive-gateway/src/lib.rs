@@ -100,6 +100,7 @@ pub struct Gateway {
 #[derive(Clone)]
 struct ActiveTurn {
     turn_id: u64,
+    trace_id: Uuid,
     token: CancellationToken,
 }
 
@@ -212,7 +213,11 @@ impl Gateway {
         }
     }
 
-    pub async fn register_active_turn(&self, session_key: &str) -> (CancellationToken, u64) {
+    pub async fn register_active_turn(
+        &self,
+        session_key: &str,
+        trace_id: Uuid,
+    ) -> (CancellationToken, u64) {
         let token = CancellationToken::new();
         let turn_id = self
             .turn_id_counter
@@ -222,10 +227,28 @@ impl Gateway {
             session_key.to_string(),
             ActiveTurn {
                 turn_id,
+                trace_id,
                 token: token.clone(),
             },
         );
         (token, turn_id)
+    }
+
+    pub async fn cancel_by_trace_id(&self, trace_id: Uuid) -> bool {
+        let token = {
+            let active_turns = self.active_turns.lock().await;
+            active_turns
+                .values()
+                .find(|entry| entry.trace_id == trace_id)
+                .map(|entry| entry.token.clone())
+        };
+
+        if let Some(token) = token {
+            token.cancel();
+            return true;
+        }
+
+        false
     }
 
     pub async fn unregister_active_turn(&self, session_key: &str, turn_id: u64) {
@@ -384,7 +407,9 @@ impl Gateway {
         let view = self.orchestrator.config_view();
         let session_key = SessionKey::from_inbound(&inbound).0;
         let turn_timeout_secs = agent_turn_lifecycle(view.as_ref(), agent_id)?.turn_timeout_secs;
-        let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
+        let (cancel_token, turn_id) = self
+            .register_active_turn(&session_key, inbound.trace_id)
+            .await;
         let guard = ActiveTurnGuard::new(
             Arc::clone(&self.active_turns),
             session_key,
@@ -478,7 +503,9 @@ impl Gateway {
 
         let session_key = SessionKey::from_inbound(&inbound).0;
         let turn_timeout_secs = agent_turn_lifecycle(view.as_ref(), &agent_id)?.turn_timeout_secs;
-        let (cancel_token, turn_id) = self.register_active_turn(&session_key).await;
+        let (cancel_token, turn_id) = self
+            .register_active_turn(&session_key, inbound.trace_id)
+            .await;
         let guard = ActiveTurnGuard::new(
             Arc::clone(&self.active_turns),
             session_key,
@@ -582,6 +609,23 @@ pub fn spawn_scheduled_task_listener(
                     })
                     .await;
             }
+        }
+    })
+}
+
+pub fn spawn_cancel_task_listener(
+    gateway: Arc<Gateway>,
+    bus: Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = bus.subscribe(Topic::CancelTask).await;
+        while let Some(msg) = rx.recv().await {
+            let BusMessage::CancelTask { trace_id } = msg else {
+                continue;
+            };
+
+            let cancelled = gateway.cancel_by_trace_id(trace_id).await;
+            tracing::debug!(trace_id = %trace_id, cancelled, "cancel task event handled");
         }
     })
 }
@@ -2107,7 +2151,9 @@ mod tests {
         let (gw, _tmp) = make_gateway().await;
         let inbound = make_test_inbound("/stop");
         let session_key = SessionKey::from_inbound(&inbound);
-        let (token, _turn_id) = gw.register_active_turn(&session_key.0).await;
+        let (token, _turn_id) = gw
+            .register_active_turn(&session_key.0, inbound.trace_id)
+            .await;
 
         let out = gw
             .handle_inbound(inbound)
@@ -2137,7 +2183,9 @@ mod tests {
         let (gw, _tmp) = make_gateway().await;
         let uppercase = make_test_inbound("/STOP");
         let uppercase_session = SessionKey::from_inbound(&uppercase);
-        let (uppercase_token, _) = gw.register_active_turn(&uppercase_session.0).await;
+        let (uppercase_token, _) = gw
+            .register_active_turn(&uppercase_session.0, uppercase.trace_id)
+            .await;
 
         let uppercase_out = gw
             .handle_inbound(uppercase)
@@ -2150,7 +2198,9 @@ mod tests {
 
         let mixed = make_test_inbound(" /Stop ");
         let mixed_session = SessionKey::from_inbound(&mixed);
-        let (mixed_token, _) = gw.register_active_turn(&mixed_session.0).await;
+        let (mixed_token, _) = gw
+            .register_active_turn(&mixed_session.0, mixed.trace_id)
+            .await;
 
         let mixed_out = gw
             .handle_inbound(mixed)
@@ -2166,7 +2216,9 @@ mod tests {
     async fn unregister_active_turn_removes_registered_token() {
         let (gw, _tmp) = make_gateway().await;
         let session_key = SessionKey::from_inbound(&make_test_inbound("ping"));
-        let (_token, turn_id) = gw.register_active_turn(&session_key.0).await;
+        let (_token, turn_id) = gw
+            .register_active_turn(&session_key.0, uuid::Uuid::new_v4())
+            .await;
 
         gw.unregister_active_turn(&session_key.0, turn_id).await;
 
@@ -2184,7 +2236,9 @@ mod tests {
         let (gw, _tmp) = make_gateway().await;
         let inbound = make_test_inbound("/stop");
         let session_key = SessionKey::from_inbound(&inbound);
-        let (token, turn_id) = gw.register_active_turn(&session_key.0).await;
+        let (token, turn_id) = gw
+            .register_active_turn(&session_key.0, inbound.trace_id)
+            .await;
 
         let first_stop = gw
             .handle_inbound(inbound)
@@ -2218,6 +2272,41 @@ mod tests {
 
         assert!(outbound.text.contains("stub:anthropic:claude-sonnet-4-5"));
         assert!(gw.active_turns.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_by_trace_id_cancels_matching_active_turn() {
+        let (gw, _tmp) = make_gateway().await;
+        let inbound = make_test_inbound("working");
+        let session_key = SessionKey::from_inbound(&inbound);
+        let trace_id = inbound.trace_id;
+        let (token, _turn_id) = gw.register_active_turn(&session_key.0, trace_id).await;
+
+        assert!(gw.cancel_by_trace_id(trace_id).await);
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_task_listener_cancels_matching_active_turn() {
+        let (gw, _tmp) = make_gateway().await;
+        let bus = Arc::new(EventBus::new(16));
+        let gateway = Arc::new(gw);
+
+        let inbound = make_test_inbound("working");
+        let session_key = SessionKey::from_inbound(&inbound);
+        let trace_id = inbound.trace_id;
+        let (token, _turn_id) = gateway.register_active_turn(&session_key.0, trace_id).await;
+
+        let _handle = spawn_cancel_task_listener(Arc::clone(&gateway), Arc::clone(&bus));
+        tokio::task::yield_now().await;
+
+        bus.publish(BusMessage::CancelTask { trace_id })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("expected listener to cancel matching token");
     }
 
     #[test]

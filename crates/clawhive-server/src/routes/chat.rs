@@ -28,6 +28,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 use crate::{extract_session_token, is_valid_session};
 
+const PROGRESS_MESSAGE: &str = "⏳ Still working on it...";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatAgentInfo {
     pub agent_id: String,
@@ -210,9 +212,19 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                 let bus = Arc::clone(&state.bus);
                                 let out_tx2 = out_tx.clone();
                                 let active_ids = Arc::clone(&active_trace_ids);
+                                let progress_delay_secs = gateway.resolve_turn_lifecycle(&inbound).progress_delay_secs;
                                 tokio::spawn(async move {
+                                    let turn_complete = Arc::new(tokio::sync::Notify::new());
+                                    let _progress_handle = spawn_progress_feedback_timer(
+                                        out_tx2.clone(),
+                                        trace_id,
+                                        progress_delay_secs,
+                                        Arc::clone(&turn_complete),
+                                    );
+
                                     match gateway.handle_inbound_for_agent(inbound, &agent_id).await {
                                         Ok(outbound) => {
+                                            turn_complete.notify_waiters();
                                             // For slash commands and other early returns,
                                             // the orchestrator may not publish ReplyReady.
                                             // Publish it here as a fallback. If already
@@ -232,6 +244,7 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
                                             }
                                         }
                                         Err(error) => {
+                                            turn_complete.notify_waiters();
                                             tracing::warn!(
                                                 trace_id = %trace_id,
                                                 agent_id = %agent_id,
@@ -289,6 +302,25 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, token: String)
 
     relay_handle.abort();
     drop(out_tx);
+}
+
+fn spawn_progress_feedback_timer(
+    out_tx: mpsc::UnboundedSender<ServerMessage>,
+    trace_id: Uuid,
+    progress_delay_secs: u64,
+    turn_complete: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(progress_delay_secs)) => {
+                let _ = out_tx.send(ServerMessage::ReplyReady {
+                    trace_id: trace_id.to_string(),
+                    text: PROGRESS_MESSAGE.to_string(),
+                });
+            }
+            _ = turn_complete.notified() => {}
+        }
+    })
 }
 
 async fn relay_bus_events(
@@ -614,15 +646,19 @@ fn require_valid_session_token(
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
     use clawhive_bus::EventBus;
+    use clawhive_channels::web_console::ServerMessage;
+    use tokio::sync::mpsc;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
+    use super::{spawn_progress_feedback_timer, PROGRESS_MESSAGE};
     use crate::state::AppState;
     use crate::{create_router, SESSION_TTL};
 
@@ -907,5 +943,48 @@ mod tests {
         assert_eq!(agents[0]["agent_id"], "enabled-agent");
         assert_eq!(agents[0]["name"], "Enabled Bot");
         assert_eq!(agents[0]["model"], "gpt-4");
+    }
+
+    #[tokio::test]
+    async fn progress_feedback_sends_reply_ready_after_delay() {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let turn_complete = Arc::new(tokio::sync::Notify::new());
+        let trace_id = Uuid::new_v4();
+
+        let _handle =
+            spawn_progress_feedback_timer(out_tx, trace_id, 0, Arc::clone(&turn_complete));
+
+        let message = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("expected progress message")
+            .expect("channel should stay open");
+
+        match message {
+            ServerMessage::ReplyReady {
+                trace_id: message_trace_id,
+                text,
+            } => {
+                assert_eq!(message_trace_id, trace_id.to_string());
+                assert_eq!(text, PROGRESS_MESSAGE);
+            }
+            other => panic!("expected progress ReplyReady, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_feedback_stays_silent_after_turn_completion() {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
+        let turn_complete = Arc::new(tokio::sync::Notify::new());
+
+        let _handle =
+            spawn_progress_feedback_timer(out_tx, Uuid::new_v4(), 1, Arc::clone(&turn_complete));
+
+        turn_complete.notify_waiters();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
+                .await
+                .is_err()
+        );
     }
 }
