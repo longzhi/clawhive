@@ -257,6 +257,23 @@ impl MemoryFileStore {
         Ok(out)
     }
 
+    /// Read daily files strictly after `since` date (exclusive), returns Vec<(date, content)> newest-first.
+    pub async fn read_daily_since(&self, since: NaiveDate) -> Result<Vec<(NaiveDate, String)>> {
+        let files = self.list_daily_files().await?;
+        let mut out = Vec::new();
+
+        for (date, path) in files {
+            if date <= since {
+                // list is newest-first, once we hit a date <= since we can stop
+                break;
+            }
+            let content = fs::read_to_string(path).await?;
+            out.push((date, content));
+        }
+
+        Ok(out)
+    }
+
     pub async fn archive_daily(&self, date: NaiveDate) -> Result<PathBuf> {
         let source = self.daily_path(date);
         let target = self.archive_path(date);
