@@ -23,6 +23,7 @@ use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
 use crate::common::{infer_mime_from_filename, AbortOnDrop};
+use tokio::sync::watch;
 
 const PROGRESS_MESSAGE: &str = "⏳ Still working on it... (send /stop to cancel)";
 
@@ -389,31 +390,80 @@ pub async fn start_whatsapp(
                         let gateway = gateway.clone();
                         let client = client.clone();
                         let reply_chat = info.source.chat.clone();
-                        let progress_delay = gateway.resolve_turn_lifecycle(&inbound).progress_delay_secs;
+                        let lifecycle = gateway.resolve_turn_lifecycle(&inbound);
+                        let typing_ttl = lifecycle.typing_ttl_secs;
+                        let progress_delay = lifecycle.progress_delay_secs;
                         tokio::spawn(async move {
-                            let turn_complete = Arc::new(tokio::sync::Notify::new());
-                            let progress_complete = turn_complete.clone();
-                            let progress_client = client.clone();
-                            let progress_chat = reply_chat.clone();
+                            let (turn_done_tx, turn_done_rx) = watch::channel(false);
+
+                            let main_handle = tokio::spawn({
+                                let turn_done_tx = turn_done_tx.clone();
+                                async move {
+                                    let result = gateway.handle_inbound(inbound).await;
+                                    let _ = turn_done_tx.send(true);
+                                    result
+                                }
+                            });
+
+                            let composing_client = client.clone();
+                            let composing_chat = reply_chat.clone();
+                            let _typing_guard = AbortOnDrop(tokio::spawn({
+                                let mut turn_done_rx = turn_done_rx.clone();
+                                async move {
+                                    let deadline = tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(typing_ttl);
+                                    loop {
+                                        if tokio::time::Instant::now() >= deadline {
+                                            break;
+                                        }
+                                        let wait = std::time::Duration::from_secs(15)
+                                            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                                        tokio::select! {
+                                            _ = tokio::time::sleep(wait) => {
+                                                let _ = composing_client.chatstate().send_composing(&composing_chat).await;
+                                            }
+                                            changed = turn_done_rx.changed() => {
+                                                if changed.is_err() || *turn_done_rx.borrow() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }));
+
                             let _progress_guard = (progress_delay > 0).then(|| {
+                                let progress_client = client.clone();
+                                let progress_chat = reply_chat.clone();
+                                let mut turn_done_rx = turn_done_rx.clone();
                                 AbortOnDrop(tokio::spawn(async move {
                                     tokio::select! {
                                         _ = tokio::time::sleep(tokio::time::Duration::from_secs(progress_delay)) => {
-                                            let progress = wa::Message {
-                                                conversation: Some(PROGRESS_MESSAGE.to_string()),
-                                                ..Default::default()
-                                            };
-                                            if let Err(e) = progress_client.send_message(progress_chat, progress).await {
-                                                tracing::warn!(error = %e, "failed to send WhatsApp progress message");
+                                            if !*turn_done_rx.borrow() {
+                                                let progress = wa::Message {
+                                                    conversation: Some(PROGRESS_MESSAGE.to_string()),
+                                                    ..Default::default()
+                                                };
+                                                if let Err(e) = progress_client.send_message(progress_chat, progress).await {
+                                                    tracing::warn!(error = %e, "failed to send WhatsApp progress message");
+                                                }
                                             }
                                         }
-                                        _ = progress_complete.notified() => {}
+                                        _ = turn_done_rx.changed() => {}
                                     }
                                 }))
                             });
 
-                            let result = gateway.handle_inbound(inbound).await;
-                            turn_complete.notify_waiters();
+                            let result = match main_handle.await {
+                                Ok(inner) => inner,
+                                Err(join_err) => {
+                                    let _ = client.chatstate().send_paused(&reply_chat).await;
+                                    tracing::error!("WhatsApp handle task panicked: {join_err}");
+                                    return;
+                                }
+                            };
+                            drop(_typing_guard);
+                            drop(_progress_guard);
 
                             match result {
                                 Ok(Some(outbound)) => {

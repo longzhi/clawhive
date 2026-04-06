@@ -2563,6 +2563,7 @@ impl Orchestrator {
         let mut total_tool_calls: usize = 0;
         let mut successful_tool_calls_total: usize = 0;
         let mut tool_summaries: Vec<(String, String)> = Vec::new();
+        let mut last_intermediate_text = String::new();
         let attachment_collector: Arc<tokio::sync::Mutex<Vec<Attachment>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
@@ -2944,14 +2945,23 @@ impl Orchestrator {
                     stop_reason = ?resp.stop_reason,
                     "tool_use_loop: returning final response"
                 );
+                let mut final_resp = resp.clone();
+                if final_resp.text.is_empty() && !last_intermediate_text.is_empty() {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        fallback_len = last_intermediate_text.len(),
+                        "tool_use_loop: final response empty, recovering intermediate text"
+                    );
+                    final_resp.text = std::mem::take(&mut last_intermediate_text);
+                }
                 let tool_attachments = attachment_collector.lock().await.drain(..).collect();
                 return Ok((
-                    resp.clone(),
+                    final_resp.clone(),
                     messages,
                     tool_attachments,
                     ToolLoopMeta {
                         successful_tool_calls: successful_tool_calls_total,
-                        final_stop_reason: resp.stop_reason.clone(),
+                        final_stop_reason: final_resp.stop_reason,
                         cancelled: false,
                     },
                 ));
@@ -2962,6 +2972,9 @@ impl Orchestrator {
                 tool_uses.iter().map(|(_, name, _)| name.clone()).collect();
             if tool_names.iter().any(|name| name == "web_search") {
                 web_search_called = true;
+            }
+            if !resp.text.is_empty() {
+                last_intermediate_text = resp.text.clone();
             }
             tracing::debug!(
                 agent_id = %agent_id,
