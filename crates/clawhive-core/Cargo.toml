@@ -35,6 +35,7 @@ tempfile.workspace = true
 zip = "2"
 tar = "0.4"
 flate2 = "1"
+lopdf.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

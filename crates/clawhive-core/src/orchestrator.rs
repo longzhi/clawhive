@@ -64,6 +64,7 @@ const SKILL_INSTALL_USAGE_HINT: &str = "请提供 skill 来源路径或 URL。�
 const EPISODE_FLUSH_PENDING_GRACE_SECS: i64 = 30;
 const MAX_OPEN_EPISODE_TURNS: u64 = 4;
 const MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH: u64 = 50;
+const MAX_ATTACHMENT_TEXT_CHARS: usize = 12_000;
 
 #[derive(Debug, Clone)]
 struct BoundaryFlushEpisode {
@@ -4938,9 +4939,84 @@ fn build_user_content(text: String, attachment_blocks: Vec<ContentBlock>) -> Vec
     content
 }
 
-fn build_attachment_blocks(attachments: &[clawhive_schema::Attachment]) -> Vec<ContentBlock> {
+fn decode_attachment_bytes(attachment: &clawhive_schema::Attachment) -> Option<Vec<u8>> {
     use base64::Engine;
 
+    base64::engine::general_purpose::STANDARD
+        .decode(&attachment.url)
+        .ok()
+}
+
+fn trim_attachment_text(text: &str) -> Option<String> {
+    let trimmed = text.replace('\u{0000}', "").trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn truncate_attachment_text(text: &str) -> String {
+    if text.chars().count() <= MAX_ATTACHMENT_TEXT_CHARS {
+        return text.to_string();
+    }
+
+    let end = text
+        .char_indices()
+        .nth(MAX_ATTACHMENT_TEXT_CHARS)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    format!(
+        "{}\n\n[attachment text truncated after {} characters]",
+        &text[..end],
+        MAX_ATTACHMENT_TEXT_CHARS
+    )
+}
+
+fn extract_pdf_text(bytes: &[u8]) -> Result<String> {
+    let document = lopdf::Document::load_mem(bytes).context("parse pdf attachment")?;
+    let page_numbers: Vec<u32> = document.get_pages().keys().copied().collect();
+    if page_numbers.is_empty() {
+        return Ok(String::new());
+    }
+
+    document
+        .extract_text(&page_numbers)
+        .context("extract pdf attachment text")
+}
+
+fn attachment_prompt_fragment(attachment: &clawhive_schema::Attachment) -> Option<String> {
+    let mime = attachment
+        .mime_type
+        .as_deref()
+        .unwrap_or("application/octet-stream");
+    let label = attachment.file_name.as_deref().unwrap_or("attachment");
+
+    let extracted_text = decode_attachment_bytes(attachment).and_then(|bytes| {
+        if is_text_mime(mime) {
+            String::from_utf8(bytes)
+                .ok()
+                .and_then(|text| trim_attachment_text(&text))
+        } else if mime == "application/pdf" {
+            extract_pdf_text(&bytes)
+                .ok()
+                .and_then(|text| trim_attachment_text(&text))
+        } else {
+            None
+        }
+    });
+
+    let body = match extracted_text {
+        Some(text) => truncate_attachment_text(&text),
+        None => "[binary attachment uploaded; automatic text extraction unavailable]".to_string(),
+    };
+
+    Some(format!(
+        "<attachment name=\"{label}\" type=\"{mime}\">\n{body}\n</attachment>"
+    ))
+}
+
+fn build_attachment_blocks(attachments: &[clawhive_schema::Attachment]) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
     for a in attachments {
         match a.kind {
@@ -4955,18 +5031,8 @@ fn build_attachment_blocks(attachments: &[clawhive_schema::Attachment]) -> Vec<C
                 });
             }
             _ => {
-                let mime = a.mime_type.as_deref().unwrap_or("application/octet-stream");
-                if is_text_mime(mime) {
-                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&a.url) {
-                        if let Ok(text) = String::from_utf8(bytes) {
-                            let label = a.file_name.as_deref().unwrap_or("attachment");
-                            blocks.push(ContentBlock::Text {
-                                text: format!(
-                                    "<attachment name=\"{label}\" type=\"{mime}\">\n{text}\n</attachment>"
-                                ),
-                            });
-                        }
-                    }
+                if let Some(text) = attachment_prompt_fragment(a) {
+                    blocks.push(ContentBlock::Text { text });
                 }
             }
         }
@@ -4975,23 +5041,13 @@ fn build_attachment_blocks(attachments: &[clawhive_schema::Attachment]) -> Vec<C
 }
 
 fn build_session_text(user_text: &str, attachments: &[clawhive_schema::Attachment]) -> String {
-    use base64::Engine;
-
     let mut parts = vec![user_text.to_string()];
     for a in attachments {
         if matches!(a.kind, clawhive_schema::AttachmentKind::Image) {
             continue;
         }
-        let mime = a.mime_type.as_deref().unwrap_or("application/octet-stream");
-        if is_text_mime(mime) {
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&a.url) {
-                if let Ok(text) = String::from_utf8(bytes) {
-                    let label = a.file_name.as_deref().unwrap_or("attachment");
-                    parts.push(format!(
-                        "<attachment name=\"{label}\" type=\"{mime}\">\n{text}\n</attachment>"
-                    ));
-                }
-            }
+        if let Some(fragment) = attachment_prompt_fragment(a) {
+            parts.push(fragment);
         }
     }
     parts.join("\n\n")
@@ -8007,5 +8063,102 @@ Body"#,
             detect_empty_promise_structural(0, 0, "没问题。"),
             EmptyPromiseVerdict::No,
         );
+    }
+
+    fn sample_pdf_bytes(text: &str) -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document, Object, Stream};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => font_id,
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 720.into()]),
+                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn build_attachment_blocks_extracts_pdf_text() {
+        use base64::Engine;
+
+        let attachment = Attachment {
+            kind: AttachmentKind::Document,
+            url: base64::engine::general_purpose::STANDARD
+                .encode(sample_pdf_bytes("Lease says landlord pays")),
+            mime_type: Some("application/pdf".to_string()),
+            file_name: Some("lease.pdf".to_string()),
+            size: None,
+        };
+
+        let blocks = build_attachment_blocks(&[attachment]);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("lease.pdf"));
+                assert!(text.contains("Lease says landlord pays"));
+            }
+            other => panic!("expected text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_session_text_keeps_binary_attachment_placeholder() {
+        let session_text = build_session_text(
+            "请看合同",
+            &[Attachment {
+                kind: AttachmentKind::Document,
+                url: "not-base64".to_string(),
+                mime_type: Some(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        .to_string(),
+                ),
+                file_name: Some("lease.docx".to_string()),
+                size: None,
+            }],
+        );
+
+        assert!(session_text.contains("lease.docx"));
+        assert!(session_text.contains("binary attachment uploaded"));
     }
 }
