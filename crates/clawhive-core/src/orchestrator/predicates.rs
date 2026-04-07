@@ -370,3 +370,294 @@ pub(super) fn repair_tool_pairing(messages: &mut Vec<LlmMessage>) {
         messages.truncate(assistant_idx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use clawhive_memory::SessionMessage;
+    use clawhive_provider::{ContentBlock, LlmMessage};
+
+    use crate::orchestrator::test_helpers::{
+        agent_with_memory_policy, assistant_with_tool_use, message_roles, user_with_tool_result,
+    };
+
+    use super::*;
+
+    #[test]
+    fn repair_tool_pairing_removes_unpaired_tool_use_messages() {
+        let mut messages = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool_use("tool-1"),
+            LlmMessage::user("ordinary follow-up"),
+        ];
+
+        repair_tool_pairing(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+    }
+
+    #[test]
+    fn repair_tool_pairing_removes_dangling_last_assistant_tool_use() {
+        let mut messages = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool_use("tool-1"),
+        ];
+
+        repair_tool_pairing(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+    }
+
+    #[test]
+    fn repair_tool_pairing_keeps_properly_paired_messages() {
+        let expected = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool_use("tool-1"),
+            user_with_tool_result("tool-1"),
+        ];
+        let mut messages = expected.clone();
+
+        repair_tool_pairing(&mut messages);
+
+        assert_eq!(message_roles(&messages), message_roles(&expected));
+        assert_eq!(messages.len(), expected.len());
+    }
+
+    #[test]
+    fn repair_tool_pairing_handles_empty_messages() {
+        let mut messages = Vec::new();
+
+        repair_tool_pairing(&mut messages);
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn repair_tool_pairing_ignores_messages_without_tool_use() {
+        let expected = vec![
+            LlmMessage::user("question"),
+            LlmMessage::assistant("answer"),
+        ];
+        let mut messages = expected.clone();
+
+        repair_tool_pairing(&mut messages);
+
+        assert_eq!(message_roles(&messages), message_roles(&expected));
+        assert_eq!(messages.len(), expected.len());
+    }
+
+    #[test]
+    fn history_message_limit_defaults_to_10() {
+        let agent = agent_with_memory_policy(None);
+
+        assert_eq!(history_message_limit(&agent), 10);
+    }
+
+    #[test]
+    fn history_message_limit_converts_turns() {
+        let agent = agent_with_memory_policy(Some(crate::config::MemoryPolicyConfig {
+            mode: "session".to_string(),
+            write_scope: "session".to_string(),
+            idle_minutes: Some(30),
+            daily_at_hour: Some(4),
+            limit_history_turns: Some(7),
+            max_injected_chars: 6000,
+            daily_summary_interval: 0,
+        }));
+
+        assert_eq!(history_message_limit(&agent), 14);
+    }
+
+    #[test]
+    fn format_time_gap_prefers_days_hours_minutes() {
+        assert_eq!(
+            format_time_gap(chrono::Duration::minutes(45)),
+            "45 minute(s)"
+        );
+        assert_eq!(format_time_gap(chrono::Duration::hours(3)), "3 hour(s)");
+        assert_eq!(format_time_gap(chrono::Duration::hours(49)), "2 day(s)");
+    }
+
+    #[test]
+    fn build_history_messages_inserts_inactivity_markers() {
+        let history = vec![
+            SessionMessage {
+                role: "user".to_string(),
+                content: "first".to_string(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap()),
+            },
+            SessionMessage {
+                role: "assistant".to_string(),
+                content: "second".to_string(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 1, 1, 10, 40, 0).unwrap()),
+            },
+            SessionMessage {
+                role: "user".to_string(),
+                content: "third".to_string(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 1, 1, 10, 50, 0).unwrap()),
+            },
+        ];
+
+        let messages = build_messages_from_history(&history);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(
+            messages[1].content,
+            vec![ContentBlock::Text {
+                text: "[40 minute(s) of inactivity has passed since the last message]".to_string()
+            }]
+        );
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[3].role, "user");
+    }
+
+    #[test]
+    fn slow_latency_threshold_detects_warn_boundary() {
+        assert!(!is_slow_latency_ms(9_999, 10_000));
+        assert!(is_slow_latency_ms(10_000, 10_000));
+        assert!(is_slow_latency_ms(25_000, 10_000));
+    }
+
+    #[test]
+    fn explicit_web_search_request_detection() {
+        assert!(is_explicit_web_search_request(
+            "请使用 web_search 工具搜索 OpenAI 最新新闻"
+        ));
+        assert!(is_explicit_web_search_request(
+            "please use web search tool for this"
+        ));
+        assert!(!is_explicit_web_search_request("你觉得这个功能怎么样"));
+    }
+
+    #[test]
+    fn web_search_reminder_injection_predicate() {
+        assert!(should_inject_web_search_reminder(true, false, false, 0));
+        assert!(!should_inject_web_search_reminder(true, true, false, 0));
+        assert!(!should_inject_web_search_reminder(false, false, false, 0));
+        assert!(!should_inject_web_search_reminder(true, false, true, 0));
+        assert!(!should_inject_web_search_reminder(true, false, false, 1));
+    }
+
+    #[test]
+    fn scheduled_retry_only_when_claiming_execution_without_tools() {
+        assert!(should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            0,
+            0,
+            "I executed all steps and saved the file.",
+        ));
+
+        assert!(!should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            0,
+            0,
+            "以下是今日技术摘要：...",
+        ));
+
+        assert!(!should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            1,
+            0,
+            "I executed all steps and saved the file.",
+        ));
+    }
+
+    #[test]
+    fn fabricated_response_skipped_in_conversation() {
+        // Conversations have a human in the loop — never retry for fabrication
+        assert!(!should_retry_fabricated_scheduled_response(
+            false,
+            0,
+            0,
+            0,
+            "I created the file and saved it.",
+        ));
+        assert!(!should_retry_fabricated_scheduled_response(
+            false,
+            0,
+            0,
+            0,
+            "I updated the config.",
+        ));
+    }
+
+    #[test]
+    fn fabricated_response_scheduled_still_allows_two_retries() {
+        assert!(should_retry_fabricated_scheduled_response(
+            true,
+            0,
+            0,
+            0,
+            "已创建文件",
+        ));
+        assert!(should_retry_fabricated_scheduled_response(
+            true,
+            1,
+            0,
+            0,
+            "已创建文件",
+        ));
+        assert!(!should_retry_fabricated_scheduled_response(
+            true,
+            2,
+            0,
+            0,
+            "已创建文件",
+        ));
+    }
+
+    #[test]
+    fn incomplete_thought_detected_in_conversation() {
+        assert!(should_retry_incomplete_scheduled_thought(
+            false,
+            0,
+            1,
+            "让我来处理这个问题",
+        ));
+    }
+
+    #[test]
+    fn incomplete_thought_conversation_max_one_retry() {
+        assert!(should_retry_incomplete_scheduled_thought(
+            false,
+            0,
+            1,
+            "Let me fix that.",
+        ));
+        assert!(!should_retry_incomplete_scheduled_thought(
+            false,
+            1,
+            1,
+            "Let me fix that.",
+        ));
+    }
+
+    #[test]
+    fn incomplete_thought_scheduled_still_allows_two_retries() {
+        assert!(should_retry_incomplete_scheduled_thought(
+            true,
+            0,
+            1,
+            "I will create the file.",
+        ));
+        assert!(should_retry_incomplete_scheduled_thought(
+            true,
+            1,
+            1,
+            "I will create the file.",
+        ));
+        assert!(!should_retry_incomplete_scheduled_thought(
+            true,
+            2,
+            1,
+            "I will create the file.",
+        ));
+    }
+}

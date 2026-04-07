@@ -359,3 +359,144 @@ pub(super) fn truncate_tool_result_preview(text: &str, max_chars: usize) -> Stri
     let truncated: String = normalized.chars().take(max_chars).collect();
     format!("{truncated}…")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory_retrieval::{MemoryHit, MemoryRoutingBias};
+    use crate::orchestrator::test_helpers::make_result;
+
+    #[test]
+    fn test_clamp_to_budget_empty_results() {
+        assert_eq!(clamp_to_budget(&[], 100), "");
+    }
+
+    #[test]
+    fn test_clamp_to_budget_within_limit() {
+        let results = vec![
+            make_result("memory/a.md", "daily", "first chunk", 0.91),
+            make_result("memory/b.md", "daily", "second chunk", 0.83),
+        ];
+
+        let context = clamp_to_budget(&results, 1_000);
+
+        assert!(context.starts_with("## Relevant Memory\n\n"));
+        assert!(context.contains("### memory/a.md (score: 0.91)\nfirst chunk\n\n"));
+        assert!(context.contains("### memory/b.md (score: 0.83)\nsecond chunk\n\n"));
+    }
+
+    #[test]
+    fn test_clamp_to_budget_exceeds_limit() {
+        let results = vec![make_result(
+            "memory/a.md",
+            "daily",
+            "abcdefghijklmnopqrstuvwxyz",
+            0.91,
+        )];
+
+        let context = clamp_to_budget(&results, 40);
+
+        assert!(context.starts_with("## Relevant Memory\n\n"));
+        assert!(context.contains("...[truncated]"));
+        assert!(!context.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!context.is_empty());
+    }
+
+    #[test]
+    fn test_clamp_to_budget_zero_budget() {
+        let results = vec![make_result("memory/a.md", "daily", "first chunk", 0.91)];
+
+        assert_eq!(clamp_to_budget(&results, 0), "");
+    }
+
+    #[test]
+    fn build_memory_context_from_hits_long_term_query_suppresses_daily_and_session_noise() {
+        let hits = vec![
+            MemoryHit::Chunk(Box::new(make_result(
+                "MEMORY.md",
+                "long_term",
+                "长期主线：重构记忆系统，采用分层记忆架构。",
+                1.32,
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
+                "memory/2026-03-29.md",
+                "daily",
+                "daily 细节：品牌命名还在候选阶段。",
+                0.94,
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
+                "sessions/demo#turn:1-2",
+                "session",
+                "session 讨论：列出一堆当前缺陷清单。",
+                0.81,
+            ))),
+        ];
+
+        let context = build_memory_context_from_hits(&hits, 4_000);
+
+        assert!(context.contains("MEMORY.md"));
+        assert!(context.contains("长期主线：重构记忆系统"));
+        assert!(!context.contains("品牌命名还在候选阶段"));
+        assert!(!context.contains("列出一堆当前缺陷清单"));
+    }
+
+    #[test]
+    fn build_memory_context_from_hits_short_term_query_prefers_daily_over_long_term() {
+        let hits = vec![
+            MemoryHit::Chunk(Box::new(make_result(
+                "memory/2026-03-30.md",
+                "daily",
+                "短期事项：品牌命名还在候选阶段。",
+                1.28,
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
+                "sessions/demo#turn:1",
+                "session",
+                "session 补充：刚确认了几个候选词。",
+                1.04,
+            ))),
+            MemoryHit::Chunk(Box::new(make_result(
+                "MEMORY.md",
+                "long_term",
+                "长期主线：重构记忆系统。",
+                0.83,
+            ))),
+        ];
+
+        let context = build_memory_context_from_hits(&hits, 4_000);
+
+        let daily_pos = context.find("memory/2026-03-30.md").expect("daily hit");
+        let long_term_pos = context.find("MEMORY.md").expect("long term hit");
+        assert!(daily_pos < long_term_pos);
+        assert!(context.contains("品牌命名还在候选阶段"));
+    }
+
+    #[test]
+    fn should_use_long_term_fallback_only_when_long_term_query_has_no_fact_or_memory_hit() {
+        let daily_hit = MemoryHit::Chunk(Box::new(make_result(
+            "memory/2026-03-30.md",
+            "daily",
+            "短期事项：品牌命名还在候选阶段。",
+            1.0,
+        )));
+        let long_term_hit = MemoryHit::Chunk(Box::new(make_result(
+            "MEMORY.md",
+            "long_term",
+            "长期主线：重构记忆系统。",
+            0.8,
+        )));
+
+        assert!(should_use_long_term_fallback(
+            MemoryRoutingBias::LongTerm,
+            std::slice::from_ref(&daily_hit),
+        ));
+        assert!(!should_use_long_term_fallback(
+            MemoryRoutingBias::LongTerm,
+            &[daily_hit, long_term_hit.clone()],
+        ));
+        assert!(!should_use_long_term_fallback(
+            MemoryRoutingBias::ShortTerm,
+            std::slice::from_ref(&long_term_hit),
+        ));
+    }
+}

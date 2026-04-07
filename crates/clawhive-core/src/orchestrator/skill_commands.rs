@@ -357,3 +357,136 @@ impl Orchestrator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::skill::SkillRegistry;
+
+    use super::*;
+
+    #[test]
+    fn compute_merged_permissions_merges_all_when_no_forced() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill_a = dir.path().join("skill-a");
+        std::fs::create_dir_all(&skill_a).unwrap();
+        std::fs::write(
+            skill_a.join("SKILL.md"),
+            r#"---
+name: skill-a
+description: A
+permissions:
+  network:
+    allow: ["api.a.com:443"]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let skill_b = dir.path().join("skill-b");
+        std::fs::create_dir_all(&skill_b).unwrap();
+        std::fs::write(
+            skill_b.join("SKILL.md"),
+            r#"---
+name: skill-b
+description: B
+permissions:
+  network:
+    allow: ["api.b.com:443"]
+---
+Body"#,
+        )
+        .unwrap();
+
+        let active_skills = SkillRegistry::load_from_dir(dir.path()).unwrap();
+        let merged = Orchestrator::compute_merged_permissions(&active_skills, None);
+
+        let perms = merged.expect("compute_merged_permissions returns Some when skills have perms");
+        assert!(perms.network.allow.contains(&"api.a.com:443".to_string()));
+        assert!(perms.network.allow.contains(&"api.b.com:443".to_string()));
+    }
+
+    #[test]
+    fn normal_mode_should_not_use_skill_permissions() {
+        // Installing skills with permissions should NOT restrict normal (non-skill) requests.
+        // Normal mode: merged_permissions should be None (Builtin origin).
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill = dir.path().join("restricted-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: restricted-skill\ndescription: Only allows sh\npermissions:\n  exec: [sh]\n  fs:\n    read: [\"$SKILL_DIR/**\"]\n---\nBody",
+        )
+        .unwrap();
+
+        let active_skills = SkillRegistry::load_from_dir(dir.path()).unwrap();
+
+        // Verify the skill has permissions declared
+        let skill_entry = active_skills.get("restricted-skill").unwrap();
+        assert!(skill_entry.permissions.is_some());
+
+        // Normal mode: no forced skills -> should NOT apply skill permissions
+        let forced_skills: Option<Vec<String>> = None;
+        let merged_permissions = if forced_skills.is_some() {
+            Orchestrator::compute_merged_permissions(&active_skills, forced_skills.as_deref())
+        } else {
+            None // Normal mode returns None (Builtin origin)
+        };
+
+        assert!(
+            merged_permissions.is_none(),
+            "normal mode must not use skill permissions"
+        );
+    }
+
+    #[test]
+    fn forced_skill_mode_applies_skill_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill = dir.path().join("restricted-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: restricted-skill\ndescription: Only allows sh\npermissions:\n  exec: [sh]\n  network:\n    allow: [\"api.example.com:443\"]\n---\nBody",
+        )
+        .unwrap();
+
+        let active_skills = SkillRegistry::load_from_dir(dir.path()).unwrap();
+
+        // Forced skill mode: permissions SHOULD be applied
+        let forced = Some(vec!["restricted-skill".to_string()]);
+        let merged = Orchestrator::compute_merged_permissions(&active_skills, forced.as_deref());
+
+        let perms = merged.expect("forced skill mode must return permissions");
+        assert_eq!(perms.exec, vec!["sh".to_string()]);
+        assert!(perms
+            .network
+            .allow
+            .contains(&"api.example.com:443".to_string()));
+    }
+
+    #[test]
+    fn forced_skill_without_permissions_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let skill = dir.path().join("no-perms-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: no-perms-skill\ndescription: No permissions declared\n---\nBody",
+        )
+        .unwrap();
+
+        let active_skills = SkillRegistry::load_from_dir(dir.path()).unwrap();
+
+        // Forced skill with no permissions -> None (Builtin, no extra restrictions)
+        let forced = Some(vec!["no-perms-skill".to_string()]);
+        let merged = Orchestrator::compute_merged_permissions(&active_skills, forced.as_deref());
+
+        assert!(
+            merged.is_none(),
+            "skill without permissions should not trigger External origin"
+        );
+    }
+}

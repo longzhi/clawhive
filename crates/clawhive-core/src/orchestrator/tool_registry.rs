@@ -133,3 +133,67 @@ pub fn build_tool_registry(
     }
     registry
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use clawhive_bus::EventBus;
+    use clawhive_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
+    use clawhive_memory::file_store::MemoryFileStore;
+    use clawhive_memory::search_index::SearchIndex;
+    use clawhive_memory::MemoryStore;
+    use clawhive_provider::ProviderRegistry;
+    use clawhive_scheduler::{ScheduleManager, SqliteStore};
+
+    use crate::orchestrator::test_helpers::agent_with_memory_policy;
+    use crate::router::LlmRouter;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn build_tool_registry_registers_memory_fact_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let file_store = MemoryFileStore::new(dir.path());
+        let search_index = SearchIndex::new(memory.db(), "test-agent");
+        let embedding_provider: Arc<dyn EmbeddingProvider> =
+            Arc::new(StubEmbeddingProvider::new(8));
+        let router = LlmRouter::new(ProviderRegistry::new(), HashMap::new(), vec![]);
+        let bus = EventBus::new(16);
+        let schedule_manager = Arc::new(
+            ScheduleManager::new(
+                SqliteStore::open(&dir.path().join("data/scheduler.db")).unwrap(),
+                Arc::new(EventBus::new(16)),
+            )
+            .await
+            .unwrap(),
+        );
+        let agents = vec![agent_with_memory_policy(None)];
+        let personas = HashMap::new();
+
+        let registry = build_tool_registry(
+            &file_store,
+            &search_index,
+            &memory,
+            &embedding_provider,
+            dir.path(),
+            dir.path(),
+            &None,
+            &bus.publisher(),
+            schedule_manager,
+            None,
+            &router,
+            &agents,
+            &personas,
+        );
+        let tool_names: Vec<String> = registry
+            .tool_defs()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        assert!(tool_names.iter().any(|name| name == "memory_write"));
+        assert!(tool_names.iter().any(|name| name == "memory_forget"));
+    }
+}

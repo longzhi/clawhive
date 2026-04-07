@@ -929,3 +929,127 @@ impl Orchestrator {
         Ok(Box::pin(mapped))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use clawhive_memory::fact_store::FactStore;
+    use clawhive_memory::file_store::MemoryFileStore;
+    use clawhive_memory::{MemoryStore, SessionReader};
+    use clawhive_provider::{LlmMessage, ProviderRegistry};
+    use clawhive_schema::*;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::context;
+    use crate::orchestrator::test_helpers::{
+        make_tool_loop_test_orchestrator, CompactionOnlyProvider, SequenceProvider,
+    };
+    use crate::router::LlmRouter;
+
+    #[tokio::test]
+    async fn handle_with_view_persists_abort_message_to_session() {
+        let provider = Arc::new(SequenceProvider::new(vec![
+            crate::orchestrator::test_helpers::llm_text_response(
+                "should not be called",
+                "end_turn",
+            ),
+        ]));
+        let (orchestrator, tmp, memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(2)).await;
+        let view = orchestrator.config_view();
+        let inbound = InboundMessage {
+            trace_id: uuid::Uuid::new_v4(),
+            channel_type: "telegram".into(),
+            connector_id: "tg_main".into(),
+            conversation_scope: "chat:cancelled".into(),
+            user_scope: "user:1".into(),
+            text: "read and stop".into(),
+            at: Utc::now(),
+            thread_id: None,
+            is_mention: false,
+            mention_target: None,
+            message_id: None,
+            attachments: vec![],
+            message_source: None,
+        };
+        let session_key = SessionKey::from_inbound(&inbound);
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let outbound = orchestrator
+            .handle_with_view(view.clone(), inbound, "agent-a", cancel_token)
+            .await
+            .unwrap();
+        assert_eq!(provider.call_count(), 0);
+        assert_eq!(outbound.text, "[Task stopped by user]");
+
+        let session = memory
+            .get_session(&session_key.0)
+            .await
+            .unwrap()
+            .expect("session record");
+        let reader = SessionReader::new(tmp.path());
+        let messages = reader
+            .load_recent_messages(&session.session_id, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "[Task stopped by user]");
+    }
+
+    #[tokio::test]
+    async fn compaction_does_not_write_persistent_memory_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+        let file_store = MemoryFileStore::new(tmp.path());
+        let fact_store = FactStore::new(memory.db());
+
+        let mut registry = ProviderRegistry::new();
+        registry.register("compact", Arc::new(CompactionOnlyProvider));
+        let router = Arc::new(LlmRouter::new(
+            registry,
+            HashMap::from([("compact".to_string(), "compact/model".to_string())]),
+            vec![],
+        ));
+        let ctx_mgr =
+            context::ContextManager::new(router, context::ContextConfig::for_model(2_000));
+
+        let large = "x".repeat(25_000);
+        let messages = vec![
+            LlmMessage::user(large.clone()),
+            LlmMessage::assistant(large.clone()),
+            LlmMessage::user(large.clone()),
+            LlmMessage::assistant(large),
+        ];
+
+        let (_, compaction) = ctx_mgr
+            .ensure_within_limits("compact/model", messages)
+            .await
+            .expect("compaction succeeds");
+        assert!(compaction.is_some(), "compaction should have occurred");
+
+        let today = chrono::Utc::now().date_naive();
+        assert!(file_store.read_daily(today).await.unwrap().is_none());
+        assert!(file_store.read_long_term().await.unwrap().trim().is_empty());
+        assert!(fact_store
+            .get_active_facts("test-agent")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn compaction_lock_prevents_concurrent_access() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = lock.try_lock().unwrap();
+        assert!(lock.try_lock().is_err());
+        drop(guard);
+        assert!(lock.try_lock().is_ok());
+    }
+}

@@ -340,3 +340,105 @@ pub(super) fn build_session_text(user_text: &str, attachments: &[Attachment]) ->
     }
     parts.join("\n\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_pdf_bytes(text: &str) -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document, Object, Stream};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => font_id,
+            },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 720.into()]),
+                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn build_attachment_blocks_extracts_pdf_text() {
+        use base64::Engine;
+
+        let attachment = Attachment {
+            kind: AttachmentKind::Document,
+            url: base64::engine::general_purpose::STANDARD
+                .encode(sample_pdf_bytes("Lease says landlord pays")),
+            mime_type: Some("application/pdf".to_string()),
+            file_name: Some("lease.pdf".to_string()),
+            size: None,
+        };
+
+        let blocks = build_attachment_blocks(&[attachment]);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("lease.pdf"));
+                assert!(text.contains("Lease says landlord pays"));
+            }
+            other => panic!("expected text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_session_text_keeps_binary_attachment_placeholder() {
+        let session_text = build_session_text(
+            "请看合同",
+            &[Attachment {
+                kind: AttachmentKind::Document,
+                url: "not-base64".to_string(),
+                mime_type: Some(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        .to_string(),
+                ),
+                file_name: Some("lease.docx".to_string()),
+                size: None,
+            }],
+        );
+
+        assert!(session_text.contains("lease.docx"));
+        assert!(session_text.contains("binary attachment uploaded"));
+    }
+}

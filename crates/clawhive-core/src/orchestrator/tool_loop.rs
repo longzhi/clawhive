@@ -973,3 +973,303 @@ impl Orchestrator {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use clawhive_provider::LlmMessage;
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::config::SecurityMode;
+    use crate::orchestrator::test_helpers::{
+        llm_text_response, llm_tool_use_response, make_memory_tool_orchestrator,
+        make_tool_loop_test_orchestrator, wait_for_call_count, SequenceProvider,
+    };
+    use crate::tool::ToolContext;
+
+    #[tokio::test]
+    async fn tool_use_loop_returns_abort_message_when_cancelled_before_first_iteration() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "should not be called",
+            "end_turn",
+        )]));
+        let (orchestrator, _tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(1)).await;
+        let view = orchestrator.config_view();
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let (resp, _messages, _attachments, meta) = orchestrator
+            .tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-cancelled-before-first-iteration",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("stop now")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                cancel_token,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.call_count(), 0);
+        assert_eq!(resp.text, "[Task stopped by user]");
+        assert_eq!(resp.stop_reason.as_deref(), Some("cancelled"));
+        assert!(meta.cancelled);
+        assert_eq!(meta.successful_tool_calls, 0);
+        assert_eq!(meta.final_stop_reason.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_returns_abort_message_with_completed_tool_summaries() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_tool_use_response(
+            "tool-1",
+            "read_file",
+            json!({"path": "sample.txt"}),
+        )]));
+        let (orchestrator, tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(2)).await;
+        std::fs::write(
+            tmp.path().join("sample.txt"),
+            "previewable contents\nsecond line",
+        )
+        .unwrap();
+        let view = orchestrator.config_view();
+        let cancel_token = CancellationToken::new();
+
+        let cancel_after_first_llm = async {
+            wait_for_call_count(provider.as_ref(), 1).await;
+            cancel_token.cancel();
+        };
+
+        let (result, _) = tokio::join!(
+            orchestrator.tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-cancelled-after-tool",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("read the file")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                cancel_token.clone(),
+            ),
+            cancel_after_first_llm,
+        );
+
+        let (resp, _messages, _attachments, meta) = result.unwrap();
+        assert_eq!(provider.call_count(), 1);
+        assert!(meta.cancelled);
+        assert_eq!(meta.successful_tool_calls, 1);
+        assert_eq!(meta.final_stop_reason.as_deref(), Some("cancelled"));
+        assert!(resp
+            .text
+            .starts_with("[Task stopped by user]\n\nCompleted:"));
+        assert!(resp.text.contains("- read_file: 1: previewable contents"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_sets_cancelled_false_on_normal_completion() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "done", "end_turn",
+        )]));
+        let (orchestrator, _tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider, Some(2)).await;
+        let view = orchestrator.config_view();
+
+        let (resp, _messages, _attachments, meta) = orchestrator
+            .tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-normal-finish",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("finish")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.text, "done");
+        assert!(!meta.cancelled);
+        assert_eq!(meta.final_stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn tool_use_loop_prioritizes_cancellation_over_max_iteration_path() {
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "should not be called",
+            "end_turn",
+        )]));
+        let (orchestrator, _tmp, _memory) =
+            make_tool_loop_test_orchestrator(provider.clone(), Some(1)).await;
+        let view = orchestrator.config_view();
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let (resp, _messages, _attachments, meta) = orchestrator
+            .tool_use_loop(
+                view.as_ref(),
+                "agent-a",
+                "session-cancel-priority",
+                "test/model",
+                &[],
+                None,
+                vec![LlmMessage::user("cancel")],
+                512,
+                None,
+                None,
+                SecurityMode::default(),
+                vec![],
+                None,
+                false,
+                false,
+                None,
+                cancel_token,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.call_count(), 0);
+        assert_eq!(resp.stop_reason.as_deref(), Some("cancelled"));
+        assert!(meta.cancelled);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_for_agent_scopes_memory_write_to_current_agent() {
+        let (orchestrator, _tmp, memory) =
+            make_memory_tool_orchestrator(&["agent-a", "agent-b"]).await;
+        let view = orchestrator.config_view();
+        let ctx = ToolContext::builtin();
+
+        let output = orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_write",
+                json!({
+                    "content": "User prefers green tea",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+
+        let fact_store = clawhive_memory::fact_store::FactStore::new(memory.db());
+        assert!(fact_store
+            .find_by_content("agent-a", "User prefers green tea")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(fact_store
+            .find_by_content("agent-b", "User prefers green tea")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_tool_for_agent_scopes_memory_get_to_current_agent_workspace() {
+        let (orchestrator, _tmp, _memory) =
+            make_memory_tool_orchestrator(&["agent-a", "agent-b"]).await;
+        let view = orchestrator.config_view();
+        let ctx = ToolContext::builtin();
+
+        orchestrator
+            .file_store_for("agent-a")
+            .write_long_term("# Agent A memory")
+            .await
+            .unwrap();
+        orchestrator
+            .file_store_for("agent-b")
+            .write_long_term("# Agent B memory")
+            .await
+            .unwrap();
+
+        let output = orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_get",
+                json!({"key": "MEMORY.md"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("Agent A memory"));
+        assert!(!output.content.contains("Agent B memory"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_for_agent_memory_search_returns_fact_hits() {
+        let (orchestrator, _tmp, _memory) =
+            make_memory_tool_orchestrator(&["agent-a", "agent-b"]).await;
+        let view = orchestrator.config_view();
+        let ctx = ToolContext::builtin();
+
+        orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_write",
+                json!({
+                    "content": "User prefers Chinese replies",
+                    "fact_type": "preference"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let output = orchestrator
+            .execute_tool_for_agent(
+                view.as_ref(),
+                "agent-a",
+                "memory_search",
+                json!({"query": "Chinese replies"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("[fact:preference]"));
+        assert!(output.content.contains("[fact]"));
+        assert!(output.content.contains("Chinese replies"));
+    }
+}

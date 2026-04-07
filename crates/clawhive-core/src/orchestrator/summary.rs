@@ -63,7 +63,7 @@ pub(super) fn normalized_candidate_fact_type(
     }
 }
 
-pub(crate) fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
+pub(super) fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
     let tokens_a = crate::consolidation::normalized_word_set(a);
     let tokens_b = crate::consolidation::normalized_word_set(b);
     crate::consolidation::jaccard_similarity(&tokens_a, &tokens_b)
@@ -812,5 +812,95 @@ pub(super) fn synthesize_cancelled_response(tool_summaries: &[(String, String)])
         input_tokens: None,
         output_tokens: None,
         stop_reason: Some("cancelled".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_promise_structural_detects_colon_endings() {
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "好，让我把所有内容整合起来："),
+            EmptyPromiseVerdict::Structural,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "Here is the compiled content:"),
+            EmptyPromiseVerdict::Structural,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "Let me compile everything..."),
+            EmptyPromiseVerdict::Structural,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "整理如下——"),
+            EmptyPromiseVerdict::Structural,
+        );
+    }
+
+    #[test]
+    fn empty_promise_structural_skips_long_responses() {
+        let long_response = "x".repeat(500);
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, &format!("{long_response}:")),
+            EmptyPromiseVerdict::No,
+        );
+    }
+
+    #[test]
+    fn empty_promise_structural_skips_when_tools_called() {
+        assert_eq!(
+            detect_empty_promise_structural(0, 1, "好，让我整合："),
+            EmptyPromiseVerdict::No,
+        );
+    }
+
+    #[test]
+    fn empty_promise_structural_still_detects_after_first_retry() {
+        assert_eq!(
+            detect_empty_promise_structural(1, 0, "好，让我整合："),
+            EmptyPromiseVerdict::Structural,
+        );
+    }
+
+    #[test]
+    fn empty_promise_structural_skips_after_max_retries() {
+        assert_eq!(
+            detect_empty_promise_structural(2, 0, "好，让我整合："),
+            EmptyPromiseVerdict::No,
+        );
+    }
+
+    #[test]
+    fn empty_promise_structural_inconclusive_for_short_no_ending_punctuation() {
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "我现在就整理给你"),
+            EmptyPromiseVerdict::Inconclusive,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "Sure, I'll do that right away"),
+            EmptyPromiseVerdict::Inconclusive,
+        );
+    }
+
+    #[test]
+    fn empty_promise_structural_no_for_complete_sentences() {
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "Hello from mock!"),
+            EmptyPromiseVerdict::No,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "The answer is 42."),
+            EmptyPromiseVerdict::No,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "你确定吗？"),
+            EmptyPromiseVerdict::No,
+        );
+        assert_eq!(
+            detect_empty_promise_structural(0, 0, "没问题。"),
+            EmptyPromiseVerdict::No,
+        );
     }
 }
