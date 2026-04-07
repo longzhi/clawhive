@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
@@ -708,12 +709,39 @@ async fn send_chunked(
                     let message = CreateMessage::new()
                         .content(chunk)
                         .reference_message((channel_id, msg_id));
-                    channel_id.send_message(http, message).await?;
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        channel_id.send_message(http, message),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            result?;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                channel_id = channel_id.get(),
+                                "discord message delivery timed out after 30s"
+                            );
+                            return Ok(());
+                        }
+                    }
                     continue;
                 }
             }
         }
-        channel_id.say(http, chunk).await?;
+        match tokio::time::timeout(Duration::from_secs(30), channel_id.say(http, chunk)).await {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    "discord message delivery timed out after 30s"
+                );
+                return Ok(());
+            }
+        }
     }
     Ok(())
 }
@@ -906,8 +934,22 @@ async fn spawn_approval_listener(
             .components(vec![buttons]);
 
         let channel = ChannelId::new(channel_id);
-        if let Err(e) = channel.send_message(&http, message).await {
-            tracing::error!("Failed to send approval buttons: {e}");
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            channel.send_message(&http, message),
+        )
+        .await
+        {
+            Ok(Err(e)) => {
+                tracing::error!("Failed to send approval buttons: {e}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id,
+                    "discord approval message delivery timed out after 30s"
+                );
+            }
+            Ok(Ok(_)) => {}
         }
     }
 }
@@ -972,8 +1014,22 @@ async fn spawn_skill_confirm_listener(
 
         let channel = ChannelId::new(channel_id);
         let message = CreateMessage::new().components(vec![buttons]);
-        if let Err(e) = channel.send_message(&http, message).await {
-            tracing::error!("Failed to send skill confirm buttons: {e}");
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            channel.send_message(&http, message),
+        )
+        .await
+        {
+            Ok(Err(e)) => {
+                tracing::error!("Failed to send skill confirm buttons: {e}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id,
+                    "discord skill confirm message delivery timed out after 30s"
+                );
+            }
+            Ok(Ok(_)) => {}
         }
     }
 }
@@ -1117,7 +1173,17 @@ async fn send_attachments(
     for att in discord_attachments {
         msg = msg.add_file(att);
     }
-    channel_id.send_message(http, msg).await?;
+    match tokio::time::timeout(Duration::from_secs(30), channel_id.send_message(http, msg)).await {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                "discord attachment delivery timed out after 30s"
+            );
+        }
+    }
     Ok(())
 }
 

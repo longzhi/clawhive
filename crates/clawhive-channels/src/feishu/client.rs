@@ -34,7 +34,10 @@ impl FeishuClient {
                 value: String::new(),
                 fetched_at: Instant::now() - TOKEN_PROACTIVE_REFRESH_AGE - Duration::from_secs(1),
             })),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("failed to build reqwest client"),
         }
     }
 

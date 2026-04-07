@@ -127,7 +127,10 @@ impl DingTalkClient {
         Self {
             client_id: client_id.into(),
             client_secret: client_secret.into(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("failed to build reqwest client"),
             session_webhooks: Arc::new(RwLock::new(HashMap::new())),
         }
     }

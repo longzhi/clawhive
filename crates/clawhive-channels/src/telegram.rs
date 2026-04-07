@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use clawhive_bus::{EventBus, Topic};
@@ -883,13 +884,25 @@ async fn spawn_approval_listener(
         ]]);
 
         let chat = ChatId(chat_id);
-        if let Err(e) = bot
-            .send_message(chat, &text)
-            .parse_mode(ParseMode::Html)
-            .reply_markup(keyboard)
-            .await
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            bot.send_message(chat, &text)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboard)
+                .send(),
+        )
+        .await
         {
-            tracing::error!("Failed to send approval keyboard to Telegram: {e}");
+            Ok(Err(e)) => {
+                tracing::error!("Failed to send approval keyboard to Telegram: {e}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    chat_id,
+                    "telegram approval message delivery timed out after 30s"
+                );
+            }
+            Ok(Ok(_)) => {}
         }
     }
 }
@@ -948,12 +961,24 @@ async fn spawn_skill_confirm_listener(
         ]]);
 
         let chat = ChatId(chat_id);
-        if let Err(e) = bot
-            .send_message(chat, "\u{1f4e6} Confirm skill installation?")
-            .reply_markup(keyboard)
-            .await
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            bot.send_message(chat, "\u{1f4e6} Confirm skill installation?")
+                .reply_markup(keyboard)
+                .send(),
+        )
+        .await
         {
-            tracing::error!("Failed to send skill confirm keyboard to Telegram: {e}");
+            Ok(Err(e)) => {
+                tracing::error!("Failed to send skill confirm keyboard to Telegram: {e}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    chat_id,
+                    "telegram skill confirm message delivery timed out after 30s"
+                );
+            }
+            Ok(Ok(_)) => {}
         }
     }
 }
@@ -1008,39 +1033,77 @@ async fn spawn_action_listener(
                 let reaction = ReactionType::Emoji {
                     emoji: emoji.clone(),
                 };
-                if let Err(e) = bot
-                    .set_message_reaction(chat, msg_id)
-                    .reaction(vec![reaction])
-                    .await
+                match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    bot.set_message_reaction(chat, msg_id)
+                        .reaction(vec![reaction])
+                        .send(),
+                )
+                .await
                 {
-                    tracing::error!("Failed to set reaction: {e}");
-                } else {
-                    tracing::debug!("Set reaction {emoji} on message {message_id}");
+                    Ok(Ok(_)) => {
+                        tracing::debug!("Set reaction {emoji} on message {message_id}");
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to set reaction: {e}");
+                    }
+                    Err(_) => {
+                        tracing::warn!("telegram set_message_reaction timed out after 30s");
+                    }
                 }
             }
             ActionKind::Unreact { .. } => {
                 // Empty reaction list removes all reactions
-                if let Err(e) = bot
-                    .set_message_reaction(chat, msg_id)
-                    .reaction(Vec::<ReactionType>::new())
-                    .await
+                match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    bot.set_message_reaction(chat, msg_id)
+                        .reaction(Vec::<ReactionType>::new())
+                        .send(),
+                )
+                .await
                 {
-                    tracing::error!("Failed to remove reaction: {e}");
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to remove reaction: {e}");
+                    }
+                    Err(_) => {
+                        tracing::warn!("telegram remove reaction timed out after 30s");
+                    }
+                    Ok(Ok(_)) => {}
                 }
             }
             ActionKind::Edit { ref new_text } => {
                 let html = md_to_telegram_html(new_text);
-                if let Err(e) = bot
-                    .edit_message_text(chat, msg_id, &html)
-                    .parse_mode(ParseMode::Html)
-                    .await
+                match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    bot.edit_message_text(chat, msg_id, &html)
+                        .parse_mode(ParseMode::Html)
+                        .send(),
+                )
+                .await
                 {
-                    tracing::error!("Failed to edit message: {e}");
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to edit message: {e}");
+                    }
+                    Err(_) => {
+                        tracing::warn!("telegram edit_message_text timed out after 30s");
+                    }
+                    Ok(Ok(_)) => {}
                 }
             }
             ActionKind::Delete => {
-                if let Err(e) = bot.delete_message(chat, msg_id).await {
-                    tracing::error!("Failed to delete message: {e}");
+                match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    bot.delete_message(chat, msg_id).send(),
+                )
+                .await
+                {
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to delete message: {e}");
+                    }
+                    Err(_) => {
+                        tracing::warn!("telegram delete_message timed out after 30s");
+                    }
+                    Ok(Ok(_)) => {}
                 }
             }
         }
@@ -1321,11 +1384,25 @@ async fn send_html_chunk_with_fallback(
     chat_id: ChatId,
     chunk: &str,
 ) -> Result<(), teloxide::RequestError> {
-    match bot
-        .send_message(chat_id, chunk)
-        .parse_mode(ParseMode::Html)
-        .await
+    let send_result = match tokio::time::timeout(
+        Duration::from_secs(30),
+        bot.send_message(chat_id, chunk)
+            .parse_mode(ParseMode::Html)
+            .send(),
+    )
+    .await
     {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                chat_id = chat_id.0,
+                "telegram html message delivery timed out after 30s"
+            );
+            return Ok(());
+        }
+    };
+
+    match send_result {
         Ok(_) => Ok(()),
         Err(err) => {
             let err_text = err.to_string();
@@ -1348,7 +1425,22 @@ async fn send_html_chunk_with_fallback(
                 "telegram html parse failed, retrying plain text"
             );
 
-            bot.send_message(chat_id, fallback).await?;
+            match tokio::time::timeout(
+                Duration::from_secs(30),
+                bot.send_message(chat_id, fallback).send(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    result?;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        chat_id = chat_id.0,
+                        "telegram fallback message delivery timed out after 30s"
+                    );
+                }
+            }
             Ok(())
         }
     }
@@ -1519,9 +1611,9 @@ async fn send_attachments(
                 if let Some(c) = cap {
                     req = req.caption(c);
                 }
-                match req.await {
-                    Ok(_) => Ok(()),
-                    Err(photo_err) => {
+                match tokio::time::timeout(Duration::from_secs(30), req.send()).await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(photo_err)) => {
                         tracing::warn!(
                             error = %photo_err,
                             "send_photo failed, retrying as document"
@@ -1531,7 +1623,23 @@ async fn send_attachments(
                         if let Some(c) = cap {
                             req = req.caption(c);
                         }
-                        req.await.map(|_| ())
+                        match tokio::time::timeout(Duration::from_secs(30), req.send()).await {
+                            Ok(r) => r.map(|_| ()),
+                            Err(_) => {
+                                tracing::warn!(
+                                    chat_id = chat_id.0,
+                                    "telegram document fallback delivery timed out after 30s"
+                                );
+                                Ok(())
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            chat_id = chat_id.0,
+                            "telegram send_photo timed out after 30s"
+                        );
+                        Ok(())
                     }
                 }
             }
@@ -1541,7 +1649,16 @@ async fn send_attachments(
                 if let Some(c) = cap {
                     req = req.caption(c);
                 }
-                req.await.map(|_| ())
+                match tokio::time::timeout(Duration::from_secs(30), req.send()).await {
+                    Ok(r) => r.map(|_| ()),
+                    Err(_) => {
+                        tracing::warn!(
+                            chat_id = chat_id.0,
+                            "telegram send_document timed out after 30s"
+                        );
+                        Ok(())
+                    }
+                }
             }
         };
 

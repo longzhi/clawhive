@@ -283,7 +283,14 @@ pub async fn send_slack_message(
         request = request.with_thread_ts(SlackTs(ts.to_string()));
     }
 
-    session.chat_post_message(&request).await?;
+    match tokio::time::timeout(Duration::from_secs(30), session.chat_post_message(&request)).await {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => {
+            tracing::warn!(channel = %channel, "slack message delivery timed out after 30s");
+        }
+    }
     Ok(())
 }
 

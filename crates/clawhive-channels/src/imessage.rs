@@ -270,9 +270,29 @@ pub async fn handle_outbound(outbound: OutboundMessage) -> Result<()> {
     let recipient = outbound
         .conversation_scope
         .strip_prefix("chat:")
-        .unwrap_or(&outbound.conversation_scope);
+        .unwrap_or(&outbound.conversation_scope)
+        .to_string();
 
-    send_imessage(recipient, &outbound.text)?;
+    let text = outbound.text.clone();
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking({
+            let recipient = recipient.clone();
+            move || send_imessage(&recipient, &text)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => {
+            result?;
+        }
+        Ok(Err(e)) => {
+            return Err(anyhow!("iMessage send task panicked: {e}"));
+        }
+        Err(_) => {
+            tracing::warn!(recipient = %recipient, "iMessage delivery timed out after 30s");
+        }
+    }
     Ok(())
 }
 

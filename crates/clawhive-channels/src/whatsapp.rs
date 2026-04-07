@@ -444,8 +444,19 @@ pub async fn start_whatsapp(
                                                     conversation: Some(PROGRESS_MESSAGE.to_string()),
                                                     ..Default::default()
                                                 };
-                                                if let Err(e) = progress_client.send_message(progress_chat, progress).await {
-                                                    tracing::warn!(error = %e, "failed to send WhatsApp progress message");
+                                                match tokio::time::timeout(
+                                                    tokio::time::Duration::from_secs(30),
+                                                    progress_client.send_message(progress_chat, progress),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(Err(e)) => {
+                                                        tracing::warn!(error = %e, "failed to send WhatsApp progress message");
+                                                    }
+                                                    Err(_) => {
+                                                        tracing::warn!("WhatsApp progress message delivery timed out after 30s");
+                                                    }
+                                                    Ok(Ok(_)) => {}
                                                 }
                                             }
                                         }
@@ -516,14 +527,28 @@ pub async fn start_whatsapp(
                                             conversation: Some(prefixed_text),
                                             ..Default::default()
                                         };
-                                        if let Err(e) = client.send_message(reply_chat.clone(), reply).await {
-                                            tracing::error!("Failed to send WhatsApp reply: {e}");
-                                        } else {
-                                            tracing::info!(
-                                                sender = %sender_jid,
-                                                chat = %chat_jid,
-                                                "WhatsApp reply sent"
-                                            );
+                                        match tokio::time::timeout(
+                                            tokio::time::Duration::from_secs(30),
+                                            client.send_message(reply_chat.clone(), reply),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(_)) => {
+                                                tracing::info!(
+                                                    sender = %sender_jid,
+                                                    chat = %chat_jid,
+                                                    "WhatsApp reply sent"
+                                                );
+                                            }
+                                            Ok(Err(e)) => {
+                                                tracing::error!("Failed to send WhatsApp reply: {e}");
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    chat = %chat_jid,
+                                                    "WhatsApp reply delivery timed out after 30s"
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -677,11 +702,19 @@ async fn spawn_action_listener(bus: Arc<EventBus>, connector_id: String, client:
                         conversation: Some(format!("{fallback_prefix}{new_text}")),
                         ..Default::default()
                     };
-                    if let Err(e) = client
-                        .edit_message(chat_jid, original_id.clone(), edit_msg)
-                        .await
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(30),
+                        client.edit_message(chat_jid, original_id.clone(), edit_msg),
+                    )
+                    .await
                     {
-                        tracing::error!("Failed to edit WhatsApp message: {e}");
+                        Ok(Err(e)) => {
+                            tracing::error!("Failed to edit WhatsApp message: {e}");
+                        }
+                        Err(_) => {
+                            tracing::warn!("WhatsApp edit_message timed out after 30s");
+                        }
+                        Ok(Ok(_)) => {}
                     }
                 } else {
                     tracing::warn!("WhatsApp edit requires original message_id");
@@ -689,15 +722,23 @@ async fn spawn_action_listener(bus: Arc<EventBus>, connector_id: String, client:
             }
             ActionKind::Delete => {
                 if let Some(ref original_id) = action.message_id {
-                    if let Err(e) = client
-                        .revoke_message(
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(30),
+                        client.revoke_message(
                             chat_jid,
                             original_id.clone(),
                             whatsapp_rust::send::RevokeType::Sender,
-                        )
-                        .await
+                        ),
+                    )
+                    .await
                     {
-                        tracing::error!("Failed to delete WhatsApp message: {e}");
+                        Ok(Err(e)) => {
+                            tracing::error!("Failed to delete WhatsApp message: {e}");
+                        }
+                        Err(_) => {
+                            tracing::warn!("WhatsApp revoke_message timed out after 30s");
+                        }
+                        Ok(Ok(_)) => {}
                     }
                 } else {
                     tracing::warn!("WhatsApp delete requires original message_id");
@@ -740,8 +781,19 @@ async fn spawn_delivery_listener(bus: Arc<EventBus>, connector_id: String, clien
             conversation: Some(format!("{fallback_prefix}{text}")),
             ..Default::default()
         };
-        if let Err(e) = client.send_message(chat_jid, message).await {
-            tracing::error!("Failed to deliver WhatsApp announce: {e}");
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            client.send_message(chat_jid, message),
+        )
+        .await
+        {
+            Ok(Err(e)) => {
+                tracing::error!("Failed to deliver WhatsApp announce: {e}");
+            }
+            Err(_) => {
+                tracing::warn!("WhatsApp announce delivery timed out after 30s");
+            }
+            Ok(Ok(_)) => {}
         }
     }
 }
@@ -788,10 +840,21 @@ async fn spawn_approval_listener(bus: Arc<EventBus>, connector_id: String, clien
             conversation: Some(format!("{prefix}{text}")),
             ..Default::default()
         };
-        if let Err(e) = client.send_message(chat_jid, message).await {
-            tracing::error!("Failed to send WhatsApp approval message: {e}");
-        } else {
-            tracing::info!(short_id, connector_id, "WhatsApp approval message sent");
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            client.send_message(chat_jid, message),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                tracing::info!(short_id, connector_id, "WhatsApp approval message sent");
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Failed to send WhatsApp approval message: {e}");
+            }
+            Err(_) => {
+                tracing::warn!("WhatsApp approval message delivery timed out after 30s");
+            }
         }
     }
 }
@@ -889,7 +952,19 @@ async fn send_attachment(
         .await?;
     let message = build_attachment_message(att, upload, caption);
 
-    client.send_message(chat_jid.clone(), message).await?;
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        client.send_message(chat_jid.clone(), message),
+    )
+    .await
+    {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => {
+            tracing::warn!("WhatsApp attachment delivery timed out after 30s");
+        }
+    }
     Ok(())
 }
 

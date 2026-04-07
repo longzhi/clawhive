@@ -276,42 +276,43 @@ impl WeComBot {
 
         while let Some(msg) = read.next().await {
             match msg {
-                Ok(WsMessage::Text(text)) => match serde_json::from_str::<WeComMessage>(&text) {
-                    Ok(wc_msg) => {
-                        if wc_msg.cmd == "aibot_msg_callback" {
-                            if let Some(body_val) = wc_msg.body {
-                                match serde_json::from_value::<WeComMsgBody>(body_val) {
-                                    Ok(body) => {
-                                        if seen_msgs.contains(&body.msgid) {
-                                            continue;
-                                        }
-                                        seen_msgs.insert(body.msgid.clone());
-                                        if seen_msgs.len() > 10_000 {
-                                            seen_msgs.clear();
-                                        }
+                Ok(WsMessage::Text(text)) => {
+                    match serde_json::from_str::<WeComMessage>(&text) {
+                        Ok(wc_msg) => {
+                            if wc_msg.cmd == "aibot_msg_callback" {
+                                if let Some(body_val) = wc_msg.body {
+                                    match serde_json::from_value::<WeComMsgBody>(body_val) {
+                                        Ok(body) => {
+                                            if seen_msgs.contains(&body.msgid) {
+                                                continue;
+                                            }
+                                            seen_msgs.insert(body.msgid.clone());
+                                            if seen_msgs.len() > 10_000 {
+                                                seen_msgs.clear();
+                                            }
 
-                                        let req_id = wc_msg
-                                            .headers
-                                            .get("req_id")
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        let msgid = body.msgid.clone();
-                                        let inbound = adapter.to_inbound(&body, &req_id);
-                                        let progress_delay = self
-                                            .gateway
-                                            .resolve_turn_lifecycle(&inbound)
-                                            .progress_delay_secs;
-                                        let gw = self.gateway.clone();
-                                        let write_reply = write.clone();
+                                            let req_id = wc_msg
+                                                .headers
+                                                .get("req_id")
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let msgid = body.msgid.clone();
+                                            let inbound = adapter.to_inbound(&body, &req_id);
+                                            let progress_delay = self
+                                                .gateway
+                                                .resolve_turn_lifecycle(&inbound)
+                                                .progress_delay_secs;
+                                            let gw = self.gateway.clone();
+                                            let write_reply = write.clone();
 
-                                        tokio::spawn(async move {
-                                            let turn_complete =
-                                                Arc::new(tokio::sync::Notify::new());
-                                            let progress_complete = turn_complete.clone();
-                                            let progress_req_id = req_id.clone();
-                                            let progress_msgid = msgid.clone();
-                                            let progress_write = write_reply.clone();
-                                            let _progress_guard = (progress_delay > 0).then(|| {
+                                            tokio::spawn(async move {
+                                                let turn_complete =
+                                                    Arc::new(tokio::sync::Notify::new());
+                                                let progress_complete = turn_complete.clone();
+                                                let progress_req_id = req_id.clone();
+                                                let progress_msgid = msgid.clone();
+                                                let progress_write = write_reply.clone();
+                                                let _progress_guard = (progress_delay > 0).then(|| {
                                                 AbortOnDrop(tokio::spawn(async move {
                                                     tokio::select! {
                                                         _ = tokio::time::sleep(std::time::Duration::from_secs(progress_delay)) => {
@@ -324,12 +325,26 @@ impl WeComBot {
                                                             match serde_json::to_string(&progress) {
                                                                 Ok(json) => {
                                                                     let mut w = progress_write.lock().await;
-                                                                    if let Err(e) = w.send(WsMessage::Text(json.into())).await {
-                                                                        tracing::warn!(
-                                                                            target: "clawhive::channel::wecom",
-                                                                            error = %e,
-                                                                            "failed to send wecom progress message"
-                                                                        );
+                                                                    match tokio::time::timeout(
+                                                                        std::time::Duration::from_secs(30),
+                                                                        w.send(WsMessage::Text(json.into())),
+                                                                    )
+                                                                    .await
+                                                                    {
+                                                                        Ok(Err(e)) => {
+                                                                            tracing::warn!(
+                                                                                target: "clawhive::channel::wecom",
+                                                                                error = %e,
+                                                                                "failed to send wecom progress message"
+                                                                            );
+                                                                        }
+                                                                        Err(_) => {
+                                                                            tracing::warn!(
+                                                                                target: "clawhive::channel::wecom",
+                                                                                "wecom progress message delivery timed out after 30s"
+                                                                            );
+                                                                        }
+                                                                        Ok(Ok(())) => {}
                                                                     }
                                                                 }
                                                                 Err(e) => {
@@ -346,75 +361,85 @@ impl WeComBot {
                                                 }))
                                             });
 
-                                            let result = gw.handle_inbound(inbound).await;
-                                            turn_complete.notify_waiters();
+                                                let result = gw.handle_inbound(inbound).await;
+                                                turn_complete.notify_waiters();
 
-                                            match result {
-                                                Ok(Some(outbound)) => {
-                                                    if !outbound.text.trim().is_empty() {
-                                                        let reply = WeComReplyMessage::text(
-                                                            &req_id,
-                                                            &msgid,
-                                                            &outbound.text,
-                                                            true,
-                                                        );
-                                                        match serde_json::to_string(&reply) {
-                                                            Ok(json) => {
-                                                                let mut w =
-                                                                    write_reply.lock().await;
-                                                                if let Err(e) = w
-                                                                    .send(WsMessage::Text(
-                                                                        json.into(),
-                                                                    ))
-                                                                    .await
+                                                match result {
+                                                    Ok(Some(outbound)) => {
+                                                        if !outbound.text.trim().is_empty() {
+                                                            let reply = WeComReplyMessage::text(
+                                                                &req_id,
+                                                                &msgid,
+                                                                &outbound.text,
+                                                                true,
+                                                            );
+                                                            match serde_json::to_string(&reply) {
+                                                                Ok(json) => {
+                                                                    let mut w =
+                                                                        write_reply.lock().await;
+                                                                    match tokio::time::timeout(
+                                                                    std::time::Duration::from_secs(30),
+                                                                    w.send(WsMessage::Text(json.into())),
+                                                                )
+                                                                .await
                                                                 {
+                                                                    Ok(Err(e)) => {
+                                                                        tracing::error!(
+                                                                            target: "clawhive::channel::wecom",
+                                                                            error = %e,
+                                                                            "failed to send wecom reply"
+                                                                        );
+                                                                    }
+                                                                    Err(_) => {
+                                                                        tracing::warn!(
+                                                                            target: "clawhive::channel::wecom",
+                                                                            "wecom reply delivery timed out after 30s"
+                                                                        );
+                                                                    }
+                                                                    Ok(Ok(())) => {}
+                                                                }
+                                                                }
+                                                                Err(e) => {
                                                                     tracing::error!(
                                                                         target: "clawhive::channel::wecom",
                                                                         error = %e,
-                                                                        "failed to send wecom reply"
+                                                                        "failed to serialize wecom reply"
                                                                     );
                                                                 }
                                                             }
-                                                            Err(e) => {
-                                                                tracing::error!(
-                                                                    target: "clawhive::channel::wecom",
-                                                                    error = %e,
-                                                                    "failed to serialize wecom reply"
-                                                                );
-                                                            }
                                                         }
                                                     }
+                                                    Ok(None) => {}
+                                                    Err(e) => {
+                                                        tracing::error!(
+                                                            target: "clawhive::channel::wecom",
+                                                            error = %e,
+                                                            "failed to handle inbound"
+                                                        );
+                                                    }
                                                 }
-                                                Ok(None) => {}
-                                                Err(e) => {
-                                                    tracing::error!(
-                                                        target: "clawhive::channel::wecom",
-                                                        error = %e,
-                                                        "failed to handle inbound"
-                                                    );
-                                                }
-                                            }
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "clawhive::channel::wecom",
-                                            error = %e,
-                                            "failed to parse msg body"
-                                        );
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "clawhive::channel::wecom",
+                                                error = %e,
+                                                "failed to parse msg body"
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "clawhive::channel::wecom",
+                                error = %e,
+                                "failed to parse wecom message"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "clawhive::channel::wecom",
-                            error = %e,
-                            "failed to parse wecom message"
-                        );
-                    }
-                },
+                }
                 Ok(WsMessage::Close(_)) => break,
                 Err(e) => {
                     tracing::warn!(
