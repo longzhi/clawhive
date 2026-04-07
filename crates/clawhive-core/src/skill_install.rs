@@ -122,6 +122,12 @@ pub fn update_env_vars_written(skill_dir: &Path, vars: &[String]) -> Result<()> 
 }
 
 pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
+    // GitHub shorthand: user/repo or user/repo/path
+    if let Some(expanded) = maybe_expand_github_shorthand(source) {
+        let resolved = normalize_github_url(&expanded);
+        return download_remote_skill(&resolved.url, resolved.subpath.as_deref()).await;
+    }
+
     if source.starts_with("http://") || source.starts_with("https://") {
         let resolved = normalize_github_url(source);
         return download_remote_skill(&resolved.url, resolved.subpath.as_deref()).await;
@@ -422,6 +428,49 @@ fn render_permissions_lines(permissions: &SkillPermissions) -> Vec<String> {
         ));
     }
     out
+}
+
+/// Detect GitHub shorthand like `user/repo` or `user/repo/path/to/skill`
+/// and expand to full GitHub URL. Returns None if not a shorthand.
+fn maybe_expand_github_shorthand(source: &str) -> Option<String> {
+    let trimmed = source.trim();
+
+    // Skip URLs, absolute paths, relative paths starting with ./ or ~/
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('.')
+        || trimmed.starts_with('~')
+    {
+        return None;
+    }
+
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // Validate segments look like GitHub identifiers
+    let valid_segment = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    if !valid_segment(parts[0]) || !valid_segment(parts[1]) {
+        return None;
+    }
+
+    let owner = parts[0];
+    let repo = parts[1];
+
+    if parts.len() == 2 {
+        Some(format!("https://github.com/{owner}/{repo}"))
+    } else {
+        let subpath = parts[2..].join("/");
+        Some(format!(
+            "https://github.com/{owner}/{repo}/tree/main/{subpath}"
+        ))
+    }
 }
 
 /// Result of GitHub URL normalization.
@@ -1469,6 +1518,27 @@ mod tests {
 
         let result = update_skill(tmp.path(), &skills_root, "my-skill").await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn github_shorthand_expansion() {
+        assert_eq!(
+            maybe_expand_github_shorthand("user/repo"),
+            Some("https://github.com/user/repo".to_string())
+        );
+        assert_eq!(
+            maybe_expand_github_shorthand("user/repo/skills/weather"),
+            Some("https://github.com/user/repo/tree/main/skills/weather".to_string())
+        );
+        // Not a shorthand
+        assert_eq!(
+            maybe_expand_github_shorthand("https://github.com/user/repo"),
+            None
+        );
+        assert_eq!(maybe_expand_github_shorthand("./local/path"), None);
+        assert_eq!(maybe_expand_github_shorthand("single-word"), None);
+        assert_eq!(maybe_expand_github_shorthand("/absolute/path"), None);
+        assert_eq!(maybe_expand_github_shorthand("~/home/path"), None);
     }
 
     #[tokio::test]
