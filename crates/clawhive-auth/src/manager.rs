@@ -2,11 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context};
 use serde::Deserialize;
 
+use crate::error::AuthError;
 use crate::oauth::extract_chatgpt_account_id;
 use crate::profile::{AuthProfile, AuthStore};
+
+type Result<T> = std::result::Result<T, AuthError>;
 
 const AUTH_STORE_FILE: &str = "auth-profiles.json";
 
@@ -31,7 +34,8 @@ pub struct TokenManager {
 
 impl TokenManager {
     pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").map_err(|_| anyhow!("HOME is not set"))?;
+        let home = std::env::var("HOME")
+            .map_err(|_| AuthError::ConfigError("HOME is not set".to_string()))?;
         let config_dir = Path::new(&home).join(".clawhive").join("config");
         Ok(Self::from_config_dir(config_dir))
     }
@@ -164,7 +168,9 @@ impl TokenManager {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to read error body>".to_string());
-            anyhow::bail!("openai refresh failed ({status}): {body}");
+            return Err(AuthError::TokenRefreshFailed(format!(
+                "openai refresh failed ({status}): {body}"
+            )));
         }
 
         let body = response
