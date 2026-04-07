@@ -34,7 +34,6 @@ mod tool_registry;
 pub use tool_registry::build_tool_registry;
 
 mod episode;
-pub(crate) use episode::contains_correction_phrase;
 #[cfg(test)]
 use episode::*;
 
@@ -43,6 +42,9 @@ mod memory_context;
 use memory_context::*;
 
 mod summary;
+pub(crate) use summary::contains_correction_phrase;
+#[cfg(test)]
+use summary::*;
 use summary::{detect_empty_promise_structural, EmptyPromiseVerdict};
 
 mod skill_commands;

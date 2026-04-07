@@ -353,6 +353,27 @@ impl HippocampusConsolidator {
             );
         }
 
+        // When memory wasn't updated, finalize_updated_memory was skipped so no
+        // trace was recorded.  Write a lightweight trace here so the next run can
+        // still pick up latest_daily_date for incremental mode.
+        if !report.memory_updated && latest_daily_date.is_some() {
+            if let Some(ref store) = self.memory_store {
+                let mut details = serde_json::json!({
+                    "daily_files_read": report.daily_files_read,
+                    "reindexed": false,
+                    "facts_extracted": 0,
+                    "memory_unchanged": true,
+                });
+                if let Some(date) = latest_daily_date {
+                    details["latest_daily_date"] =
+                        serde_json::Value::String(date.format("%Y-%m-%d").to_string());
+                }
+                store
+                    .record_trace(&self.agent_id, "consolidation", &details.to_string(), None)
+                    .await;
+            }
+        }
+
         self.reconcile_recent_fact_conflicts().await;
         Ok(report)
     }

@@ -18,11 +18,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::FullAgentConfig;
 use crate::config_view::ConfigView;
-use crate::router::LlmRouter;
 use crate::session::Session;
 use crate::slash_commands;
 
 use super::predicates::{filter_no_reply, session_reset_policy_for};
+use super::summary::{
+    contains_correction_phrase, fact_token_overlap_ratio, SummaryGenerationRequest,
+};
 use super::{detect_empty_promise_structural, EmptyPromiseVerdict, Orchestrator};
 
 pub(super) const EPISODE_FLUSH_PENDING_GRACE_SECS: i64 = 30;
@@ -43,13 +45,6 @@ pub(super) struct BoundaryFlushSnapshot {
     pub(super) recent_explicit_writes: Vec<RecentExplicitMemoryWrite>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(super) struct ToolLoopMeta {
-    pub(super) successful_tool_calls: usize,
-    pub(super) final_stop_reason: Option<String>,
-    pub(super) cancelled: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EpisodeBoundaryDecision {
     ContinueCurrent,
@@ -68,76 +63,6 @@ pub(super) struct EpisodeTurnInput<'a> {
     pub(super) assistant_text: &'a str,
     pub(super) successful_tool_calls: usize,
     pub(super) final_stop_reason: Option<&'a str>,
-}
-
-pub(super) struct SummaryGenerationRequest<'a> {
-    pub(super) router: &'a LlmRouter,
-    pub(super) file_store: &'a clawhive_memory::file_store::MemoryFileStore,
-    pub(super) memory: &'a Arc<MemoryStore>,
-    pub(super) embedding_provider: &'a Arc<dyn EmbeddingProvider>,
-    pub(super) agent_id: &'a str,
-    pub(super) session: &'a Session,
-    pub(super) agent: &'a FullAgentConfig,
-    pub(super) source: &'a str,
-    pub(super) messages: Vec<SessionMessage>,
-    pub(super) recent_explicit_writes: Vec<RecentExplicitMemoryWrite>,
-}
-
-pub(super) fn normalized_duplicate_key(
-    candidate: &crate::memory_summary::SummaryCandidate,
-) -> Option<String> {
-    candidate
-        .duplicate_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-pub(super) fn normalized_candidate_fact_type(
-    candidate: &crate::memory_summary::SummaryCandidate,
-) -> &'static str {
-    match candidate.fact_type.as_deref().map(str::trim) {
-        Some("preference") => "preference",
-        Some("decision") => "decision",
-        Some("event") => "event",
-        Some("person") => "person",
-        Some("rule") => "rule",
-        Some("procedure") => "procedure",
-        _ => "decision",
-    }
-}
-
-pub(super) fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
-    let tokens_a = crate::consolidation::normalized_word_set(a);
-    let tokens_b = crate::consolidation::normalized_word_set(b);
-    crate::consolidation::jaccard_similarity(&tokens_a, &tokens_b)
-}
-
-pub(crate) fn contains_correction_phrase(content: &str) -> bool {
-    const PHRASES_CN: &[&str] = &[
-        "不再",
-        "改为",
-        "已切换到",
-        "改成",
-        "换成",
-        "已放弃",
-        "不用了",
-    ];
-    const PHRASES_EN: &[&str] = &[
-        "no longer",
-        "switched to",
-        "changed to",
-        "moved to",
-        "instead of",
-        "replaced with",
-        "stopped using",
-        "quit using",
-    ];
-
-    let lower = content.to_lowercase();
-    PHRASES_CN.iter().any(|phrase| content.contains(phrase))
-        || PHRASES_EN.iter().any(|phrase| lower.contains(phrase))
 }
 
 pub(super) fn boundary_flush_conflict_passes_two_step(

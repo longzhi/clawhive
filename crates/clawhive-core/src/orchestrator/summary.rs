@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
+use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::fact_store::FactStore;
 use clawhive_memory::memory_lineage::generate_canonical_id_with_key;
 use clawhive_memory::memory_lineage::MemoryLineageStore;
 use clawhive_memory::search_index::SearchIndex;
+use clawhive_memory::{MemoryStore, RecentExplicitMemoryWrite, SessionMessage};
 use clawhive_provider::{ContentBlock, LlmMessage, LlmResponse};
 
 use crate::config::FullAgentConfig;
@@ -18,11 +22,78 @@ use crate::config_view::ConfigView;
 use crate::session::SessionResetReason;
 use clawhive_memory::dirty_sources::{DirtySourceStore, DIRTY_KIND_DAILY_FILE, DIRTY_KIND_SESSION};
 
-use super::episode::{
-    find_boundary_flush_conflict, normalized_candidate_fact_type, normalized_duplicate_key,
-    SummaryGenerationRequest,
-};
+use super::episode::find_boundary_flush_conflict;
 use super::Orchestrator;
+
+pub(super) struct SummaryGenerationRequest<'a> {
+    pub(super) router: &'a LlmRouter,
+    pub(super) file_store: &'a clawhive_memory::file_store::MemoryFileStore,
+    pub(super) memory: &'a Arc<MemoryStore>,
+    pub(super) embedding_provider: &'a Arc<dyn EmbeddingProvider>,
+    pub(super) agent_id: &'a str,
+    pub(super) session: &'a Session,
+    pub(super) agent: &'a FullAgentConfig,
+    pub(super) source: &'a str,
+    pub(super) messages: Vec<SessionMessage>,
+    pub(super) recent_explicit_writes: Vec<RecentExplicitMemoryWrite>,
+}
+
+pub(super) fn normalized_duplicate_key(
+    candidate: &crate::memory_summary::SummaryCandidate,
+) -> Option<String> {
+    candidate
+        .duplicate_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(super) fn normalized_candidate_fact_type(
+    candidate: &crate::memory_summary::SummaryCandidate,
+) -> &'static str {
+    match candidate.fact_type.as_deref().map(str::trim) {
+        Some("preference") => "preference",
+        Some("decision") => "decision",
+        Some("event") => "event",
+        Some("person") => "person",
+        Some("rule") => "rule",
+        Some("procedure") => "procedure",
+        _ => "decision",
+    }
+}
+
+pub(crate) fn fact_token_overlap_ratio(a: &str, b: &str) -> f64 {
+    let tokens_a = crate::consolidation::normalized_word_set(a);
+    let tokens_b = crate::consolidation::normalized_word_set(b);
+    crate::consolidation::jaccard_similarity(&tokens_a, &tokens_b)
+}
+
+pub(crate) fn contains_correction_phrase(content: &str) -> bool {
+    const PHRASES_CN: &[&str] = &[
+        "不再",
+        "改为",
+        "已切换到",
+        "改成",
+        "换成",
+        "已放弃",
+        "不用了",
+    ];
+    const PHRASES_EN: &[&str] = &[
+        "no longer",
+        "switched to",
+        "changed to",
+        "moved to",
+        "instead of",
+        "replaced with",
+        "stopped using",
+        "quit using",
+    ];
+
+    let lower = content.to_lowercase();
+    PHRASES_CN.iter().any(|phrase| content.contains(phrase))
+        || PHRASES_EN.iter().any(|phrase| lower.contains(phrase))
+}
 
 impl Orchestrator {
     pub(super) async fn generate_summary_from_messages_static(

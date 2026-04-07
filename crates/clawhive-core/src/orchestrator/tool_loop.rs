@@ -15,7 +15,6 @@ use crate::memory_tools::{
 use crate::shell_tool::ExecuteCommandTool;
 use crate::tool::{ToolContext, ToolExecutor};
 
-use super::episode::ToolLoopMeta;
 use super::memory_context::truncate_tool_result_preview;
 use super::predicates::{
     collect_recent_messages, is_slow_latency_ms, repair_tool_pairing,
@@ -27,6 +26,13 @@ use super::summary::{
     EmptyPromiseVerdict,
 };
 use super::Orchestrator;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ToolLoopMeta {
+    pub(super) successful_tool_calls: usize,
+    pub(super) final_stop_reason: Option<String>,
+    pub(super) cancelled: bool,
+}
 
 impl Orchestrator {
     pub(super) fn has_tool_registered(&self, view: &ConfigView, name: &str) -> bool {
