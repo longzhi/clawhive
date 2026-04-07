@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 
+use crate::error::ProviderError;
 use crate::{ContentBlock, LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -125,7 +126,7 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let model = &request.model;
         let url = format!(
             "{}/models/{}:generateContent?key={}",
@@ -143,31 +144,36 @@ impl LlmProvider for GeminiProvider {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(anyhow!(
-                    "gemini api error (timeout) [retryable]: request timed out"
-                ));
-            }
+            Err(e) if e.is_timeout() => return Err(ProviderError::Timeout),
             Err(e) if e.is_connect() => {
-                return Err(anyhow!("gemini api error (connect) [retryable]: {e}"));
+                return Err(ProviderError::ApiError {
+                    status: 0,
+                    message: format!("gemini connection error: {e}"),
+                });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(ProviderError::Other(e.into())),
         };
 
         let status = resp.status();
         if status != StatusCode::OK {
-            let text = resp.text().await?;
-            return Err(format_api_error(status, &text));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
-        let body: GeminiResponse = resp.json().await?;
+        let body: GeminiResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         to_llm_response(body)
     }
 
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         let model = &request.model;
         let url = format!(
             "{}/models/{}:streamGenerateContent?key={}&alt=sse",
@@ -185,21 +191,23 @@ impl LlmProvider for GeminiProvider {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(anyhow!(
-                    "gemini api error (timeout) [retryable]: request timed out"
-                ));
-            }
+            Err(e) if e.is_timeout() => return Err(ProviderError::Timeout),
             Err(e) if e.is_connect() => {
-                return Err(anyhow!("gemini api error (connect) [retryable]: {e}"));
+                return Err(ProviderError::ApiError {
+                    status: 0,
+                    message: format!("gemini connection error: {e}"),
+                });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(ProviderError::Other(e.into())),
         };
 
         let status = resp.status();
         if status != StatusCode::OK {
-            let text = resp.text().await?;
-            return Err(format_api_error(status, &text));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
         let sse_stream = parse_sse_stream(resp.bytes_stream());
@@ -207,11 +215,11 @@ impl LlmProvider for GeminiProvider {
     }
 }
 
-fn to_llm_response(body: GeminiResponse) -> Result<LlmResponse> {
+fn to_llm_response(body: GeminiResponse) -> Result<LlmResponse, ProviderError> {
     let candidate = body
         .candidates
         .first()
-        .ok_or_else(|| anyhow!("gemini api error: empty candidates"))?;
+        .ok_or_else(|| ProviderError::InvalidResponse("gemini: empty candidates".into()))?;
 
     let mut content = Vec::new();
     let mut text = String::new();
@@ -343,12 +351,16 @@ fn parse_sse_stream(
     }
 }
 
-fn format_api_error(status: StatusCode, text: &str) -> anyhow::Error {
-    let retryable = match status.as_u16() {
-        429 | 500..=599 => " [retryable]",
-        _ => "",
-    };
-    anyhow!("gemini api error ({status}){retryable}: {text}")
+fn to_provider_error(status: StatusCode, text: &str) -> ProviderError {
+    let message = format!("gemini api error: {text}");
+    match status.as_u16() {
+        429 => ProviderError::RateLimited { retry_after_ms: 0 },
+        401 | 403 => ProviderError::AuthFailed(message),
+        _ => ProviderError::ApiError {
+            status: status.as_u16(),
+            message,
+        },
+    }
 }
 
 // ============================================================

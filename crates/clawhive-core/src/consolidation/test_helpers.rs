@@ -8,7 +8,9 @@ use chrono::Utc;
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::store::MemoryStore;
-use clawhive_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderRegistry, StubProvider};
+use clawhive_provider::{
+    LlmProvider, LlmRequest, LlmResponse, ProviderError, ProviderRegistry, StubProvider,
+};
 use tempfile::TempDir;
 
 use crate::router::LlmRouter;
@@ -74,7 +76,7 @@ impl SequenceProvider {
 
 #[async_trait]
 impl LlmProvider for SequenceProvider {
-    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
         let text = self.responses.get(index).cloned().unwrap_or_default();
         Ok(LlmResponse {
@@ -105,10 +107,10 @@ impl FailAtCallProvider {
 
 #[async_trait]
 impl LlmProvider for FailAtCallProvider {
-    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
         if index == self.fail_at {
-            return Err(anyhow!("forced llm failure"));
+            return Err(ProviderError::Other(anyhow!("forced llm failure")));
         }
         let text = self.responses.get(index).cloned().unwrap_or_default();
         Ok(LlmResponse {

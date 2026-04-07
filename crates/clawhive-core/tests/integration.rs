@@ -15,7 +15,7 @@ use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
 use clawhive_memory::{file_store::MemoryFileStore, SessionReader, SessionWriter};
 use clawhive_provider::{
-    register_builtin_providers, ContentBlock, LlmProvider, LlmRequest, LlmResponse,
+    register_builtin_providers, ContentBlock, LlmProvider, LlmRequest, LlmResponse, ProviderError,
     ProviderRegistry,
 };
 use clawhive_runtime::NativeExecutor;
@@ -41,14 +41,14 @@ struct PromiseThenSummaryProvider;
 
 #[async_trait]
 impl LlmProvider for FailProvider {
-    async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
-        Err(anyhow!("forced failure"))
+    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        Err(ProviderError::Other(anyhow!("forced failure")))
     }
 }
 
 #[async_trait]
 impl LlmProvider for EchoProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = request
             .messages
             .last()
@@ -66,7 +66,7 @@ impl LlmProvider for EchoProvider {
 
 #[async_trait]
 impl LlmProvider for ThinkingEchoProvider {
-    async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = "[think] still processing".to_string();
         Ok(LlmResponse {
             text: text.clone(),
@@ -80,7 +80,7 @@ impl LlmProvider for ThinkingEchoProvider {
 
 #[async_trait]
 impl LlmProvider for TranscriptProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         // Include system prompt in output for testing
         let system_part = request
             .system
@@ -106,7 +106,7 @@ impl LlmProvider for TranscriptProvider {
 
 #[async_trait]
 impl LlmProvider for MultiSessionSummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -134,7 +134,7 @@ impl LlmProvider for MultiSessionSummaryProvider {
 
 #[async_trait]
 impl LlmProvider for StructuredDailySummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -162,7 +162,7 @@ impl LlmProvider for StructuredDailySummaryProvider {
 
 #[async_trait]
 impl LlmProvider for SlowStructuredDailySummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -191,7 +191,7 @@ impl LlmProvider for SlowStructuredDailySummaryProvider {
 
 #[async_trait]
 impl LlmProvider for MemoryOnlySummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -219,7 +219,7 @@ impl LlmProvider for MemoryOnlySummaryProvider {
 
 #[async_trait]
 impl LlmProvider for DuplicateKeyRewriteSummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -254,7 +254,7 @@ impl LlmProvider for DuplicateKeyRewriteSummaryProvider {
 
 #[async_trait]
 impl LlmProvider for StructuredPromotionSummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -282,7 +282,7 @@ impl LlmProvider for StructuredPromotionSummaryProvider {
 
 #[async_trait]
 impl LlmProvider for PromiseThenSummaryProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()

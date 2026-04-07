@@ -9,7 +9,9 @@ use clawhive_memory::embedding::{EmbeddingProvider, StubEmbeddingProvider};
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::{MemoryStore, SessionReader};
-use clawhive_provider::{ContentBlock, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry};
+use clawhive_provider::{
+    ContentBlock, LlmProvider, LlmRequest, LlmResponse, ProviderError, ProviderRegistry,
+};
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, SqliteStore};
 use clawhive_schema::{InboundMessage, SessionKey};
@@ -36,7 +38,7 @@ impl RecordingProvider {
 
 #[async_trait]
 impl LlmProvider for RecordingProvider {
-    async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let text = self.response_text.clone();
         Ok(LlmResponse {
@@ -53,7 +55,7 @@ struct TranscriptProvider;
 
 #[async_trait]
 impl LlmProvider for TranscriptProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let system_part = request
             .system
             .as_ref()

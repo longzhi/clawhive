@@ -10,7 +10,7 @@ use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::search_index::{SearchIndex, SearchResult};
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
-    ContentBlock, LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry,
+    ContentBlock, LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderError, ProviderRegistry,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, SqliteStore};
@@ -34,7 +34,7 @@ pub(super) struct SequenceProvider {
 
 #[async_trait]
 impl LlmProvider for CompactionOnlyProvider {
-    async fn chat(&self, request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let text = if request
             .system
             .as_deref()
@@ -75,11 +75,11 @@ impl EmbeddingProvider for FailingEmbeddingProvider {
 
 #[async_trait]
 impl LlmProvider for SequenceProvider {
-    async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let mut responses = self.responses.lock().await;
         if responses.is_empty() {
-            return Err(anyhow!("unexpected llm call"));
+            return Err(ProviderError::Other(anyhow!("unexpected llm call")));
         }
         Ok(responses.remove(0))
     }

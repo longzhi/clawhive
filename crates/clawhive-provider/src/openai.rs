@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 
+use crate::error::ProviderError;
 use crate::{ContentBlock, LlmMessage, LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 #[derive(Debug, Clone)]
@@ -142,7 +143,7 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let url = format!("{}/chat/completions", self.api_base);
         let payload = Self::to_api_request(request, false, self.strip_reasoning);
 
@@ -159,32 +160,36 @@ impl LlmProvider for OpenAiProvider {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(anyhow!(
-                    "api error (timeout) [retryable]: request timed out after 180s"
-                ));
-            }
+            Err(e) if e.is_timeout() => return Err(ProviderError::Timeout),
             Err(e) if e.is_connect() => {
-                return Err(anyhow!("api error (connect) [retryable]: {e}"));
+                return Err(ProviderError::ApiError {
+                    status: 0,
+                    message: format!("openai connection error: {e}"),
+                });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(ProviderError::Other(e.into())),
         };
 
         let status = resp.status();
         if status != StatusCode::OK {
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ApiErrorEnvelope>(&text).ok();
-            return Err(format_api_error(status, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
-        let body: ApiResponse = resp.json().await?;
+        let body: ApiResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         to_llm_response(body)
     }
 
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         let url = format!("{}/chat/completions", self.api_base);
         let payload = Self::to_api_request(request, true, self.strip_reasoning);
 
@@ -201,29 +206,30 @@ impl LlmProvider for OpenAiProvider {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(anyhow!(
-                    "api error (timeout) [retryable]: request timed out after 180s"
-                ));
-            }
+            Err(e) if e.is_timeout() => return Err(ProviderError::Timeout),
             Err(e) if e.is_connect() => {
-                return Err(anyhow!("api error (connect) [retryable]: {e}"));
+                return Err(ProviderError::ApiError {
+                    status: 0,
+                    message: format!("openai connection error: {e}"),
+                });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(ProviderError::Other(e.into())),
         };
 
         let status = resp.status();
         if status != StatusCode::OK {
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ApiErrorEnvelope>(&text).ok();
-            return Err(format_api_error(status, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
         let sse_stream = parse_sse_stream(resp.bytes_stream());
         Ok(Box::pin(sse_stream))
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         let url = format!("{}/models", self.api_base);
         let resp = self
             .client
@@ -233,11 +239,18 @@ impl LlmProvider for OpenAiProvider {
                 format!("Bearer {}", self.auth_bearer_token()),
             )
             .send()
-            .await?;
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
         if resp.status() != StatusCode::OK {
-            return Err(anyhow!("failed to list openai models ({})", resp.status()));
+            return Err(ProviderError::ApiError {
+                status: resp.status().as_u16(),
+                message: format!("failed to list openai models ({})", resp.status()),
+            });
         }
-        let body: serde_json::Value = resp.json().await?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         let models = body["data"]
             .as_array()
             .map(|arr| {
@@ -350,11 +363,11 @@ fn to_api_messages(system: Option<String>, messages: Vec<LlmMessage>) -> Vec<Api
     result
 }
 
-fn to_llm_response(body: ApiResponse) -> Result<LlmResponse> {
+fn to_llm_response(body: ApiResponse) -> Result<LlmResponse, ProviderError> {
     let choice = body
         .choices
         .first()
-        .ok_or_else(|| anyhow!("openai api error: empty choices"))?;
+        .ok_or_else(|| ProviderError::InvalidResponse("openai: empty choices".into()))?;
     let message = &choice.message;
 
     let mut content = Vec::new();
@@ -523,21 +536,23 @@ fn normalize_finish_reason(reason: Option<String>) -> Option<String> {
     }
 }
 
-fn format_api_error(status: StatusCode, parsed: Option<ApiErrorEnvelope>) -> anyhow::Error {
-    let kind = ProviderErrorKind::from_status(status);
-    let retryable = if kind.is_retryable() {
-        " [retryable]"
-    } else {
-        ""
-    };
-    if let Some(api_error) = parsed {
-        anyhow!(
-            "openai api error ({status}){retryable}: {} ({})",
-            api_error.error.message,
-            api_error.error.r#type
+fn to_provider_error(status: StatusCode, text: &str) -> ProviderError {
+    let parsed = serde_json::from_str::<ApiErrorEnvelope>(text).ok();
+    let message = if let Some(api_error) = parsed {
+        format!(
+            "openai api error: {} ({})",
+            api_error.error.message, api_error.error.r#type
         )
     } else {
-        anyhow!("openai api error ({status}){retryable}")
+        format!("openai api error: {text}")
+    };
+    match status.as_u16() {
+        429 => ProviderError::RateLimited { retry_after_ms: 0 },
+        401 | 403 => ProviderError::AuthFailed(message),
+        _ => ProviderError::ApiError {
+            status: status.as_u16(),
+            message,
+        },
     }
 }
 
@@ -787,31 +802,21 @@ mod tests {
     }
 
     #[test]
-    fn format_api_error_retryable_for_429() {
-        let err = format_api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            Some(ApiErrorEnvelope {
-                error: ApiErrorBody {
-                    r#type: "rate_limit_error".into(),
-                    message: "too many requests".into(),
-                },
-            }),
-        );
-        assert!(err.to_string().contains("[retryable]"));
+    fn to_provider_error_rate_limit_for_429() {
+        let body = serde_json::json!({
+            "error": {"type": "rate_limit_error", "message": "too many requests"}
+        });
+        let err = to_provider_error(StatusCode::TOO_MANY_REQUESTS, &body.to_string());
+        assert!(matches!(err, ProviderError::RateLimited { .. }));
     }
 
     #[test]
-    fn format_api_error_not_retryable_for_401() {
-        let err = format_api_error(
-            StatusCode::UNAUTHORIZED,
-            Some(ApiErrorEnvelope {
-                error: ApiErrorBody {
-                    r#type: "invalid_api_key".into(),
-                    message: "bad key".into(),
-                },
-            }),
-        );
-        assert!(!err.to_string().contains("[retryable]"));
+    fn to_provider_error_auth_for_401() {
+        let body = serde_json::json!({
+            "error": {"type": "invalid_api_key", "message": "bad key"}
+        });
+        let err = to_provider_error(StatusCode::UNAUTHORIZED, &body.to_string());
+        assert!(matches!(err, ProviderError::AuthFailed(_)));
     }
 
     #[test]

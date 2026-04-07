@@ -32,19 +32,21 @@ pub use types::*;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse>;
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError>;
     async fn stream(
         &self,
         _request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
-        anyhow::bail!("streaming not supported by this provider")
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "streaming not supported by this provider"
+        )))
     }
-    async fn health(&self) -> Result<()> {
+    async fn health(&self) -> Result<(), ProviderError> {
         Ok(())
     }
     /// List available model IDs from the provider.
     /// Default: returns empty vec (provider doesn't support model listing).
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         Ok(vec![])
     }
 }
@@ -281,7 +283,7 @@ pub struct StubProvider;
 
 #[async_trait]
 impl LlmProvider for StubProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let user_text = request
             .messages
             .last()
@@ -300,7 +302,7 @@ impl LlmProvider for StubProvider {
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         let user_text = request
             .messages
             .last()

@@ -261,9 +261,14 @@ async fn openai_error_handling_401_not_retryable() {
         .unwrap_err();
 
     let err_text = err.to_string();
-    assert!(err_text.contains("openai api error"));
-    assert!(err_text.contains("401"));
-    assert!(!err_text.contains("[retryable]"));
+    assert!(
+        err_text.contains("authentication failed"),
+        "Expected 'authentication failed' in: {err_text}"
+    );
+    assert!(
+        err_text.contains("openai api error"),
+        "Expected 'openai api error' in: {err_text}"
+    );
 }
 
 #[tokio::test]
@@ -329,6 +334,8 @@ async fn openai_connection_error_retryable() {
         .unwrap_err();
 
     let err_text = err.to_string();
-    assert!(err_text.contains("api error (connect)"));
-    assert!(err_text.contains("[retryable]"));
+    assert!(
+        err_text.contains("openai connection error"),
+        "Expected 'openai connection error' in: {err_text}"
+    );
 }

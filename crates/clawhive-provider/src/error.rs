@@ -3,9 +3,8 @@
 /// Currently covers registry/config operations (`create_provider`,
 /// `register_from_configs`, `ProviderRegistry::get`).
 ///
-/// `LlmProvider::chat()` still returns `anyhow::Result` — migrating the
-/// trait signature requires updating every provider impl atomically and
-/// is planned for a later phase.
+/// Used by all `LlmProvider` trait methods as well as registry/config
+/// operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// The requested provider ID was not found in the registry.
@@ -44,4 +43,20 @@ pub enum ProviderError {
     /// wrapped and propagated with `?`.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl ProviderError {
+    /// Whether this error is transient and the request should be retried.
+    ///
+    /// Rate limits, timeouts, and server errors (5xx) are retryable.
+    /// Legacy `Other` errors containing `[retryable]` are also considered
+    /// retryable for backward compatibility.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Timeout => true,
+            Self::ApiError { status, .. } if (500..600).contains(status) => true,
+            Self::Other(err) => err.to_string().contains("[retryable]"),
+            _ => false,
+        }
+    }
 }

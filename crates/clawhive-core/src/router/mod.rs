@@ -163,8 +163,8 @@ impl LlmRouter {
                         return Ok(resp);
                     }
                     Err(err) => {
+                        let is_retryable = err.is_retryable();
                         let err_str = err.to_string();
-                        let is_retryable = err_str.contains("[retryable]");
                         let failover_reason = classify_failover_reason(&err_str);
 
                         // Retry within same provider if retryable and within limits
@@ -195,7 +195,7 @@ impl LlmRouter {
                             );
                         }
 
-                        last_err = Some(err);
+                        last_err = Some(err.into());
                         break; // Try next candidate
                     }
                 }
@@ -309,8 +309,8 @@ impl LlmRouter {
                         return Ok(resp);
                     }
                     Err(err) => {
+                        let is_retryable = err.is_retryable();
                         let err_str = err.to_string();
-                        let is_retryable = err_str.contains("[retryable]");
                         let failover_reason = classify_failover_reason(&err_str);
 
                         if is_retryable && attempts < MAX_RETRIES {
@@ -339,7 +339,7 @@ impl LlmRouter {
                             );
                         }
 
-                        last_err = Some(err);
+                        last_err = Some(err.into());
                         break;
                     }
                 }
@@ -421,7 +421,7 @@ impl LlmRouter {
                         self.record_provider_failure(&provider_id, reason);
                     }
                     tracing::warn!("provider {provider_id} stream failed: {err}");
-                    last_err = Some(err);
+                    last_err = Some(err.into());
                 }
             }
         }
@@ -459,7 +459,8 @@ mod tests {
 
     use async_trait::async_trait;
     use clawhive_provider::{
-        LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderRegistry, StreamChunk,
+        LlmMessage, LlmProvider, LlmRequest, LlmResponse, ProviderError, ProviderRegistry,
+        StreamChunk,
     };
     use tokio_stream::StreamExt;
 
@@ -472,10 +473,10 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for RetryableFailProvider {
-        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
             let count = self.call_count.fetch_add(1, Ordering::SeqCst);
             if count < self.fail_times {
-                anyhow::bail!("anthropic api error (429) [retryable]: rate limited")
+                return Err(ProviderError::RateLimited { retry_after_ms: 0 });
             }
             Ok(LlmResponse {
                 text: format!("ok after {} retries", count),
@@ -491,8 +492,10 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for PermanentFailProvider {
-        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
-            anyhow::bail!("anthropic api error (401): unauthorized")
+        async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+            Err(ProviderError::AuthFailed(
+                "anthropic api error (401): unauthorized".into(),
+            ))
         }
     }
 
@@ -500,7 +503,7 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for StubStreamProvider {
-        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
             Ok(LlmResponse {
                 text: "chat".into(),
                 content: vec![],
@@ -513,8 +516,9 @@ mod tests {
         async fn stream(
             &self,
             _request: LlmRequest,
-        ) -> anyhow::Result<
+        ) -> Result<
             std::pin::Pin<Box<dyn futures_core::Stream<Item = anyhow::Result<StreamChunk>> + Send>>,
+            ProviderError,
         > {
             let chunks = vec![
                 Ok(StreamChunk {
@@ -550,7 +554,7 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for SuccessProvider {
-        async fn chat(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
+        async fn chat(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
             Ok(LlmResponse {
                 text: "success from fallback".into(),
                 content: vec![],

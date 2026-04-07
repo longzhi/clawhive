@@ -6,9 +6,8 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 
-use crate::openai_chatgpt::{
-    format_api_error, parse_sse_stream, OpenAiChatGptProvider, ResponsesApiErrorEnvelope,
-};
+use crate::error::ProviderError;
+use crate::openai_chatgpt::{parse_sse_stream, OpenAiChatGptProvider, ResponsesApiErrorEnvelope};
 use crate::{ContentBlock, LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 #[derive(Debug, Clone)]
@@ -40,7 +39,7 @@ struct FunctionCallBuilder {
 
 #[async_trait]
 impl LlmProvider for AzureOpenAiProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let has_tools = !request.tools.is_empty();
         if has_tools {
             tracing::debug!(
@@ -61,12 +60,17 @@ impl LlmProvider for AzureOpenAiProvider {
             .header("accept", "text/event-stream")
             .json(&payload);
 
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
         if resp.status() != StatusCode::OK {
             let status = resp.status();
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ResponsesApiErrorEnvelope>(&text).ok();
-            return Err(format_api_error(status, &text, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(azure_to_provider_error(status, &text));
         }
 
         // Collect SSE stream into full response
@@ -159,7 +163,7 @@ impl LlmProvider for AzureOpenAiProvider {
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         let has_tools = !request.tools.is_empty();
         if has_tools {
             tracing::debug!(
@@ -179,15 +183,40 @@ impl LlmProvider for AzureOpenAiProvider {
             .header("accept", "text/event-stream")
             .json(&payload);
 
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
         if resp.status() != StatusCode::OK {
             let status = resp.status();
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ResponsesApiErrorEnvelope>(&text).ok();
-            return Err(format_api_error(status, &text, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(azure_to_provider_error(status, &text));
         }
 
         Ok(Box::pin(parse_sse_stream(resp.bytes_stream())))
+    }
+}
+
+fn azure_to_provider_error(status: StatusCode, text: &str) -> ProviderError {
+    let parsed = serde_json::from_str::<ResponsesApiErrorEnvelope>(text).ok();
+    let message = if let Some(api_error) = parsed {
+        format!(
+            "azure openai api error: {} ({})",
+            api_error.error.message, api_error.error.r#type
+        )
+    } else {
+        format!("azure openai api error: {text}")
+    };
+    match status.as_u16() {
+        429 => ProviderError::RateLimited { retry_after_ms: 0 },
+        401 | 403 => ProviderError::AuthFailed(message),
+        _ => ProviderError::ApiError {
+            status: status.as_u16(),
+            message,
+        },
     }
 }
 

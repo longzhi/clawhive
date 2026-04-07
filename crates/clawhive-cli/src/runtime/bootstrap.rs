@@ -25,7 +25,7 @@ use clawhive_memory::MemoryStore;
 use clawhive_provider::{
     custom, minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
     AnthropicProvider, AzureOpenAiProvider, LlmProvider, LlmRequest, LlmResponse,
-    OpenAiChatGptProvider, OpenAiProvider, ProviderRegistry, StreamChunk,
+    OpenAiChatGptProvider, OpenAiProvider, ProviderError, ProviderRegistry, StreamChunk,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{
@@ -221,22 +221,22 @@ impl RefreshingOpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for RefreshingOpenAiProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         self.build_inner().await.chat(request).await
     }
 
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         self.build_inner().await.stream(request).await
     }
 
-    async fn health(&self) -> Result<()> {
+    async fn health(&self) -> Result<(), ProviderError> {
         self.build_inner().await.health().await
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         self.build_inner().await.list_models().await
     }
 }
@@ -324,22 +324,22 @@ impl RefreshingOpenAiChatGptProvider {
 
 #[async_trait]
 impl LlmProvider for RefreshingOpenAiChatGptProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         self.build_inner().await?.chat(request).await
     }
 
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         self.build_inner().await?.stream(request).await
     }
 
-    async fn health(&self) -> Result<()> {
+    async fn health(&self) -> Result<(), ProviderError> {
         self.build_inner().await?.health().await
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         self.build_inner().await?.list_models().await
     }
 }

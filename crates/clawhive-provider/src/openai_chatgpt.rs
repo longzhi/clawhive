@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 
+use crate::error::ProviderError;
 use crate::{ContentBlock, LlmMessage, LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 #[derive(Debug, Clone)]
@@ -90,7 +91,7 @@ impl OpenAiChatGptProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiChatGptProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let has_tools = !request.tools.is_empty();
         if has_tools {
             tracing::debug!(
@@ -125,12 +126,17 @@ impl LlmProvider for OpenAiChatGptProvider {
             req = req.header("chatgpt-account-id", account_id);
         }
 
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
         if resp.status() != StatusCode::OK {
             let status = resp.status();
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ResponsesApiErrorEnvelope>(&text).ok();
-            return Err(format_api_error(status, &text, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
         // Collect SSE stream into full response
@@ -225,7 +231,7 @@ impl LlmProvider for OpenAiChatGptProvider {
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         let has_tools = !request.tools.is_empty();
         if has_tools {
             tracing::debug!(
@@ -251,12 +257,17 @@ impl LlmProvider for OpenAiChatGptProvider {
             req = req.header("chatgpt-account-id", account_id);
         }
 
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
         if resp.status() != StatusCode::OK {
             let status = resp.status();
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ResponsesApiErrorEnvelope>(&text).ok();
-            return Err(format_api_error(status, &text, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
         Ok(Box::pin(parse_sse_stream(resp.bytes_stream())))
@@ -758,38 +769,36 @@ fn to_responses_input(messages: Vec<LlmMessage>) -> Vec<ResponsesInputItem> {
     result
 }
 
-pub(crate) fn format_api_error(
-    status: StatusCode,
-    raw_text: &str,
-    parsed: Option<ResponsesApiErrorEnvelope>,
-) -> anyhow::Error {
-    let retryable = matches!(
-        status.as_u16(),
-        429 | 500 | 502 | 503 | 504 | 520 | 522 | 524
-    );
-    let tag = if retryable { " [retryable]" } else { "" };
-
-    if let Some(api_error) = parsed {
-        anyhow!(
-            "chatgpt responses api error ({status}){tag}: {} ({})",
-            api_error.error.message,
-            api_error.error.r#type
+fn to_provider_error(status: StatusCode, text: &str) -> ProviderError {
+    let parsed = serde_json::from_str::<ResponsesApiErrorEnvelope>(text).ok();
+    let message = if let Some(api_error) = parsed {
+        format!(
+            "chatgpt responses api error: {} ({})",
+            api_error.error.message, api_error.error.r#type
         )
     } else {
-        anyhow!("chatgpt responses api error ({status}){tag}: {raw_text}")
+        format!("chatgpt responses api error: {text}")
+    };
+    match status.as_u16() {
+        429 => ProviderError::RateLimited { retry_after_ms: 0 },
+        401 | 403 => ProviderError::AuthFailed(message),
+        _ => ProviderError::ApiError {
+            status: status.as_u16(),
+            message,
+        },
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ResponsesApiErrorEnvelope {
-    error: ResponsesApiErrorBody,
+    pub(crate) error: ResponsesApiErrorBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResponsesApiErrorBody {
+pub(crate) struct ResponsesApiErrorBody {
     #[serde(rename = "type")]
-    r#type: String,
-    message: String,
+    pub(crate) r#type: String,
+    pub(crate) message: String,
 }
 
 #[cfg(test)]

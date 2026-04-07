@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 
+use crate::error::ProviderError;
 use crate::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 #[derive(Debug, Clone)]
@@ -171,7 +172,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
         let url = format!("{}/messages", self.api_base);
         let payload = Self::to_api_request(request);
 
@@ -193,27 +194,29 @@ impl LlmProvider for AnthropicProvider {
 
         let resp = match req.send().await {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(anyhow::anyhow!(
-                    "anthropic api error (timeout) [retryable]: request timed out after 60s"
-                ));
-            }
+            Err(e) if e.is_timeout() => return Err(ProviderError::Timeout),
             Err(e) if e.is_connect() => {
-                return Err(anyhow::anyhow!(
-                    "anthropic api error (connect) [retryable]: {e}"
-                ));
+                return Err(ProviderError::ApiError {
+                    status: 0,
+                    message: format!("anthropic connection error: {e}"),
+                });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(ProviderError::Other(e.into())),
         };
 
         let status = resp.status();
         if status != StatusCode::OK {
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ApiError>(&text).ok();
-            return Err(format_api_error(status, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
-        let body: ApiResponse = resp.json().await?;
+        let body: ApiResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         let content_blocks: Vec<crate::ContentBlock> = body
             .content
             .iter()
@@ -253,7 +256,7 @@ impl LlmProvider for AnthropicProvider {
     async fn stream(
         &self,
         request: LlmRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>, ProviderError> {
         let url = format!("{}/messages", self.api_base);
         let mut payload = Self::to_api_request(request);
         payload.stream = true;
@@ -276,31 +279,30 @@ impl LlmProvider for AnthropicProvider {
 
         let resp = match req.send().await {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(anyhow::anyhow!(
-                    "anthropic api error (timeout) [retryable]: request timed out after 60s"
-                ));
-            }
+            Err(e) if e.is_timeout() => return Err(ProviderError::Timeout),
             Err(e) if e.is_connect() => {
-                return Err(anyhow::anyhow!(
-                    "anthropic api error (connect) [retryable]: {e}"
-                ));
+                return Err(ProviderError::ApiError {
+                    status: 0,
+                    message: format!("anthropic connection error: {e}"),
+                });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(ProviderError::Other(e.into())),
         };
 
         let status = resp.status();
         if status != StatusCode::OK {
-            let text = resp.text().await?;
-            let parsed = serde_json::from_str::<ApiError>(&text).ok();
-            return Err(format_api_error(status, parsed));
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| ProviderError::Other(e.into()))?;
+            return Err(to_provider_error(status, &text));
         }
 
         let sse_stream = parse_sse_stream(resp.bytes_stream());
         Ok(Box::pin(sse_stream))
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         let url = format!("{}/models", self.api_base);
         let mut req = self
             .client
@@ -310,14 +312,20 @@ impl LlmProvider for AnthropicProvider {
             Some(session) => req.header("authorization", format!("Bearer {session}")),
             None => req.header("x-api-key", &self.api_key),
         };
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
         if resp.status() != StatusCode::OK {
-            return Err(anyhow!(
-                "failed to list anthropic models ({})",
-                resp.status()
-            ));
+            return Err(ProviderError::ApiError {
+                status: resp.status().as_u16(),
+                message: format!("failed to list anthropic models ({})", resp.status()),
+            });
         }
-        let body: serde_json::Value = resp.json().await?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         let models = body["data"]
             .as_array()
             .map(|arr| {
@@ -436,22 +444,23 @@ fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
     }
 }
 
-fn format_api_error(status: StatusCode, parsed: Option<ApiError>) -> anyhow::Error {
-    let kind = ProviderErrorKind::from_status(status);
-    let retryable = if kind.is_retryable() {
-        " [retryable]"
-    } else {
-        ""
-    };
-    if let Some(api_error) = parsed {
-        let detail = api_error.error;
-        anyhow!(
-            "anthropic api error ({status}){retryable}: {} ({})",
-            detail.message,
-            detail.r#type
+fn to_provider_error(status: StatusCode, text: &str) -> ProviderError {
+    let parsed = serde_json::from_str::<ApiError>(text).ok();
+    let message = if let Some(api_error) = parsed {
+        format!(
+            "anthropic api error: {} ({})\n",
+            api_error.error.message, api_error.error.r#type
         )
     } else {
-        anyhow!("anthropic api error ({status}){retryable}")
+        format!("anthropic api error: {text}")
+    };
+    match status.as_u16() {
+        429 => ProviderError::RateLimited { retry_after_ms: 0 },
+        401 | 403 => ProviderError::AuthFailed(message),
+        _ => ProviderError::ApiError {
+            status: status.as_u16(),
+            message,
+        },
     }
 }
 
@@ -698,40 +707,34 @@ mod tests {
     }
 
     #[test]
-    fn format_api_error_with_parsed_body() {
-        let parsed = Some(ApiError {
-            error: ApiErrorDetail {
-                r#type: "invalid_request_error".into(),
-                message: "messages: required".into(),
-            },
+    fn to_provider_error_bad_request() {
+        let body = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": "messages: required"
+            }
         });
-        let err = format_api_error(StatusCode::BAD_REQUEST, parsed);
-        let text = err.to_string();
-        assert!(text.contains("400"));
-        assert!(text.contains("messages: required"));
-        assert!(!text.contains("[retryable]"));
+        let err = to_provider_error(StatusCode::BAD_REQUEST, &body.to_string());
+        assert!(matches!(err, ProviderError::ApiError { status: 400, .. }));
+        assert!(err.to_string().contains("messages: required"));
     }
 
     #[test]
-    fn format_api_error_without_parsed_body() {
-        let err = format_api_error(StatusCode::INTERNAL_SERVER_ERROR, None);
-        let text = err.to_string();
-        assert!(text.contains("500"));
-        assert!(text.contains("[retryable]"));
+    fn to_provider_error_server_error() {
+        let err = to_provider_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        assert!(matches!(err, ProviderError::ApiError { status: 500, .. }));
     }
 
     #[test]
-    fn format_api_error_rate_limit_is_retryable() {
-        let parsed = Some(ApiError {
-            error: ApiErrorDetail {
-                r#type: "rate_limit_error".into(),
-                message: "too many requests".into(),
-            },
+    fn to_provider_error_rate_limit() {
+        let body = serde_json::json!({
+            "error": {
+                "type": "rate_limit_error",
+                "message": "too many requests"
+            }
         });
-        let err = format_api_error(StatusCode::TOO_MANY_REQUESTS, parsed);
-        let text = err.to_string();
-        assert!(text.contains("[retryable]"));
-        assert!(text.contains("429"));
+        let err = to_provider_error(StatusCode::TOO_MANY_REQUESTS, &body.to_string());
+        assert!(matches!(err, ProviderError::RateLimited { .. }));
     }
 
     #[test]
