@@ -1,3 +1,4 @@
+use crate::error::MemoryError;
 use crate::migrations::run_migrations;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -172,22 +173,22 @@ fn init_sqlite_vec() {
 }
 
 impl MemoryStore {
-    pub fn open(path: &str) -> Result<Self> {
+    pub fn open(path: &str) -> std::result::Result<Self, MemoryError> {
         init_sqlite_vec();
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        run_migrations(&conn)?;
+        run_migrations(&conn).map_err(|e| MemoryError::Migration(e.to_string()))?;
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
         })
     }
 
-    pub fn open_in_memory() -> Result<Self> {
+    pub fn open_in_memory() -> std::result::Result<Self, MemoryError> {
         init_sqlite_vec();
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        run_migrations(&conn)?;
+        run_migrations(&conn).map_err(|e| MemoryError::Migration(e.to_string()))?;
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
         })

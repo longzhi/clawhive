@@ -1,6 +1,7 @@
 pub mod chunker;
 pub mod dirty_sources;
 pub mod embedding;
+pub mod error;
 pub mod fact_store;
 pub mod file_audit;
 pub mod file_store;
@@ -13,6 +14,7 @@ pub mod search_index;
 pub mod session;
 pub mod store;
 
+pub use error::MemoryError;
 pub use models::*;
 pub use session::*;
 pub use store::*;
