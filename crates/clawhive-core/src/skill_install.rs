@@ -960,6 +960,87 @@ fn hash_directory_recursive(root: &Path, dir: &Path, hasher: &mut DefaultHasher)
     Ok(())
 }
 
+#[derive(Debug)]
+pub enum UpdateResult {
+    Updated { skill_name: String },
+    AlreadyUpToDate { skill_name: String },
+}
+
+pub async fn update_skill(
+    config_root: &Path,
+    skills_root: &Path,
+    skill_name: &str,
+) -> Result<UpdateResult> {
+    let target = skills_root.join(skill_name);
+    if !target.exists() {
+        anyhow::bail!("skill not found: {skill_name}");
+    }
+
+    let meta = SkillMetadata::read_from(&target).ok_or_else(|| {
+        anyhow::anyhow!("no metadata for skill '{skill_name}'; cannot determine source")
+    })?;
+    let source = meta.source.ok_or_else(|| {
+        anyhow::anyhow!("skill '{skill_name}' has no source recorded; cannot update")
+    })?;
+
+    let resolved = resolve_skill_source(&source).await?;
+    let report = analyze_skill_source(resolved.local_path())?;
+
+    let source_hash = compute_directory_content_hash(resolved.local_path())?;
+    if source_hash == meta.content_hash {
+        return Ok(UpdateResult::AlreadyUpToDate {
+            skill_name: skill_name.to_string(),
+        });
+    }
+
+    install_skill_from_analysis(
+        config_root,
+        skills_root,
+        resolved.local_path(),
+        &report,
+        meta.high_risk_acknowledged,
+        Some(&source),
+        resolved.resolved_url(),
+    )?;
+
+    Ok(UpdateResult::Updated {
+        skill_name: skill_name.to_string(),
+    })
+}
+
+pub async fn update_all_skills(
+    config_root: &Path,
+    skills_root: &Path,
+) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+    let mut updated = Vec::new();
+    let mut up_to_date = Vec::new();
+    let mut failed = Vec::new();
+
+    let entries = match std::fs::read_dir(skills_root) {
+        Ok(e) => e,
+        Err(_) => return (updated, up_to_date, failed),
+    };
+
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let meta = SkillMetadata::read_from(&entry.path());
+        if meta.as_ref().and_then(|m| m.source.as_ref()).is_none() {
+            continue; // skip skills without source
+        }
+
+        match update_skill(config_root, skills_root, &name).await {
+            Ok(UpdateResult::Updated { .. }) => updated.push(name),
+            Ok(UpdateResult::AlreadyUpToDate { .. }) => up_to_date.push(name),
+            Err(e) => failed.push((name, e.to_string())),
+        }
+    }
+
+    (updated, up_to_date, failed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1282,5 +1363,99 @@ mod tests {
         let result = remove_skill(tmp.path(), &skills_root, "nonexistent");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn update_skill_from_local_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_root = tmp.path().join("config");
+        let skills_root = tmp.path().join("skills");
+        let skill_dir = skills_root.join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+
+        // Create the "source" directory
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: updated\n---\nNew body",
+        )
+        .unwrap();
+
+        let meta = SkillMetadata {
+            source: Some(source_dir.display().to_string()),
+            resolved_url: None,
+            installed_at: "2026-04-07T12:00:00Z".to_string(),
+            content_hash: "old-hash".to_string(),
+            high_risk_acknowledged: false,
+            env_vars_written: vec![],
+        };
+        meta.write_to(&skill_dir).unwrap();
+
+        let result = update_skill(&config_root, &skills_root, "my-skill")
+            .await
+            .unwrap();
+        assert!(matches!(result, UpdateResult::Updated { .. }));
+
+        // Verify updated
+        let content = std::fs::read_to_string(skills_root.join("my-skill/SKILL.md")).unwrap();
+        assert!(content.contains("updated"));
+    }
+
+    #[tokio::test]
+    async fn update_skill_already_up_to_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_root = tmp.path().join("config");
+        let skills_root = tmp.path().join("skills");
+
+        // Create the "source" directory first
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+
+        // Install the skill normally first (so hash matches)
+        std::fs::create_dir_all(&skills_root).unwrap();
+        let report = analyze_skill_source(&source_dir).unwrap();
+        install_skill_from_analysis(
+            &config_root,
+            &skills_root,
+            &source_dir,
+            &report,
+            false,
+            Some(&source_dir.display().to_string()),
+            None,
+        )
+        .unwrap();
+
+        let result = update_skill(&config_root, &skills_root, "my-skill")
+            .await
+            .unwrap();
+        assert!(matches!(result, UpdateResult::AlreadyUpToDate { .. }));
+    }
+
+    #[tokio::test]
+    async fn update_skill_no_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_root = tmp.path().join("skills");
+        let skill_dir = skills_root.join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+        // No .metadata.json
+
+        let result = update_skill(tmp.path(), &skills_root, "my-skill").await;
+        assert!(result.is_err());
     }
 }
