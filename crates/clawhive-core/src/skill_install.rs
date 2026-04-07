@@ -113,6 +113,14 @@ impl SkillMetadata {
     }
 }
 
+/// Update the `env_vars_written` field in an existing `.metadata.json`.
+pub fn update_env_vars_written(skill_dir: &Path, vars: &[String]) -> Result<()> {
+    let mut meta = SkillMetadata::read_from(skill_dir)
+        .ok_or_else(|| anyhow::anyhow!("no .metadata.json in {}", skill_dir.display()))?;
+    meta.env_vars_written = vars.to_vec();
+    meta.write_to(skill_dir)
+}
+
 pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let resolved = normalize_github_url(source);
@@ -286,6 +294,49 @@ pub fn install_skill_from_analysis(
     writeln!(f, "{}", serde_json::to_string(&event)?)?;
 
     Ok(InstallResult { target, high_risk })
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveResult {
+    pub skill_name: String,
+    pub env_vars_hint: Vec<String>,
+}
+
+pub fn remove_skill(
+    config_root: &Path,
+    skills_root: &Path,
+    skill_name: &str,
+) -> Result<RemoveResult> {
+    let target = skills_root.join(skill_name);
+    if !target.exists() {
+        anyhow::bail!("skill not found: {skill_name}");
+    }
+
+    let env_vars_hint = SkillMetadata::read_from(&target)
+        .map(|m| m.env_vars_written)
+        .unwrap_or_default();
+
+    std::fs::remove_dir_all(&target)?;
+
+    // Audit log
+    let audit_dir = config_root.join("logs");
+    std::fs::create_dir_all(&audit_dir)?;
+    let audit_path = audit_dir.join("skill-installs.jsonl");
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "action": "remove",
+        "skill": skill_name,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)?;
+    writeln!(f, "{}", serde_json::to_string(&event)?)?;
+
+    Ok(RemoveResult {
+        skill_name: skill_name.to_string(),
+        env_vars_hint,
+    })
 }
 
 pub fn render_skill_analysis(report: &SkillAnalysisReport) -> String {
@@ -1164,5 +1215,72 @@ mod tests {
 
         // .content-hash should NOT exist
         assert!(!result.target.join(".content-hash").exists());
+    }
+
+    #[test]
+    fn update_env_vars_written_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let meta = SkillMetadata {
+            source: None,
+            resolved_url: None,
+            installed_at: "2026-04-07T12:00:00Z".to_string(),
+            content_hash: "abc".to_string(),
+            high_risk_acknowledged: false,
+            env_vars_written: vec![],
+        };
+        meta.write_to(&skill_dir).unwrap();
+
+        update_env_vars_written(&skill_dir, &["API_KEY".to_string()]).unwrap();
+
+        let updated = SkillMetadata::read_from(&skill_dir).unwrap();
+        assert_eq!(updated.env_vars_written, vec!["API_KEY".to_string()]);
+    }
+
+    #[test]
+    fn remove_skill_deletes_dir_and_returns_env_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_root = tmp.path().join("config");
+        let skills_root = tmp.path().join("skills");
+        let skill_dir = skills_root.join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+
+        let meta = SkillMetadata {
+            source: Some("https://github.com/user/repo".to_string()),
+            resolved_url: None,
+            installed_at: "2026-04-07T12:00:00Z".to_string(),
+            content_hash: "abc".to_string(),
+            high_risk_acknowledged: false,
+            env_vars_written: vec!["API_KEY".to_string()],
+        };
+        meta.write_to(&skill_dir).unwrap();
+
+        let result = remove_skill(&config_root, &skills_root, "my-skill").unwrap();
+        assert!(!skill_dir.exists());
+        assert_eq!(result.env_vars_hint, vec!["API_KEY".to_string()]);
+
+        // Audit log should exist
+        let audit_path = config_root.join("logs/skill-installs.jsonl");
+        assert!(audit_path.exists());
+        let log_content = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(log_content.contains("\"action\":\"remove\""));
+    }
+
+    #[test]
+    fn remove_skill_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_root = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+
+        let result = remove_skill(tmp.path(), &skills_root, "nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }
