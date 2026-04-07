@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod azure_openai;
+pub mod error;
 pub mod gemini;
 pub mod openai;
 pub mod openai_chatgpt;
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
 pub use azure_openai::AzureOpenAiProvider;
+pub use error::ProviderError;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use openai_chatgpt::OpenAiChatGptProvider;
@@ -121,61 +123,60 @@ impl ProviderConfig {
 }
 
 /// Create a provider from configuration.
-pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> {
+pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, ProviderError> {
+    let require_key = |provider: &str| -> Result<String, ProviderError> {
+        config
+            .api_key
+            .clone()
+            .ok_or_else(|| ProviderError::MissingConfig {
+                provider: provider.to_string(),
+                field: "api_key",
+            })
+    };
+
+    let require_base_url = |provider: &str| -> Result<String, ProviderError> {
+        config
+            .base_url
+            .clone()
+            .ok_or_else(|| ProviderError::MissingConfig {
+                provider: provider.to_string(),
+                field: "base_url",
+            })
+    };
+
     let provider: Arc<dyn LlmProvider> = match config.provider_type {
         ProviderType::Anthropic => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("anthropic requires api_key"))?;
+            let key = require_key("anthropic")?;
             let base_url = config
                 .base_url
                 .as_deref()
                 .unwrap_or("https://api.anthropic.com");
-            Arc::new(AnthropicProvider::new(key.clone(), base_url))
+            Arc::new(AnthropicProvider::new(key, base_url))
         }
         ProviderType::OpenAI => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("openai requires api_key"))?;
+            let key = require_key("openai")?;
             let base_url = config
                 .base_url
                 .as_deref()
                 .unwrap_or("https://api.openai.com/v1");
-            Arc::new(OpenAiProvider::new(key.clone(), base_url))
+            Arc::new(OpenAiProvider::new(key, base_url))
         }
         ProviderType::AzureOpenAI => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("azure-openai requires api_key"))?;
-            let base_url = config
-                .base_url
-                .as_ref()
-                .ok_or_else(|| anyhow!("azure-openai requires base_url"))?;
-            Arc::new(AzureOpenAiProvider::new(key.clone(), base_url.clone()))
+            let key = require_key("azure-openai")?;
+            let base_url = require_base_url("azure-openai")?;
+            Arc::new(AzureOpenAiProvider::new(key, base_url))
         }
         ProviderType::Gemini => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("gemini requires api_key"))?;
-            Arc::new(GeminiProvider::new(key.clone()))
+            let key = require_key("gemini")?;
+            Arc::new(GeminiProvider::new(key))
         }
         ProviderType::DeepSeek => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("deepseek requires api_key"))?;
-            Arc::new(deepseek(key.clone()))
+            let key = require_key("deepseek")?;
+            Arc::new(deepseek(key))
         }
         ProviderType::Groq => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("groq requires api_key"))?;
-            Arc::new(groq(key.clone()))
+            let key = require_key("groq")?;
+            Arc::new(groq(key))
         }
         ProviderType::Ollama => {
             let base_url = config
@@ -185,78 +186,45 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> 
             Arc::new(ollama_with_base(base_url))
         }
         ProviderType::OpenRouter => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("openrouter requires api_key"))?;
-            Arc::new(openrouter(key.clone()))
+            let key = require_key("openrouter")?;
+            Arc::new(openrouter(key))
         }
         ProviderType::Together => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("together requires api_key"))?;
-            Arc::new(together(key.clone()))
+            let key = require_key("together")?;
+            Arc::new(together(key))
         }
         ProviderType::Fireworks => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("fireworks requires api_key"))?;
-            Arc::new(fireworks(key.clone()))
+            let key = require_key("fireworks")?;
+            Arc::new(fireworks(key))
         }
         ProviderType::Custom => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("custom provider requires api_key"))?;
-            let base_url = config
-                .base_url
-                .as_ref()
-                .ok_or_else(|| anyhow!("custom provider requires base_url"))?;
-            Arc::new(custom(key.clone(), base_url.clone()))
+            let key = require_key("custom")?;
+            let base_url = require_base_url("custom")?;
+            Arc::new(custom(key, base_url))
         }
         ProviderType::Qwen => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("qwen requires api_key"))?;
-            Arc::new(qwen(key.clone()))
+            let key = require_key("qwen")?;
+            Arc::new(qwen(key))
         }
         ProviderType::Moonshot => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("moonshot requires api_key"))?;
-            Arc::new(moonshot(key.clone()))
+            let key = require_key("moonshot")?;
+            Arc::new(moonshot(key))
         }
         ProviderType::Zhipu => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("zhipu requires api_key"))?;
-            Arc::new(zhipu(key.clone()))
+            let key = require_key("zhipu")?;
+            Arc::new(zhipu(key))
         }
         ProviderType::MiniMax => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("minimax requires api_key"))?;
-            Arc::new(minimax(key.clone()))
+            let key = require_key("minimax")?;
+            Arc::new(minimax(key))
         }
         ProviderType::Volcengine => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("volcengine requires api_key"))?;
-            Arc::new(volcengine(key.clone()))
+            let key = require_key("volcengine")?;
+            Arc::new(volcengine(key))
         }
         ProviderType::Qianfan => {
-            let key = config
-                .api_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("qianfan requires api_key"))?;
-            Arc::new(qianfan(key.clone()))
+            let key = require_key("qianfan")?;
+            Arc::new(qianfan(key))
         }
     };
     Ok(provider)
@@ -266,7 +234,7 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>> 
 pub fn register_from_configs(
     registry: &mut ProviderRegistry,
     configs: &[ProviderConfig],
-) -> Result<()> {
+) -> Result<(), ProviderError> {
     for config in configs {
         let provider = create_provider(config)?;
         registry.register(&config.id, provider);
@@ -297,11 +265,11 @@ impl ProviderRegistry {
         self.providers.insert(id.into(), provider);
     }
 
-    pub fn get(&self, id: &str) -> Result<Arc<dyn LlmProvider>> {
+    pub fn get(&self, id: &str) -> Result<Arc<dyn LlmProvider>, ProviderError> {
         self.providers
             .get(id)
             .cloned()
-            .ok_or_else(|| anyhow!("provider not found: {id}"))
+            .ok_or_else(|| ProviderError::NotFound(id.to_string()))
     }
 
     pub fn list(&self) -> Vec<&str> {

@@ -16,5 +16,6 @@ async-trait.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 clawhive-auth = { path = "../clawhive-auth" }
 uuid = { workspace = true, features = ["v4"] }
