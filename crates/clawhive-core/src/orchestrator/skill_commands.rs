@@ -6,6 +6,7 @@ use clawhive_schema::*;
 use crate::access_gate::AccessGate;
 use crate::config_view::ConfigView;
 use crate::skill::SkillRegistry;
+use crate::skill_install::SkillMetadata;
 
 use super::Orchestrator;
 
@@ -238,6 +239,46 @@ impl Orchestrator {
                 result.env_vars_hint.join(", ")
             ));
         }
+
+        Ok(OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text,
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        })
+    }
+
+    pub(super) fn handle_skill_list_command(
+        &self,
+        inbound: InboundMessage,
+    ) -> Result<OutboundMessage> {
+        let registry = self.active_skill_registry();
+        let skills = registry.list();
+
+        let text = if skills.is_empty() {
+            "No skills installed.".to_string()
+        } else {
+            let mut lines = vec![format!("Installed skills ({}):\n", skills.len())];
+            for skill in &skills {
+                let status = if skill.requirements_met() {
+                    "ready"
+                } else {
+                    "unavailable"
+                };
+                let source_str = SkillMetadata::read_from(&self.skills_root.join(&skill.name))
+                    .and_then(|m| m.source)
+                    .unwrap_or_else(|| "local".to_string());
+                lines.push(format!(
+                    "- **{}** — {} [{}] (source: {})",
+                    skill.name, skill.description, status, source_str
+                ));
+            }
+            lines.join("\n")
+        };
 
         Ok(OutboundMessage {
             trace_id: inbound.trace_id,

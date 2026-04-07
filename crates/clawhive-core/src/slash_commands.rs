@@ -36,6 +36,8 @@ pub enum SlashCommand {
     SkillRemove {
         skill_name: String,
     },
+    /// /skill list - List installed skills
+    SkillList,
     /// /skill <subcommand> without required arguments
     SkillUsageHint {
         subcommand: String,
@@ -127,6 +129,7 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
                         Some(SlashCommand::SkillConfirm { token })
                     }
                 }
+                Some("list") => Some(SlashCommand::SkillList),
                 Some("remove") => {
                     let name = rest
                         .get(1..)
@@ -316,6 +319,11 @@ mod tests {
                 subcommand: "remove".to_string()
             })
         );
+    }
+
+    #[test]
+    fn parse_skill_list_command() {
+        assert_eq!(parse_command("/skill list"), Some(SlashCommand::SkillList));
     }
 
     #[test]

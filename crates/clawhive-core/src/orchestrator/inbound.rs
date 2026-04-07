@@ -137,6 +137,9 @@ impl Orchestrator {
                 crate::slash_commands::SlashCommand::SkillRemove { skill_name } => {
                     return self.handle_skill_remove_command(inbound, &skill_name);
                 }
+                crate::slash_commands::SlashCommand::SkillList => {
+                    return self.handle_skill_list_command(inbound);
+                }
                 crate::slash_commands::SlashCommand::SkillUsageHint { subcommand } => {
                     let hint = match subcommand.as_str() {
                         "analyze" => "Usage: /skill analyze <url-or-path>\nExample: /skill analyze https://example.com/my-skill.zip",
