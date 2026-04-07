@@ -31,6 +31,13 @@ pub(crate) enum SkillCommands {
         #[arg(help = "Skill name")]
         skill_name: String,
     },
+    #[command(about = "Update an installed skill from its original source")]
+    Update {
+        #[arg(help = "Skill name (omit for --all)")]
+        skill_name: Option<String>,
+        #[arg(long, help = "Update all skills with known sources")]
+        all: bool,
+    },
 }
 
 pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
@@ -42,14 +49,27 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
             if skills.is_empty() {
                 println!("No skills found in skills/ directory.");
             } else {
-                println!("{:<20} {:<50} {:<10}", "NAME", "DESCRIPTION", "AVAILABLE");
-                println!("{}", "-".repeat(80));
+                println!(
+                    "{:<20} {:<40} {:<10} SOURCE",
+                    "NAME", "DESCRIPTION", "AVAILABLE"
+                );
+                println!("{}", "-".repeat(100));
                 for skill in &skills {
+                    let source = clawhive_core::skill_install::SkillMetadata::read_from(
+                        &root.join("skills").join(&skill.name),
+                    )
+                    .and_then(|m| m.source)
+                    .unwrap_or_else(|| "-".to_string());
+                    let source_short = if source.len() > 28 {
+                        format!("{}...", &source[..25])
+                    } else {
+                        source
+                    };
                     println!(
-                        "{:<20} {:<50} {:<10}",
+                        "{:<20} {:<40} {:<10} {}",
                         skill.name,
-                        if skill.description.len() > 48 {
-                            format!("{}...", &skill.description[..45])
+                        if skill.description.len() > 38 {
+                            format!("{}...", &skill.description[..35])
                         } else {
                             skill.description.clone()
                         },
@@ -58,6 +78,7 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                         } else {
                             "no"
                         },
+                        source_short,
                     );
                 }
             }
@@ -81,6 +102,25 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                     println!("Required env: {}", skill.requires.env.join(", "));
                 }
                 println!("\n--- Content ---\n{}", skill.content);
+
+                if let Some(meta) = clawhive_core::skill_install::SkillMetadata::read_from(
+                    &root.join("skills").join(&skill_name),
+                ) {
+                    println!("\n--- Install Info ---");
+                    if let Some(ref source) = meta.source {
+                        println!("Source: {source}");
+                    }
+                    if let Some(ref url) = meta.resolved_url {
+                        println!("Resolved URL: {url}");
+                    }
+                    println!("Installed: {}", meta.installed_at);
+                    if meta.high_risk_acknowledged {
+                        println!("High risk: acknowledged");
+                    }
+                    if !meta.env_vars_written.is_empty() {
+                        println!("Env vars: {}", meta.env_vars_written.join(", "));
+                    }
+                }
             }
             None => {
                 anyhow::bail!("skill not found: {skill_name}");
@@ -106,6 +146,38 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                     "\nNote: the following env vars were set during install and may no longer be needed: {}\nYou can remove them from ~/.clawhive/.env if unused.",
                     result.env_vars_hint.join(", ")
                 );
+            }
+        }
+        SkillCommands::Update { skill_name, all } => {
+            if all {
+                let (updated, up_to_date, failed) =
+                    clawhive_core::skill_install::update_all_skills(root, &root.join("skills"))
+                        .await;
+                if !updated.is_empty() {
+                    println!("Updated: {}", updated.join(", "));
+                }
+                if !up_to_date.is_empty() {
+                    println!("Already up to date: {}", up_to_date.join(", "));
+                }
+                for (name, err) in &failed {
+                    println!("Failed to update {name}: {err}");
+                }
+                if updated.is_empty() && failed.is_empty() {
+                    println!("All skills are up to date.");
+                }
+            } else if let Some(name) = skill_name {
+                match clawhive_core::skill_install::update_skill(root, &root.join("skills"), &name)
+                    .await?
+                {
+                    clawhive_core::skill_install::UpdateResult::Updated { .. } => {
+                        println!("Updated skill '{name}'.");
+                    }
+                    clawhive_core::skill_install::UpdateResult::AlreadyUpToDate { .. } => {
+                        println!("Skill '{name}' is already up to date.");
+                    }
+                }
+            } else {
+                anyhow::bail!("specify a skill name or use --all");
             }
         }
         SkillCommands::Install { source, yes } => {
