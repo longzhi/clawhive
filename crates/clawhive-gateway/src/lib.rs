@@ -546,7 +546,8 @@ impl Gateway {
                 conversation_scope: conversation_scope.to_string(),
                 text: text.to_string(),
             })
-            .await
+            .await?;
+        Ok(())
     }
 }
 

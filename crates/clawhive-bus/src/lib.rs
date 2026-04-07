@@ -1,9 +1,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
 use clawhive_schema::BusMessage;
 use tokio::sync::{mpsc, RwLock};
+
+#[derive(Debug, thiserror::Error)]
+pub enum BusError {
+    #[error("channel closed")]
+    ChannelClosed,
+
+    #[error("send failed: {0}")]
+    SendFailed(String),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+type Result<T> = std::result::Result<T, BusError>;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum Topic {
