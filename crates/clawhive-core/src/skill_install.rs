@@ -141,6 +141,18 @@ pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
         {
             return extract_local_archive(&local);
         }
+        // Single .md file → wrap in temp directory as SKILL.md
+        if path_lc.ends_with(".md") {
+            let temp = tempfile::tempdir()?;
+            let wrapper = temp.path().join("skill-wrapper");
+            std::fs::create_dir_all(&wrapper)?;
+            std::fs::copy(&local, wrapper.join("SKILL.md"))?;
+            return Ok(ResolvedSkillSource::Remote {
+                _temp_dir: temp,
+                path: wrapper,
+                url: None,
+            });
+        }
     }
 
     Ok(ResolvedSkillSource::Local(local))
@@ -1457,5 +1469,34 @@ mod tests {
 
         let result = update_skill(tmp.path(), &skills_root, "my-skill").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_single_skill_md_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_md = tmp.path().join("SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: single-file\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+
+        let resolved = resolve_skill_source(&skill_md.display().to_string())
+            .await
+            .unwrap();
+        assert!(resolved.local_path().join("SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    async fn resolve_single_md_file_renamed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("my-awesome-skill.md");
+        std::fs::write(&custom, "---\nname: awesome\ndescription: test\n---\nBody").unwrap();
+
+        let resolved = resolve_skill_source(&custom.display().to_string())
+            .await
+            .unwrap();
+        // Should be wrapped and renamed to SKILL.md
+        assert!(resolved.local_path().join("SKILL.md").exists());
     }
 }
