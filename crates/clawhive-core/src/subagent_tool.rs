@@ -145,6 +145,7 @@ mod tests {
             HashMap::new(),
             3,
             vec![],
+            5,
         ));
 
         SubAgentTool::new(runner, 30)

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clawhive_provider::LlmMessage;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
@@ -44,6 +44,8 @@ pub struct SubAgentRunner {
     active_runs: Arc<Mutex<HashMap<Uuid, RunHandle>>>,
     max_depth: u32,
     allowed_tools: Vec<String>,
+    concurrency_limit: Arc<Semaphore>,
+    max_concurrent: usize,
 }
 
 impl SubAgentRunner {
@@ -53,6 +55,7 @@ impl SubAgentRunner {
         personas: HashMap<String, Persona>,
         max_depth: u32,
         allowed_tools: Vec<String>,
+        max_concurrent: usize,
     ) -> Self {
         Self {
             router,
@@ -61,6 +64,8 @@ impl SubAgentRunner {
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             max_depth,
             allowed_tools,
+            concurrency_limit: Arc::new(Semaphore::new(max_concurrent)),
+            max_concurrent,
         }
     }
 
@@ -72,6 +77,17 @@ impl SubAgentRunner {
                 self.max_depth
             ));
         }
+
+        let permit = self
+            .concurrency_limit
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "sub-agent concurrency limit {} reached",
+                    self.max_concurrent
+                )
+            })?;
 
         let agent = self
             .agents
@@ -93,6 +109,8 @@ impl SubAgentRunner {
         let trace_id = req.trace_id;
 
         let handle = tokio::spawn(async move {
+            let _permit = permit; // held until task completes
+
             let messages = vec![LlmMessage::user(task_text)];
 
             let result = timeout(
@@ -235,6 +253,7 @@ mod tests {
             HashMap::new(),
             3,
             vec!["read".into(), "write".into()],
+            5,
         )
     }
 
@@ -343,5 +362,122 @@ mod tests {
         let result = runner.spawn(req).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("recursion depth"));
+    }
+
+    fn make_runner_with_limit(max_concurrent: usize) -> SubAgentRunner {
+        let mut registry = ProviderRegistry::new();
+        registry.register("stub", Arc::new(StubProvider));
+
+        let router = LlmRouter::new(registry, HashMap::new(), vec![]);
+
+        let agent = FullAgentConfig {
+            agent_id: "test-agent".into(),
+            enabled: true,
+            security: SecurityMode::default(),
+            identity: None,
+            model_policy: ModelPolicy {
+                primary: "stub/test-model".into(),
+                fallbacks: vec![],
+                thinking_level: None,
+                context_window: None,
+                compaction_model: None,
+            },
+            tool_policy: None,
+            memory_policy: None,
+            sub_agent: None,
+            workspace: None,
+            heartbeat: None,
+            exec_security: None,
+            sandbox: None,
+            max_response_tokens: None,
+            max_iterations: None,
+            turn_timeout_secs: None,
+            typing_ttl_secs: None,
+            progress_delay_secs: None,
+        };
+
+        let mut agents = HashMap::new();
+        agents.insert("test-agent".into(), agent);
+
+        SubAgentRunner::new(
+            Arc::new(router),
+            agents,
+            HashMap::new(),
+            3,
+            vec![],
+            max_concurrent,
+        )
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_when_concurrency_limit_reached() {
+        let runner = make_runner_with_limit(2);
+
+        // Spawn two subagents to fill the limit
+        for i in 0..2 {
+            let req = SubAgentRequest {
+                parent_run_id: Uuid::new_v4(),
+                trace_id: Uuid::new_v4(),
+                target_agent_id: "test-agent".into(),
+                task: format!("task {i}"),
+                timeout_seconds: 60,
+                depth: 0,
+            };
+            runner.spawn(req).await.unwrap();
+        }
+
+        // Third spawn should fail
+        let req = SubAgentRequest {
+            parent_run_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            target_agent_id: "test-agent".into(),
+            task: "task overflow".into(),
+            timeout_seconds: 60,
+            depth: 0,
+        };
+        let result = runner.spawn(req).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("concurrency limit"),
+            "expected concurrency limit error, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completing_subagent_frees_concurrency_slot() {
+        let runner = make_runner_with_limit(1);
+
+        // Spawn one subagent (fills the single slot)
+        let req = SubAgentRequest {
+            parent_run_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            target_agent_id: "test-agent".into(),
+            task: "first task".into(),
+            timeout_seconds: 30,
+            depth: 0,
+        };
+        let run_id = runner.spawn(req).await.unwrap();
+
+        // Wait for it to complete (StubProvider returns immediately)
+        let result = runner.wait_result(&run_id).await.unwrap();
+        assert!(result.success);
+
+        // The spawned task has finished, so the permit should be released.
+        // Give a small window for the tokio task to fully complete and drop the permit.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now we should be able to spawn another one
+        let req = SubAgentRequest {
+            parent_run_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            target_agent_id: "test-agent".into(),
+            task: "second task".into(),
+            timeout_seconds: 30,
+            depth: 0,
+        };
+        let run_id2 = runner.spawn(req).await.unwrap();
+        let result2 = runner.wait_result(&run_id2).await.unwrap();
+        assert!(result2.success);
     }
 }

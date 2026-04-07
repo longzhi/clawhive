@@ -811,6 +811,12 @@ fn default_daily_summary_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentPolicyConfig {
     pub allow_spawn: bool,
+    #[serde(default = "default_max_concurrent_subagents")]
+    pub max_concurrent: usize,
+}
+
+fn default_max_concurrent_subagents() -> usize {
+    5
 }
 
 fn default_heartbeat_interval_minutes() -> u64 {

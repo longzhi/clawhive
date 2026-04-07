@@ -80,6 +80,7 @@ pub fn build_tool_registry(
         personas,
         3,
         vec![],
+        5,
     ));
     registry.register(Box::new(crate::subagent_tool::SubAgentTool::new(
         sub_agent_runner,
