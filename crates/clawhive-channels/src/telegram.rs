@@ -1321,7 +1321,7 @@ fn apply_inline_spans(line: &str) -> String {
         }
 
         // Consume one character
-        let ch = rest.chars().next().unwrap();
+        let ch = rest.chars().next().expect("rest is non-empty in loop body");
         out.push(ch);
         rest = &rest[ch.len_utf8()..];
     }

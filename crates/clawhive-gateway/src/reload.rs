@@ -104,7 +104,8 @@ impl ReloadCoordinator {
         let current_gen = self.generation.load(Ordering::SeqCst);
 
         if diff.is_empty() {
-            *self.loaded_hashes.write().unwrap() = disk_file_hashes(&self.root.join("config"));
+            *self.loaded_hashes.write().expect("config lock poisoned") =
+                disk_file_hashes(&self.root.join("config"));
             return Ok(ReloadOutcome::no_changes(current_gen));
         }
 
@@ -125,7 +126,8 @@ impl ReloadCoordinator {
 
         self.orchestrator.apply_config_view(new_view);
         self.current_config.store(Arc::new(new_cfg.clone()));
-        *self.loaded_hashes.write().unwrap() = disk_file_hashes(&self.root.join("config"));
+        *self.loaded_hashes.write().expect("config lock poisoned") =
+            disk_file_hashes(&self.root.join("config"));
 
         let channel_results = self.reconcile_channels(&new_cfg).await;
 
@@ -158,7 +160,7 @@ impl ReloadCoordinator {
         let generation = self.generation.load(Ordering::SeqCst);
         let config_dir = self.root.join("config");
 
-        let running_hashes = self.loaded_hashes.read().unwrap();
+        let running_hashes = self.loaded_hashes.read().expect("config lock poisoned");
         let disk_hashes = disk_file_hashes(&config_dir);
 
         let mut changed_files = Vec::new();
@@ -341,10 +343,13 @@ fn disk_file_hashes(config_dir: &Path) -> std::collections::HashMap<String, u64>
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
+                    let Some(fname) = path.file_name() else {
+                        continue;
+                    };
                     let rel = if subdir.is_empty() {
-                        path.file_name().unwrap().to_string_lossy().to_string()
+                        fname.to_string_lossy().to_string()
                     } else {
-                        format!("{}/{}", subdir, path.file_name().unwrap().to_string_lossy())
+                        format!("{}/{}", subdir, fname.to_string_lossy())
                     };
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     content.hash(&mut hasher);

@@ -54,7 +54,12 @@ fn is_exempt_path(path: &str, state: &AppState) -> bool {
         || path == "/api/auth/status"
         || path == "/api/auth/login"
         || path == "/api/auth/check"
-        || (path == "/api/auth/set-password" && state.web_password_hash.read().unwrap().is_none())
+        || (path == "/api/auth/set-password"
+            && state
+                .web_password_hash
+                .read()
+                .expect("auth lock poisoned")
+                .is_none())
     {
         return true;
     }
@@ -224,7 +229,11 @@ async fn auth_middleware(State(state): State<AppState>, request: Request, next: 
 
     if !path.starts_with("/api/")
         || is_exempt_path(path, &state)
-        || state.web_password_hash.read().unwrap().is_none()
+        || state
+            .web_password_hash
+            .read()
+            .expect("auth lock poisoned")
+            .is_none()
     {
         return next.run(request).await;
     }

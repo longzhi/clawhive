@@ -178,7 +178,7 @@ impl SlackBot {
             let ts = msg.origin.ts.0.clone();
 
             // Track newest
-            if newest_ts.is_none() || ts > *newest_ts.as_ref().unwrap() {
+            if newest_ts.as_ref().is_none_or(|cur| *ts > **cur) {
                 newest_ts = Some(ts.clone());
             }
 

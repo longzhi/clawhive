@@ -75,7 +75,11 @@ fn print_status_ex(root: &Path, just_started: bool) {
     // Status row
     let status_val = if running {
         let label = if just_started { "started" } else { "running" };
-        format!("{} (pid: {})", style(label).green(), pid_info.unwrap())
+        format!(
+            "{} (pid: {})",
+            style(label).green(),
+            pid_info.expect("checked is_some above")
+        )
     } else {
         style("stopped").red().to_string()
     };

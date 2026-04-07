@@ -118,7 +118,7 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<PasswordRequest>,
 ) -> impl IntoResponse {
-    let password_hash = state.web_password_hash.read().unwrap();
+    let password_hash = state.web_password_hash.read().expect("auth lock poisoned");
     let Some(ref hash_str) = *password_hash else {
         return (
             StatusCode::BAD_REQUEST,
@@ -155,7 +155,11 @@ async fn login(
 }
 
 async fn check(State(state): State<AppState>, headers: HeaderMap) -> Json<CheckResponse> {
-    let auth_required = state.web_password_hash.read().unwrap().is_some();
+    let auth_required = state
+        .web_password_hash
+        .read()
+        .expect("auth lock poisoned")
+        .is_some();
     if !auth_required {
         return Json(CheckResponse {
             authenticated: false,
@@ -199,7 +203,12 @@ async fn set_password(
             .into_response();
     }
 
-    if state.web_password_hash.read().unwrap().is_some() {
+    if state
+        .web_password_hash
+        .read()
+        .expect("auth lock poisoned")
+        .is_some()
+    {
         let authenticated = extract_session_token(&headers)
             .as_deref()
             .is_some_and(|token| is_valid_session(&state, token));

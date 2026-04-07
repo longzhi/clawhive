@@ -290,12 +290,15 @@ impl EventHandler for DiscordHandler {
         // member list but can be mentioned via their managed role (@BotName App).
         let is_role_mention = !msg.mention_roles.is_empty()
             && msg.guild_id.is_some()
-            && ctx.cache.guild(msg.guild_id.unwrap()).is_some_and(|guild| {
-                guild.roles.values().any(|role| {
-                    role.tags.bot_id == Some(current_user_id)
-                        && msg.mention_roles.contains(&role.id)
-                })
-            });
+            && ctx
+                .cache
+                .guild(msg.guild_id.expect("guild_id checked above"))
+                .is_some_and(|guild| {
+                    guild.roles.values().any(|role| {
+                        role.tags.bot_id == Some(current_user_id)
+                            && msg.mention_roles.contains(&role.id)
+                    })
+                });
         let is_mention = is_user_mention || is_role_mention;
 
         // Group filtering: if groups whitelist is configured, only respond in specified channels
