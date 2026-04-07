@@ -127,6 +127,8 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                     resolved.local_path(),
                     &report,
                     yes || high_risk,
+                    Some(&source),
+                    resolved.resolved_url(),
                 )?;
                 println!(
                     "Installed skill '{}' to {}",

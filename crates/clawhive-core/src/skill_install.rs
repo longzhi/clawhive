@@ -15,6 +15,7 @@ pub enum ResolvedSkillSource {
     Remote {
         _temp_dir: tempfile::TempDir,
         path: PathBuf,
+        url: Option<String>,
     },
 }
 
@@ -23,6 +24,13 @@ impl ResolvedSkillSource {
         match self {
             Self::Local(p) => p.as_path(),
             Self::Remote { path, .. } => path.as_path(),
+        }
+    }
+
+    pub fn resolved_url(&self) -> Option<&str> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote { url, .. } => url.as_deref(),
         }
     }
 }
@@ -76,6 +84,35 @@ pub struct InstallResult {
     pub high_risk: bool,
 }
 
+pub const METADATA_FILE: &str = ".metadata.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkillMetadata {
+    pub source: Option<String>,
+    pub resolved_url: Option<String>,
+    pub installed_at: String,
+    pub content_hash: String,
+    #[serde(default)]
+    pub high_risk_acknowledged: bool,
+    #[serde(default)]
+    pub env_vars_written: Vec<String>,
+}
+
+impl SkillMetadata {
+    pub fn read_from(skill_dir: &Path) -> Option<Self> {
+        let path = skill_dir.join(METADATA_FILE);
+        let content = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    pub fn write_to(&self, skill_dir: &Path) -> Result<()> {
+        let path = skill_dir.join(METADATA_FILE);
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, json)?;
+        Ok(())
+    }
+}
+
 pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let resolved = normalize_github_url(source);
@@ -123,6 +160,7 @@ fn extract_local_archive(archive_path: &Path) -> Result<ResolvedSkillSource> {
     Ok(ResolvedSkillSource::Remote {
         _temp_dir: temp,
         path: skill_root,
+        url: None,
     })
 }
 
@@ -161,8 +199,10 @@ pub fn install_skill_from_analysis(
     source: &Path,
     report: &SkillAnalysisReport,
     allow_high_risk: bool,
+    original_source: Option<&str>,
+    resolved_url: Option<&str>,
 ) -> Result<InstallResult> {
-    const CONTENT_HASH_FILE: &str = ".content-hash";
+    const LEGACY_HASH_FILE: &str = ".content-hash";
 
     let high_risk = has_high_risk_findings(report);
     if high_risk && !allow_high_risk {
@@ -171,10 +211,19 @@ pub fn install_skill_from_analysis(
 
     let target = skills_root.join(&report.skill_name);
     let source_hash = compute_directory_content_hash(source)?;
-    let target_hash_path = target.join(CONTENT_HASH_FILE);
-    if target.exists() && target_hash_path.exists() {
-        let installed_hash = std::fs::read_to_string(&target_hash_path)?;
-        if installed_hash.trim() == source_hash {
+
+    // Check existing hash: prefer .metadata.json, fall back to legacy .content-hash
+    if target.exists() {
+        let installed_hash = SkillMetadata::read_from(&target)
+            .map(|m| m.content_hash)
+            .or_else(|| {
+                let legacy = target.join(LEGACY_HASH_FILE);
+                std::fs::read_to_string(&legacy)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            });
+
+        if installed_hash.as_deref() == Some(source_hash.as_str()) {
             let audit_dir = config_root.join("logs");
             std::fs::create_dir_all(&audit_dir)?;
             let audit_path = audit_dir.join("skill-installs.jsonl");
@@ -201,7 +250,23 @@ pub fn install_skill_from_analysis(
         std::fs::remove_dir_all(&target)?;
     }
     copy_dir_recursive(source, &target)?;
-    std::fs::write(target.join(CONTENT_HASH_FILE), &source_hash)?;
+
+    // Write .metadata.json instead of legacy .content-hash
+    let metadata = SkillMetadata {
+        source: original_source.map(|s| s.to_string()),
+        resolved_url: resolved_url.map(|s| s.to_string()),
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        content_hash: source_hash,
+        high_risk_acknowledged: high_risk && allow_high_risk,
+        env_vars_written: vec![], // populated by caller after env var prompts
+    };
+    metadata.write_to(&target)?;
+
+    // Remove legacy .content-hash if present
+    let legacy_hash = target.join(LEGACY_HASH_FILE);
+    if legacy_hash.exists() {
+        let _ = std::fs::remove_file(&legacy_hash);
+    }
 
     let audit_dir = config_root.join("logs");
     std::fs::create_dir_all(&audit_dir)?;
@@ -475,6 +540,7 @@ Example: https://github.com/user/repo/archive/refs/heads/main.tar.gz"
     Ok(ResolvedSkillSource::Remote {
         _temp_dir: temp,
         path: skill_root,
+        url: Some(url.to_string()),
     })
 }
 
@@ -823,6 +889,13 @@ fn hash_directory_recursive(root: &Path, dir: &Path, hasher: &mut DefaultHasher)
             continue;
         }
 
+        // Skip metadata/hash files so they don't affect the content hash
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name == METADATA_FILE || name == ".content-hash" {
+                continue;
+            }
+        }
+
         let relative = path
             .strip_prefix(root)
             .map_err(|e| anyhow::anyhow!("failed to hash '{}': {e}", path.display()))?;
@@ -879,9 +952,17 @@ mod tests {
 
         let config_root = temp.path().join("config");
         let skills_root = temp.path().join("skills");
-        let err = install_skill_from_analysis(&config_root, &skills_root, &source, &report, false)
-            .unwrap_err()
-            .to_string();
+        let err = install_skill_from_analysis(
+            &config_root,
+            &skills_root,
+            &source,
+            &report,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("high-risk"));
     }
 
@@ -900,9 +981,16 @@ mod tests {
         let report = analyze_skill_source(&source).unwrap();
         let config_root = temp.path().join("config");
         let skills_root = temp.path().join("skills");
-        let result =
-            install_skill_from_analysis(&config_root, &skills_root, &source, &report, false)
-                .unwrap();
+        let result = install_skill_from_analysis(
+            &config_root,
+            &skills_root,
+            &source,
+            &report,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(result.target.exists());
         let audit = config_root.join("logs").join("skill-installs.jsonl");
@@ -1018,5 +1106,63 @@ mod tests {
 
         let report = analyze_skill_source(resolved.local_path()).unwrap();
         assert_eq!(report.skill_name, "tarred-skill");
+    }
+
+    #[test]
+    fn skill_metadata_round_trip() {
+        let meta = SkillMetadata {
+            source: Some("https://github.com/user/repo".to_string()),
+            resolved_url: Some(
+                "https://github.com/user/repo/archive/refs/heads/main.tar.gz".to_string(),
+            ),
+            installed_at: "2026-04-07T12:00:00Z".to_string(),
+            content_hash: "abc123".to_string(),
+            high_risk_acknowledged: false,
+            env_vars_written: vec!["API_KEY".to_string()],
+        };
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        let parsed: SkillMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source, meta.source);
+        assert_eq!(parsed.resolved_url, meta.resolved_url);
+        assert_eq!(parsed.content_hash, meta.content_hash);
+        assert_eq!(parsed.env_vars_written, meta.env_vars_written);
+    }
+
+    #[test]
+    fn install_writes_metadata_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_root = tmp.path().join("config");
+        let skills_root = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+
+        let source_dir = tmp.path().join("src-skill");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("SKILL.md"),
+            "---\nname: test-meta\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+
+        let report = analyze_skill_source(&source_dir).unwrap();
+        let result = install_skill_from_analysis(
+            &config_root,
+            &skills_root,
+            &source_dir,
+            &report,
+            false,
+            Some("https://github.com/user/repo"),
+            Some("https://github.com/user/repo/archive/refs/heads/main.tar.gz"),
+        )
+        .unwrap();
+
+        let meta_path = result.target.join(METADATA_FILE);
+        assert!(meta_path.exists(), ".metadata.json must be created");
+
+        let meta = SkillMetadata::read_from(&result.target).unwrap();
+        assert_eq!(meta.source.as_deref(), Some("https://github.com/user/repo"));
+        assert!(!meta.content_hash.is_empty());
+
+        // .content-hash should NOT exist
+        assert!(!result.target.join(".content-hash").exists());
     }
 }

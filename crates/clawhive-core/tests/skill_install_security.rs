@@ -113,13 +113,29 @@ fn installing_same_source_twice_is_noop_for_identical_content() {
     let config_root = temp.path().join("config");
     let skills_root = temp.path().join("skills");
 
-    let first =
-        install_skill_from_analysis(&config_root, &skills_root, &source, &report, false).unwrap();
+    let first = install_skill_from_analysis(
+        &config_root,
+        &skills_root,
+        &source,
+        &report,
+        false,
+        None,
+        None,
+    )
+    .unwrap();
     let installed_readme = first.target.join("README.md");
     std::fs::write(&installed_readme, "mutated-after-install").unwrap();
 
-    let second =
-        install_skill_from_analysis(&config_root, &skills_root, &source, &report, false).unwrap();
+    let second = install_skill_from_analysis(
+        &config_root,
+        &skills_root,
+        &source,
+        &report,
+        false,
+        None,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(first.target, second.target);
     assert_eq!(

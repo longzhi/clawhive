@@ -185,6 +185,8 @@ impl Orchestrator {
             resolved.local_path(),
             &report,
             true,
+            Some(&source),
+            resolved.resolved_url(),
         )?;
         self.reload_skills();
 

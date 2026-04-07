@@ -115,6 +115,8 @@ async fn install_skill(
         resolved.local_path(),
         &report,
         body.allow_high_risk,
+        Some(&body.source),
+        resolved.resolved_url(),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
