@@ -13,10 +13,32 @@ use clawhive_provider::LlmMessage;
 
 use super::router::LlmRouter;
 
-/// Approximate token count from text (chars / 4).
-/// This is a rough estimate; actual tokenization varies by model.
+/// Approximate token count from text.
+/// CJK characters average ~1.5 tokens each; ASCII/Latin averages ~0.25 tokens per char.
+/// Uses char count (not byte count) to avoid UTF-8 multi-byte skew.
 pub fn estimate_tokens(text: &str) -> usize {
-    text.len() / 4
+    let mut weighted = 0usize;
+    for ch in text.chars() {
+        if is_cjk_range(ch) {
+            weighted += 6; // 6/4 = 1.5 tokens per CJK char
+        } else {
+            weighted += 1; // 1/4 = 0.25 tokens per ASCII char
+        }
+    }
+    weighted / 4
+}
+
+/// Returns true for CJK ideographs, kana, hangul, and CJK punctuation.
+fn is_cjk_range(ch: char) -> bool {
+    matches!(ch,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+        | '\u{3000}'..='\u{303F}' // CJK Symbols and Punctuation
+        | '\u{3040}'..='\u{30FF}' // Hiragana + Katakana
+        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+        | '\u{FF00}'..='\u{FFEF}' // Fullwidth Forms
+    )
 }
 
 /// Estimate tokens for a single message.
