@@ -54,12 +54,25 @@ struct InstallSkillResponse {
     high_risk: bool,
 }
 
+#[derive(Deserialize)]
+struct SkillRemoveRequest {
+    skill_name: String,
+}
+
+#[derive(Serialize)]
+struct SkillRemoveResponse {
+    skill_name: String,
+    env_vars_hint: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct InstalledSkillSummary {
     name: String,
     description: String,
     has_permissions: bool,
     path: String,
+    source: Option<String>,
+    installed_at: Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -67,6 +80,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_skills))
         .route("/analyze", post(analyze_skill))
         .route("/install", post(install_skill))
+        .route("/remove", post(remove_skill_route))
 }
 
 async fn analyze_skill(
@@ -128,6 +142,30 @@ async fn install_skill(
     }))
 }
 
+async fn remove_skill_route(
+    State(state): State<AppState>,
+    Json(body): Json<SkillRemoveRequest>,
+) -> Result<Json<SkillRemoveResponse>, StatusCode> {
+    let result = clawhive_core::skill_install::remove_skill(
+        &state.root,
+        &state.root.join("skills"),
+        &body.skill_name,
+    )
+    .map_err(|e| {
+        let msg = e.to_string().to_lowercase();
+        if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+
+    Ok(Json(SkillRemoveResponse {
+        skill_name: result.skill_name,
+        env_vars_hint: result.env_vars_hint,
+    }))
+}
+
 async fn list_skills(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<InstalledSkillSummary>>, StatusCode> {
@@ -153,11 +191,14 @@ async fn list_skills(
         let raw =
             std::fs::read_to_string(&skill_md).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let frontmatter = parse_skill_frontmatter(&raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let meta = clawhive_core::skill_install::SkillMetadata::read_from(&path);
         skills.push(InstalledSkillSummary {
             name: frontmatter.name,
             description: frontmatter.description,
             has_permissions: frontmatter.permissions.is_some(),
             path: path.display().to_string(),
+            source: meta.as_ref().and_then(|m| m.source.clone()),
+            installed_at: meta.as_ref().map(|m| m.installed_at.clone()),
         });
     }
 
@@ -297,6 +338,26 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(root.join("skills/hello-skill/SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_skill_returns_not_found() {
+        let root = setup_test_root();
+        let app = setup_test_app(root);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/skills/remove")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"skill_name":"nonexistent"}"#))
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
