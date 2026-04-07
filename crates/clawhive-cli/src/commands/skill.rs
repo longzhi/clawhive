@@ -152,6 +152,10 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                         clawhive_core::dotenv::append_dotenv(&dotenv_path, var, &value)?;
                         println!("  Saved {var} to {}", dotenv_path.display());
                     }
+                    clawhive_core::skill_install::update_env_vars_written(
+                        &installed.target,
+                        &missing,
+                    )?;
                 }
             }
         }
