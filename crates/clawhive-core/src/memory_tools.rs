@@ -314,7 +314,7 @@ impl MemoryWriteTool {
             let overflow = state.recent_explicit_writes.len() - 16;
             state.recent_explicit_writes.drain(0..overflow);
         }
-        self.memory.upsert_session_memory_state(state).await
+        Ok(self.memory.upsert_session_memory_state(state).await?)
     }
 
     fn find_correction_phrase_conflict(

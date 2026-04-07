@@ -164,7 +164,7 @@ impl SessionManager {
     }
 
     pub async fn reset(&self, key: &SessionKey) -> Result<bool> {
-        self.store.delete_session(&key.0).await
+        Ok(self.store.delete_session(&key.0).await?)
     }
 
     fn create_new(
@@ -221,7 +221,7 @@ impl SessionManager {
             ttl_seconds: session.ttl_seconds,
             interaction_count: session.interaction_count,
         };
-        self.store.upsert_session(record).await
+        Ok(self.store.upsert_session(record).await?)
     }
 }
 

@@ -311,7 +311,7 @@ impl ConsolidationScheduler {
         state.flush_phase = FlushPhase::Captured.as_str().to_string();
         state.flush_phase_updated_at = Some(now.to_rfc3339());
 
-        store.upsert_session_memory_state(state).await
+        Ok(store.upsert_session_memory_state(state).await?)
     }
 
     async fn find_stale_open_episode_states(
@@ -320,9 +320,9 @@ impl ConsolidationScheduler {
         idle_minutes: i64,
         limit: usize,
     ) -> Result<Vec<SessionMemoryStateRecord>> {
-        store
+        Ok(store
             .find_stale_open_episode_states(agent_id, idle_minutes, limit)
-            .await
+            .await?)
     }
 
     pub(super) async fn run_daily_file_lifecycle(

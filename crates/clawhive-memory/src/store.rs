@@ -1,6 +1,6 @@
 use crate::error::MemoryError;
 use crate::migrations::run_migrations;
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -173,7 +173,23 @@ fn init_sqlite_vec() {
 }
 
 impl MemoryStore {
-    pub fn open(path: &str) -> std::result::Result<Self, MemoryError> {
+    /// Run a blocking closure on the Tokio blocking pool and convert errors to [`MemoryError`].
+    ///
+    /// The closure may use `anyhow::Result` internally; the conversion to
+    /// `MemoryError::Other` happens at this boundary.
+    async fn blocking<F, T>(f: F) -> Result<T, MemoryError>
+    where
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match task::spawn_blocking(f).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(MemoryError::Other(e)),
+            Err(e) => Err(MemoryError::Other(e.into())),
+        }
+    }
+
+    pub fn open(path: &str) -> Result<Self, MemoryError> {
         init_sqlite_vec();
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -184,7 +200,7 @@ impl MemoryStore {
         })
     }
 
-    pub fn open_in_memory() -> std::result::Result<Self, MemoryError> {
+    pub fn open_in_memory() -> Result<Self, MemoryError> {
         init_sqlite_vec();
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -206,7 +222,7 @@ impl MemoryStore {
         let operation = operation.to_owned();
         let details = details.to_owned();
 
-        let _ = task::spawn_blocking(move || -> Result<()> {
+        let _ = Self::blocking(move || -> anyhow::Result<()> {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -224,10 +240,10 @@ impl MemoryStore {
     pub async fn last_consolidation_daily_date(
         &self,
         agent_id: &str,
-    ) -> Result<Option<chrono::NaiveDate>> {
+    ) -> Result<Option<chrono::NaiveDate>, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -250,7 +266,7 @@ impl MemoryStore {
             }
             Ok(None)
         })
-        .await?
+        .await
     }
 
     pub fn db(&self) -> Arc<Mutex<Connection>> {
@@ -262,11 +278,11 @@ impl MemoryStore {
         agent_id: &str,
         limit: usize,
         since: Option<&str>,
-    ) -> Result<Vec<TraceRecord>> {
+    ) -> Result<Vec<TraceRecord>, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let since = since.map(ToOwned::to_owned);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -304,15 +320,15 @@ impl MemoryStore {
                 }
             }
 
-            Ok::<Vec<TraceRecord>, anyhow::Error>(rows_out)
+            Ok(rows_out)
         })
-        .await?
+        .await
     }
 
-    pub async fn stats_for_agent(&self, agent_id: &str) -> Result<MemoryStatsRecord> {
+    pub async fn stats_for_agent(&self, agent_id: &str) -> Result<MemoryStatsRecord, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -340,7 +356,7 @@ impl MemoryStore {
             let embedding_cache_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM embedding_cache", [], |row| row.get(0))?;
 
-            Ok::<MemoryStatsRecord, anyhow::Error>(MemoryStatsRecord {
+            Ok(MemoryStatsRecord {
                 chunk_count,
                 fact_count,
                 pending_dirty_sources,
@@ -348,13 +364,13 @@ impl MemoryStore {
                 trace_count,
             })
         })
-        .await?
+        .await
     }
 
-    pub async fn get_session(&self, key: &str) -> Result<Option<SessionRecord>> {
+    pub async fn get_session(&self, key: &str) -> Result<Option<SessionRecord>, MemoryError> {
         let db = Arc::clone(&self.db);
         let key = key.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -383,12 +399,12 @@ impl MemoryStore {
             }
             Ok::<Option<SessionRecord>, anyhow::Error>(None)
         })
-        .await?
+        .await
     }
 
-    pub async fn upsert_session(&self, session: SessionRecord) -> Result<()> {
+    pub async fn upsert_session(&self, session: SessionRecord) -> Result<(), MemoryError> {
         let db = Arc::clone(&self.db);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -422,36 +438,34 @@ impl MemoryStore {
                     session.interaction_count,
                 ],
             )?;
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
-    pub async fn delete_session(&self, session_key: &str) -> Result<bool> {
+    pub async fn delete_session(&self, session_key: &str) -> Result<bool, MemoryError> {
         let db = Arc::clone(&self.db);
         let key = session_key.to_string();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|e| anyhow!("failed to lock sqlite connection: {e}"))?;
             let deleted =
                 conn.execute("DELETE FROM sessions WHERE session_key = ?1", params![key])?;
-            Ok::<bool, anyhow::Error>(deleted > 0)
+            Ok(deleted > 0)
         })
-        .await?
+        .await
     }
 
     pub async fn get_session_memory_state(
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> Result<Option<SessionMemoryStateRecord>> {
+    ) -> Result<Option<SessionMemoryStateRecord>, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_id = session_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -496,12 +510,15 @@ impl MemoryStore {
             }
             Ok::<Option<SessionMemoryStateRecord>, anyhow::Error>(None)
         })
-        .await?
+        .await
     }
 
-    pub async fn upsert_session_memory_state(&self, state: SessionMemoryStateRecord) -> Result<()> {
+    pub async fn upsert_session_memory_state(
+        &self,
+        state: SessionMemoryStateRecord,
+    ) -> Result<(), MemoryError> {
         let db = Arc::clone(&self.db);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -548,22 +565,20 @@ impl MemoryStore {
                     serde_json::to_string(&state.open_episodes)?,
                 ],
             )?;
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
     pub async fn delete_session_memory_state(
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> Result<bool> {
+    ) -> Result<bool, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_id = session_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|e| anyhow!("failed to lock sqlite connection: {e}"))?;
@@ -571,9 +586,9 @@ impl MemoryStore {
                 "DELETE FROM session_memory_state WHERE agent_id = ?1 AND session_id = ?2",
                 params![agent_id, session_id],
             )?;
-            Ok::<bool, anyhow::Error>(deleted > 0)
+            Ok(deleted > 0)
         })
-        .await?
+        .await
     }
 
     pub async fn list_pending_session_memory_states_for_session_key(
@@ -581,11 +596,11 @@ impl MemoryStore {
         agent_id: &str,
         session_key: &str,
         limit: usize,
-    ) -> Result<Vec<SessionMemoryStateRecord>> {
+    ) -> Result<Vec<SessionMemoryStateRecord>, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_key = session_key.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -630,14 +645,18 @@ impl MemoryStore {
             }
             Ok::<Vec<SessionMemoryStateRecord>, anyhow::Error>(states)
         })
-        .await?
+        .await
     }
 
-    pub async fn try_acquire_flush_lock(&self, agent_id: &str, session_id: &str) -> Result<bool> {
+    pub async fn try_acquire_flush_lock(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<bool, MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_id = session_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -660,9 +679,9 @@ impl MemoryStore {
                     FlushPhase::Idle.as_str(),
                 ],
             )?;
-            Ok::<bool, anyhow::Error>(updated > 0)
+            Ok(updated > 0)
         })
-        .await?
+        .await
     }
 
     pub async fn advance_flush_phase(
@@ -671,11 +690,11 @@ impl MemoryStore {
         session_id: &str,
         new_phase: FlushPhase,
         summary_cache: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<(), MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_id = session_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -709,18 +728,20 @@ impl MemoryStore {
                     )?;
                 }
             }
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
-    pub async fn reset_flush_phase(&self, agent_id: &str, session_id: &str) -> Result<()> {
+    pub async fn reset_flush_phase(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<(), MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_id = session_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -737,11 +758,9 @@ impl MemoryStore {
                 "#,
                 params![agent_id, session_id, FlushPhase::Idle.as_str(), now],
             )?;
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
     /// Re-arm the flush timeout without changing the phase (Path A: resume from cache).
@@ -749,11 +768,11 @@ impl MemoryStore {
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> Result<()> {
+    ) -> Result<(), MemoryError> {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let session_id = session_id.to_owned();
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -768,18 +787,17 @@ impl MemoryStore {
                 "#,
                 params![agent_id, session_id, now],
             )?;
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
-        .await??;
-        Ok(())
+        .await
     }
 
     pub async fn find_dead_flushes(
         &self,
         timeout_minutes: i64,
-    ) -> Result<Vec<SessionMemoryStateRecord>> {
+    ) -> Result<Vec<SessionMemoryStateRecord>, MemoryError> {
         let db = Arc::clone(&self.db);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -824,7 +842,7 @@ impl MemoryStore {
             }
             Ok::<Vec<SessionMemoryStateRecord>, anyhow::Error>(states)
         })
-        .await?
+        .await
     }
 
     pub async fn find_stale_open_episode_states(
@@ -832,7 +850,7 @@ impl MemoryStore {
         agent_id: &str,
         idle_minutes: i64,
         limit: usize,
-    ) -> Result<Vec<SessionMemoryStateRecord>> {
+    ) -> Result<Vec<SessionMemoryStateRecord>, MemoryError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -840,7 +858,7 @@ impl MemoryStore {
         let db = Arc::clone(&self.db);
         let agent_id = agent_id.to_owned();
         let idle_minutes = idle_minutes.max(1);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -893,12 +911,15 @@ impl MemoryStore {
             }
             Ok::<Vec<SessionMemoryStateRecord>, anyhow::Error>(states)
         })
-        .await?
+        .await
     }
 
-    pub async fn cleanup_session_memory_state(&self, retention_days: u64) -> Result<usize> {
+    pub async fn cleanup_session_memory_state(
+        &self,
+        retention_days: u64,
+    ) -> Result<usize, MemoryError> {
         let db = Arc::clone(&self.db);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -959,9 +980,9 @@ impl MemoryStore {
                     params![agent_id, session_id],
                 )?;
             }
-            Ok::<usize, anyhow::Error>(removed)
+            Ok(removed)
         })
-        .await?
+        .await
     }
 
     // ============================================================
@@ -975,14 +996,14 @@ impl MemoryStore {
         model: &str,
         provider_key: &str,
         hash: &str,
-    ) -> Result<Option<Vec<f32>>> {
+    ) -> Result<Option<Vec<f32>>, MemoryError> {
         let db = Arc::clone(&self.db);
         let provider = provider.to_string();
         let model = model.to_string();
         let provider_key = provider_key.to_string();
         let hash = hash.to_string();
 
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -1004,7 +1025,7 @@ impl MemoryStore {
                 None => Ok(None),
             }
         })
-        .await?
+        .await
     }
 
     /// Store embedding in cache.
@@ -1016,16 +1037,17 @@ impl MemoryStore {
         hash: &str,
         embedding: &[f32],
         dims: usize,
-    ) -> Result<()> {
+    ) -> Result<(), MemoryError> {
         let db = Arc::clone(&self.db);
         let provider = provider.to_string();
         let model = model.to_string();
         let provider_key = provider_key.to_string();
         let hash = hash.to_string();
-        let embedding_json = serde_json::to_string(embedding)?;
-        let now = Utc::now().to_rfc3339();
+        let embedding = embedding.to_vec();
 
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
+            let embedding_json = serde_json::to_string(&embedding)?;
+            let now = Utc::now().to_rfc3339();
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -1043,18 +1065,22 @@ impl MemoryStore {
                     now
                 ],
             )?;
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
-        .await?
+        .await
     }
 
     /// Clear all cached embeddings for a provider/model.
-    pub async fn clear_embedding_cache(&self, provider: &str, model: &str) -> Result<usize> {
+    pub async fn clear_embedding_cache(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<usize, MemoryError> {
         let db = Arc::clone(&self.db);
         let provider = provider.to_string();
         let model = model.to_string();
 
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|_| anyhow!("failed to lock sqlite connection"))?;
@@ -1062,18 +1088,21 @@ impl MemoryStore {
                 "DELETE FROM embedding_cache WHERE provider = ?1 AND model = ?2",
                 params![provider, model],
             )?;
-            Ok::<usize, anyhow::Error>(affected)
+            Ok(affected)
         })
-        .await?
+        .await
     }
 
-    pub async fn cleanup_expired_embedding_cache(&self, ttl_days: u64) -> Result<usize> {
+    pub async fn cleanup_expired_embedding_cache(
+        &self,
+        ttl_days: u64,
+    ) -> Result<usize, MemoryError> {
         if ttl_days == 0 {
             return Ok(0);
         }
 
         let db = Arc::clone(&self.db);
-        task::spawn_blocking(move || {
+        Self::blocking(move || {
             let conn = db
                 .lock()
                 .map_err(|e| anyhow!("failed to lock sqlite connection: {e}"))?;
@@ -1082,9 +1111,9 @@ impl MemoryStore {
                 "DELETE FROM embedding_cache WHERE updated_at < ?1",
                 params![cutoff],
             )?;
-            Ok::<usize, anyhow::Error>(deleted)
+            Ok(deleted)
         })
-        .await?
+        .await
     }
 }
 

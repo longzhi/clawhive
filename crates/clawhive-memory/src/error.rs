@@ -1,8 +1,8 @@
 /// Typed error for `clawhive-memory` public API.
 ///
-/// Only applied to boundary functions where error classification adds value
-/// (e.g. constructors). Internal helpers and most async methods continue to
-/// use `anyhow::Result` as an escape hatch.
+/// Applied to all `MemoryStore` public methods. Internal closures
+/// (e.g. inside `spawn_blocking`) still use `anyhow::Result` and are
+/// converted at the boundary via the `Other` variant.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
     #[error("database error: {0}")]
