@@ -4,11 +4,9 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait TaskExecutor: Send + Sync {
     /// Pre-process user input before sending to LLM.
-    /// NativeExecutor: passthrough. WasmExecutor: sandboxed transform.
     async fn preprocess_input(&self, input: &str) -> Result<String>;
 
     /// Post-process LLM output before returning to user.
-    /// NativeExecutor: passthrough. WasmExecutor: sandboxed transform.
     async fn postprocess_output(&self, output: &str) -> Result<String>;
 }
 
@@ -22,19 +20,6 @@ impl TaskExecutor for NativeExecutor {
 
     async fn postprocess_output(&self, output: &str) -> Result<String> {
         Ok(output.to_string())
-    }
-}
-
-pub struct WasmExecutor;
-
-#[async_trait]
-impl TaskExecutor for WasmExecutor {
-    async fn preprocess_input(&self, _input: &str) -> Result<String> {
-        anyhow::bail!("WASM executor not implemented yet")
-    }
-
-    async fn postprocess_output(&self, _output: &str) -> Result<String> {
-        anyhow::bail!("WASM executor not implemented yet")
     }
 }
 
@@ -54,21 +39,5 @@ mod tests {
         let exec = NativeExecutor;
         let result = exec.postprocess_output("response text").await.unwrap();
         assert_eq!(result, "response text");
-    }
-
-    #[tokio::test]
-    async fn wasm_preprocess_not_implemented() {
-        let exec = WasmExecutor;
-        let result = exec.preprocess_input("test").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not implemented"));
-    }
-
-    #[tokio::test]
-    async fn wasm_postprocess_not_implemented() {
-        let exec = WasmExecutor;
-        let result = exec.postprocess_output("test").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not implemented"));
     }
 }
