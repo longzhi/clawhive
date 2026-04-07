@@ -253,3 +253,92 @@ impl HippocampusConsolidator {
         Ok(conflict)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use chrono::Utc;
+    use clawhive_memory::fact_store::Fact;
+
+    use crate::consolidation::test_helpers::*;
+    use crate::consolidation::HippocampusConsolidator;
+
+    #[tokio::test]
+    async fn confirm_fact_conflict_with_llm_parses_yes_and_no() -> Result<()> {
+        let (_dir, file_store) = build_file_store()?;
+        let recent = Fact {
+            id: "recent-fact".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "改用 Rust 了".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.9,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "boundary_flush".to_string(),
+            source_session: Some("s1".to_string()),
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let candidate = Fact {
+            id: "old-fact".to_string(),
+            agent_id: "agent-1".to_string(),
+            content: "喜欢 TypeScript".to_string(),
+            fact_type: "preference".to_string(),
+            importance: 0.6,
+            confidence: 1.0,
+            status: "active".to_string(),
+            occurred_at: None,
+            recorded_at: Utc::now().to_rfc3339(),
+            source_type: "consolidation".to_string(),
+            source_session: None,
+            access_count: 0,
+            last_accessed: None,
+            superseded_by: None,
+            salience: 50,
+            supersede_reason: None,
+            affect: "neutral".to_string(),
+            affect_intensity: 0.0,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        let yes_router = build_router_with_provider(SequenceProvider::new(vec!["yes".to_string()]));
+        let yes_consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store.clone(),
+            yes_router,
+            "sonnet".to_string(),
+            vec![],
+        );
+        assert!(
+            yes_consolidator
+                .confirm_fact_conflict_with_llm(&recent, &candidate)
+                .await?
+        );
+
+        let no_router = build_router_with_provider(SequenceProvider::new(vec!["no".to_string()]));
+        let no_consolidator = HippocampusConsolidator::new(
+            "agent-1".to_string(),
+            file_store,
+            no_router,
+            "sonnet".to_string(),
+            vec![],
+        );
+        assert!(
+            !no_consolidator
+                .confirm_fact_conflict_with_llm(&recent, &candidate)
+                .await?
+        );
+
+        Ok(())
+    }
+}

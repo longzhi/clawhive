@@ -290,3 +290,194 @@ pub(super) fn strip_markdown_fence(text: &str) -> String {
         .trim_end()
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    #[test]
+    fn parse_patch_add() -> Result<()> {
+        let patch = parse_patch(
+            r#"[ADD] section="Profile"
+Learns quickly.
+[/ADD]"#,
+        )?;
+
+        assert!(!patch.keep);
+        assert!(patch.updates.is_empty());
+        assert_eq!(patch.adds.len(), 1);
+        assert_eq!(patch.adds[0].section, "Profile");
+        assert_eq!(patch.adds[0].content, "Learns quickly.");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_patch_update() -> Result<()> {
+        let patch = parse_patch(
+            r#"[UPDATE]
+[OLD]Likes tea[/OLD]
+[NEW]Likes green tea[/NEW]
+[/UPDATE]"#,
+        )?;
+
+        assert!(!patch.keep);
+        assert!(patch.adds.is_empty());
+        assert_eq!(patch.updates.len(), 1);
+        assert_eq!(patch.updates[0].old, "Likes tea");
+        assert_eq!(patch.updates[0].new, "Likes green tea");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_patch_keep() -> Result<()> {
+        let patch = parse_patch("[KEEP]")?;
+
+        assert!(patch.keep);
+        assert!(patch.adds.is_empty());
+        assert!(patch.updates.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_patch_mixed() -> Result<()> {
+        let patch = parse_patch(
+            r#"[ADD] section="Profile"
+Prefers concise answers.
+[/ADD]
+
+[UPDATE]
+[OLD]Works in software[/OLD]
+[NEW]Builds Rust systems[/NEW]
+[/UPDATE]
+
+[ADD] section="Projects"
+Working on Clawhive memory safety.
+[/ADD]"#,
+        )?;
+
+        assert!(!patch.keep);
+        assert_eq!(patch.adds.len(), 2);
+        assert_eq!(patch.updates.len(), 1);
+        assert_eq!(patch.adds[1].section, "Projects");
+        assert_eq!(patch.updates[0].old, "Works in software");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_patch_empty_returns_error() {
+        let result = parse_patch("   \n\t");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_patch_retry_on_malformed_first_attempt() {
+        let malformed = r#"[UPDATE]
+[OLD]Likes tea[/OLD]
+[NEW]Likes green tea[/NEW]"#;
+        assert!(parse_patch(malformed).is_err());
+
+        let well_formed = r#"[UPDATE]
+[OLD]Likes tea[/OLD]
+[NEW]Likes green tea[/NEW]
+[/UPDATE]"#;
+        assert!(parse_patch(well_formed).is_ok());
+    }
+
+    #[test]
+    fn apply_patch_add_to_existing_section() {
+        let existing = "# Profile\nLearns quickly.\n\n# Preferences\nLikes tea.\n";
+        let patch = MemoryPatch {
+            adds: vec![AddInstruction {
+                section: "Profile".to_string(),
+                content: "Prefers concise answers.".to_string(),
+            }],
+            updates: vec![],
+            keep: false,
+        };
+
+        let updated = apply_patch(existing, &patch);
+
+        assert_eq!(
+            updated,
+            "# Profile\nLearns quickly.\n\nPrefers concise answers.\n\n# Preferences\nLikes tea.\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_add_creates_new_section() {
+        let existing = "# Profile\nLearns quickly.\n";
+        let patch = MemoryPatch {
+            adds: vec![AddInstruction {
+                section: "Projects".to_string(),
+                content: "Working on memory safety fixes.".to_string(),
+            }],
+            updates: vec![],
+            keep: false,
+        };
+
+        let updated = apply_patch(existing, &patch);
+
+        assert_eq!(
+            updated,
+            "# Profile\nLearns quickly.\n\n## Projects\nWorking on memory safety fixes.\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_update_replaces_text() {
+        let existing = "# Profile\nLikes tea.\n";
+        let patch = MemoryPatch {
+            adds: vec![],
+            updates: vec![UpdateInstruction {
+                old: "Likes tea.".to_string(),
+                new: "Likes green tea.".to_string(),
+            }],
+            keep: false,
+        };
+
+        let updated = apply_patch(existing, &patch);
+
+        assert_eq!(updated, "# Profile\nLikes green tea.\n");
+    }
+
+    #[test]
+    fn apply_patch_update_skips_missing() {
+        let existing = "# Profile\nLikes tea.\n";
+        let patch = MemoryPatch {
+            adds: vec![],
+            updates: vec![UpdateInstruction {
+                old: "Missing fact".to_string(),
+                new: "New fact".to_string(),
+            }],
+            keep: false,
+        };
+
+        let updated = apply_patch(existing, &patch);
+        assert_eq!(updated, existing);
+    }
+
+    #[test]
+    fn apply_patch_preserves_unmodified() {
+        let existing = "# Profile\nLikes tea.\n\n# Preferences\nPrefers concise answers.\n";
+        let patch = MemoryPatch {
+            adds: vec![AddInstruction {
+                section: "Preferences".to_string(),
+                content: "Avoids fluff.".to_string(),
+            }],
+            updates: vec![UpdateInstruction {
+                old: "Likes tea.".to_string(),
+                new: "Likes green tea.".to_string(),
+            }],
+            keep: false,
+        };
+
+        let updated = apply_patch(existing, &patch);
+
+        assert_eq!(
+            updated,
+            "# Profile\nLikes green tea.\n\n# Preferences\nPrefers concise answers.\n\nAvoids fluff.\n"
+        );
+    }
+}

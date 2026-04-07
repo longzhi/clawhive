@@ -177,3 +177,128 @@ pub(super) fn validate_consolidation_output(output: &str, existing: &str) -> Res
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_empty_output() {
+        let result = validate_consolidation_output("   \n\t", "# Existing\n\nUseful memory.");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_refusal() {
+        let result = validate_consolidation_output(
+            "I cannot help with that request.",
+            "# Existing\n\nUseful memory.",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_drastic_shrink() {
+        let existing =
+            "# Existing\n\nThis memory has enough content to be considered a healthy baseline.";
+        let result = validate_consolidation_output("Too short", existing);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_accepts_keep() {
+        let result = validate_consolidation_output("[KEEP]", "# Existing\n\nUseful memory.");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_normal_output() {
+        let existing =
+            "# Existing\n\nThis memory has enough content to be considered a healthy baseline.";
+        let output = "# Updated\n\nThis memory keeps the prior knowledge and adds a little more stable detail for future use.";
+        let result = validate_consolidation_output(output, existing);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_when_existing_is_empty() {
+        let output = "# First Memory\n\nThis is the first consolidation output and it should be accepted even if there is no prior memory content.";
+        let result = validate_consolidation_output(output, "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dedup_paragraphs_removes_near_duplicates() {
+        let input = "## Preferences\n\nUser prefers dark mode and minimal UI design for all applications.\n\nThe user prefers dark mode and minimal UI design for all of their applications.\n\n## Work\n\nUser works on Rust projects.";
+        let result = dedup_paragraphs(input);
+
+        assert!(result.contains("## Preferences"));
+        assert!(result.contains("## Work"));
+        assert!(result.contains("Rust projects"));
+
+        let dark_mode_count = result.matches("dark mode").count();
+        assert_eq!(
+            dark_mode_count, 1,
+            "Should have removed one near-duplicate paragraph"
+        );
+    }
+
+    #[test]
+    fn dedup_paragraphs_preserves_headers() {
+        let input = "## Section A\n\nContent A about specific topic.\n\n## Section A\n\nContent B about different topic.";
+        let result = dedup_paragraphs(input);
+
+        assert_eq!(result.matches("## Section A").count(), 2);
+    }
+
+    #[test]
+    fn dedup_paragraphs_no_change_when_unique() {
+        let input = "First paragraph about Rust programming language.\n\nSecond paragraph about Python scripting.\n\nThird paragraph about Go concurrency.";
+        let result = dedup_paragraphs(input);
+
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn dedup_paragraphs_single_paragraph() {
+        let result = dedup_paragraphs("Just one paragraph here.");
+
+        assert_eq!(result, "Just one paragraph here.");
+    }
+
+    #[test]
+    fn dedup_paragraphs_empty_input() {
+        let result = dedup_paragraphs("");
+
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn jaccard_similarity_identical_sets() {
+        let a: std::collections::HashSet<String> =
+            ["hello", "world"].iter().map(|s| s.to_string()).collect();
+        let b = a.clone();
+
+        assert!((jaccard_similarity(&a, &b) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn jaccard_similarity_disjoint_sets() {
+        let a: std::collections::HashSet<String> =
+            ["hello", "world"].iter().map(|s| s.to_string()).collect();
+        let b: std::collections::HashSet<String> =
+            ["foo", "bar"].iter().map(|s| s.to_string()).collect();
+
+        assert!(jaccard_similarity(&a, &b).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_line_diff_marks_added_and_removed_lines() {
+        let old_content = "line kept\nline removed\n";
+        let new_content = "line kept\nline added\n";
+
+        let diff = compute_line_diff(old_content, new_content);
+
+        assert_eq!(diff, vec!["- line removed", "+ line added"]);
+    }
+}
