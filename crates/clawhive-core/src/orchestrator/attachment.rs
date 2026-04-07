@@ -243,15 +243,15 @@ pub(super) fn build_pdf_content_blocks(attachment: &Attachment) -> Option<Vec<Co
     let byte_len = bytes.len();
 
     match extract_pdf_text(&bytes) {
-        Ok(ref text) if trim_attachment_text(text).is_some() => {
-            let trimmed = trim_attachment_text(text).unwrap();
-            let body = truncate_attachment_text(&trimmed);
-            let fragment = format!(
-                "<attachment name=\"{label}\" type=\"application/pdf\">\n{body}\n</attachment>"
-            );
-            Some(vec![ContentBlock::Text { text: fragment }])
-        }
-        Ok(_) => {
+        Ok(ref text) => {
+            if let Some(trimmed) = trim_attachment_text(text) {
+                let body = truncate_attachment_text(&trimmed);
+                let fragment = format!(
+                    "<attachment name=\"{label}\" type=\"application/pdf\">\n{body}\n</attachment>"
+                );
+                return Some(vec![ContentBlock::Text { text: fragment }]);
+            }
+
             tracing::info!(
                 file_name = label,
                 byte_len,
