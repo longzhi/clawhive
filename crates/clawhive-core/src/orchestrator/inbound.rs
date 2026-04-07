@@ -18,9 +18,9 @@ use crate::session::SessionResetReason;
 use super::attachment::{build_attachment_blocks, build_session_text, build_user_content};
 use super::episode::EpisodeTurnInput;
 use super::predicates::{
-    build_messages_from_history, detect_skill_install_intent, filter_no_reply,
-    history_message_limit, is_explicit_web_search_request, is_skill_install_intent_without_source,
-    session_reset_policy_for,
+    build_messages_from_history, detect_skill_install_intent, detect_skill_remove_intent,
+    filter_no_reply, history_message_limit, is_explicit_web_search_request,
+    is_skill_install_intent_without_source, session_reset_policy_for,
 };
 use super::skill_commands::SKILL_INSTALL_USAGE_HINT;
 use super::Orchestrator;
@@ -134,12 +134,16 @@ impl Orchestrator {
                         .handle_skill_confirm_command(inbound, agent_id, token)
                         .await;
                 }
+                crate::slash_commands::SlashCommand::SkillRemove { skill_name } => {
+                    return self.handle_skill_remove_command(inbound, &skill_name);
+                }
                 crate::slash_commands::SlashCommand::SkillUsageHint { subcommand } => {
                     let hint = match subcommand.as_str() {
                         "analyze" => "Usage: /skill analyze <url-or-path>\nExample: /skill analyze https://example.com/my-skill.zip",
                         "install" => "Usage: /skill install <url-or-path>\nExample: /skill install https://example.com/my-skill.zip",
                         "confirm" => "Usage: /skill confirm <token>\nThe token is provided after running /skill analyze or /skill install.",
-                        _ => "Usage:\n  /skill analyze <source> — Analyze a skill before installing\n  /skill install <source> — Install a skill\n  /skill confirm <token> — Confirm a pending installation",
+                        "remove" => "Usage: /skill remove <skill-name>\nExample: /skill remove web-search",
+                        _ => "Usage:\n  /skill analyze <source> — Analyze a skill before installing\n  /skill install <source> — Install a skill\n  /skill confirm <token> — Confirm a pending installation\n  /skill remove <name> — Remove an installed skill",
                     };
                     return Ok(OutboundMessage {
                         trace_id: inbound.trace_id,
@@ -183,6 +187,10 @@ impl Orchestrator {
             return self
                 .handle_skill_analyze_or_install_command(inbound, source, true)
                 .await;
+        }
+
+        if let Some(name) = detect_skill_remove_intent(&inbound.text) {
+            return self.handle_skill_remove_command(inbound, &name);
         }
 
         if is_skill_install_intent_without_source(&inbound.text) {

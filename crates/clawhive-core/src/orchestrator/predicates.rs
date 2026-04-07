@@ -134,6 +134,37 @@ pub fn detect_skill_install_intent(text: &str) -> Option<String> {
     None
 }
 
+pub fn detect_skill_remove_intent(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let en_prefixes = ["remove skill", "uninstall skill", "delete skill"];
+    for prefix in en_prefixes {
+        if lower.starts_with(prefix) {
+            return extract_source_after_prefix(trimmed, prefix);
+        }
+    }
+
+    let cn_prefixes = [
+        "卸载skill",
+        "卸载 skill",
+        "删除skill",
+        "删除 skill",
+        "卸载技能",
+        "删除技能",
+    ];
+    for prefix in cn_prefixes {
+        if trimmed.starts_with(prefix) {
+            return extract_source_after_prefix(trimmed, prefix);
+        }
+    }
+
+    None
+}
+
 pub(super) fn filter_no_reply(text: &str) -> String {
     let trimmed = text.trim();
 
@@ -659,5 +690,35 @@ mod tests {
             1,
             "I will create the file.",
         ));
+    }
+
+    #[test]
+    fn detect_remove_intent_english() {
+        assert_eq!(
+            detect_skill_remove_intent("remove skill web-search"),
+            Some("web-search".to_string())
+        );
+        assert_eq!(
+            detect_skill_remove_intent("uninstall skill web-search"),
+            Some("web-search".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_remove_intent_chinese() {
+        assert_eq!(
+            detect_skill_remove_intent("卸载 skill web-search"),
+            Some("web-search".to_string())
+        );
+        assert_eq!(
+            detect_skill_remove_intent("删除skill web-search"),
+            Some("web-search".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_remove_intent_none() {
+        assert_eq!(detect_skill_remove_intent("install skill foo"), None);
+        assert_eq!(detect_skill_remove_intent("hello"), None);
     }
 }

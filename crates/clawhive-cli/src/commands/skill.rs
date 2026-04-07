@@ -26,6 +26,11 @@ pub(crate) enum SkillCommands {
         #[arg(long, help = "Skip confirmation prompts")]
         yes: bool,
     },
+    #[command(about = "Remove an installed skill")]
+    Remove {
+        #[arg(help = "Skill name")]
+        skill_name: String,
+    },
 }
 
 pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
@@ -88,6 +93,20 @@ pub(crate) async fn run(cmd: SkillCommands, root: &Path) -> Result<()> {
                 "{}",
                 clawhive_core::skill_install::render_skill_analysis(&report)
             );
+        }
+        SkillCommands::Remove { skill_name } => {
+            let result = clawhive_core::skill_install::remove_skill(
+                root,
+                &root.join("skills"),
+                &skill_name,
+            )?;
+            println!("Removed skill '{}'.", result.skill_name);
+            if !result.env_vars_hint.is_empty() {
+                println!(
+                    "\nNote: the following env vars were set during install and may no longer be needed: {}\nYou can remove them from ~/.clawhive/.env if unused.",
+                    result.env_vars_hint.join(", ")
+                );
+            }
         }
         SkillCommands::Install { source, yes } => {
             let resolved = clawhive_core::skill_install::resolve_skill_source(&source).await?;

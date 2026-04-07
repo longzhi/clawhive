@@ -33,6 +33,9 @@ pub enum SlashCommand {
     SkillConfirm {
         token: String,
     },
+    SkillRemove {
+        skill_name: String,
+    },
     /// /skill <subcommand> without required arguments
     SkillUsageHint {
         subcommand: String,
@@ -122,6 +125,21 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
                         })
                     } else {
                         Some(SlashCommand::SkillConfirm { token })
+                    }
+                }
+                Some("remove") => {
+                    let name = rest
+                        .get(1..)
+                        .map(|s| s.join(" "))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if name.is_empty() {
+                        Some(SlashCommand::SkillUsageHint {
+                            subcommand: "remove".to_string(),
+                        })
+                    } else {
+                        Some(SlashCommand::SkillRemove { skill_name: name })
                     }
                 }
                 Some(_) | None => Some(SlashCommand::SkillUsageHint {
@@ -280,6 +298,22 @@ mod tests {
             parse_command("/skill analyze"),
             Some(SlashCommand::SkillUsageHint {
                 subcommand: "analyze".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_skill_remove_command() {
+        assert_eq!(
+            parse_command("/skill remove web-search"),
+            Some(SlashCommand::SkillRemove {
+                skill_name: "web-search".to_string()
+            })
+        );
+        assert_eq!(
+            parse_command("/skill remove"),
+            Some(SlashCommand::SkillUsageHint {
+                subcommand: "remove".to_string()
             })
         );
     }

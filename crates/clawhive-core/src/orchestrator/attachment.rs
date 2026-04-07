@@ -212,6 +212,7 @@ pub(super) fn build_attachment_blocks(attachments: &[Attachment]) -> Vec<Content
                 let media_type = a
                     .mime_type
                     .clone()
+                    .or_else(|| sniff_image_mime_from_base64(&a.url))
                     .unwrap_or_else(|| "image/jpeg".to_string());
                 blocks.push(ContentBlock::Image {
                     data: a.url.clone(),
@@ -339,6 +340,28 @@ pub(super) fn build_session_text(user_text: &str, attachments: &[Attachment]) ->
         }
     }
     parts.join("\n\n")
+}
+
+/// Decode the first few bytes of a base64 image to detect its actual format.
+fn sniff_image_mime_from_base64(b64: &str) -> Option<String> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+
+    // Only need the first 8 bytes to check magic numbers.
+    let prefix = &b64[..b64.len().min(16)];
+    let bytes = STANDARD.decode(prefix).ok()?;
+
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        Some("image/png".to_string())
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg".to_string())
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif".to_string())
+    } else if bytes.starts_with(b"RIFF") && bytes.len() >= 8 {
+        Some("image/webp".to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

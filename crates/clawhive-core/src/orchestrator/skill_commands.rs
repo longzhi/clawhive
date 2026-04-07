@@ -219,6 +219,38 @@ impl Orchestrator {
         })
     }
 
+    pub(super) fn handle_skill_remove_command(
+        &self,
+        inbound: InboundMessage,
+        skill_name: &str,
+    ) -> Result<OutboundMessage> {
+        let result = crate::skill_install::remove_skill(
+            self.workspaces.default_root(),
+            &self.skills_root,
+            skill_name,
+        )?;
+        self.reload_skills();
+
+        let mut text = format!("Removed skill '{}'.", result.skill_name);
+        if !result.env_vars_hint.is_empty() {
+            text.push_str(&format!(
+                "\n\nNote: these env vars may no longer be needed: {}\nRemove from ~/.clawhive/.env if unused.",
+                result.env_vars_hint.join(", ")
+            ));
+        }
+
+        Ok(OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text,
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        })
+    }
+
     pub(super) fn workspace_root_for(&self, agent_id: &str) -> std::path::PathBuf {
         self.workspaces.workspace_root(agent_id)
     }
