@@ -515,15 +515,15 @@ impl DiscordHandler {
                 }
             }
             "skill" => {
-                // Extract subcommand and its argument
+                // Extract subcommand and optional argument
                 let mut text = "/skill".to_string();
                 if let Some(sub_option) = cmd.data.options.first() {
                     let subname = sub_option.name.as_str();
                     if let CommandDataOptionValue::SubCommand(sub_options) = &sub_option.value {
-                        if let Some(arg_option) = sub_options.first() {
-                            if let Some(arg_value) = arg_option.value.as_str() {
-                                text = format!("/skill {subname} {arg_value}");
-                            }
+                        let arg_value = sub_options.first().and_then(|o| o.value.as_str());
+                        match arg_value {
+                            Some(val) => text = format!("/skill {subname} {val}"),
+                            None => text = format!("/skill {subname}"),
                         }
                     }
                 }
