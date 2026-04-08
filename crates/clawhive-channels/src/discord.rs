@@ -635,18 +635,6 @@ fn build_discord_commands() -> Vec<CreateCommand> {
 
 const DISCORD_MAX_LEN: usize = 2000;
 
-/// Find the largest byte index <= `max` that lies on a UTF-8 char boundary.
-fn floor_char_boundary(s: &str, max: usize) -> usize {
-    if max >= s.len() {
-        return s.len();
-    }
-    let mut i = max;
-    while !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 /// Split a message into chunks that fit within Discord's 2000-byte limit.
 /// Tries to break at newlines, then spaces, to keep messages readable.
 fn split_message(text: &str) -> Vec<&str> {
@@ -660,7 +648,7 @@ fn split_message(text: &str) -> Vec<&str> {
             chunks.push(rest);
             break;
         }
-        let safe_end = floor_char_boundary(rest, DISCORD_MAX_LEN);
+        let safe_end = clawhive_schema::text::floor_char_boundary(rest, DISCORD_MAX_LEN);
         let boundary = &rest[..safe_end];
         let split_at = boundary
             .rfind('\n')
@@ -1351,21 +1339,6 @@ mod tests {
         let adapter = DiscordAdapter::new("dc_main");
         let msg = adapter.to_inbound(None, 123, 456, "hello", None);
         assert_eq!(msg.message_id, None);
-    }
-
-    #[test]
-    fn floor_char_boundary_on_ascii() {
-        let s = "hello world";
-        assert_eq!(floor_char_boundary(s, 5), 5);
-    }
-
-    #[test]
-    fn floor_char_boundary_mid_multibyte() {
-        let s = "ab中"; // bytes: 61 62 e4 b8 ad
-                        // index 3 is the start of '中', index 4 is mid-char
-        assert_eq!(floor_char_boundary(s, 4), 2);
-        assert_eq!(floor_char_boundary(s, 3), 2);
-        assert_eq!(floor_char_boundary(s, 5), 5); // end of string
     }
 
     #[test]

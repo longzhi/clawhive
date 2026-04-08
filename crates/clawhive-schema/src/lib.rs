@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 pub mod command_registry;
 pub mod provider_presets;
+pub mod text;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {

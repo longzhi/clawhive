@@ -1368,10 +1368,9 @@ async fn send_long_html(
             break;
         }
 
-        // Find a newline boundary to split at
-        let split_at = remaining[..TELEGRAM_MAX_LEN]
-            .rfind('\n')
-            .unwrap_or(TELEGRAM_MAX_LEN);
+        // Find a safe UTF-8 char boundary, then look for a newline to split at
+        let safe_end = clawhive_schema::text::floor_char_boundary(remaining, TELEGRAM_MAX_LEN);
+        let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
         let (chunk, rest) = remaining.split_at(split_at);
         // Skip the newline itself if we split at one
         let rest = rest.strip_prefix('\n').unwrap_or(rest);
