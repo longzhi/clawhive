@@ -15,9 +15,12 @@ const SLASH_COMMANDS = [
   { command: "/stop", args: "", description: "Cancel the current task" },
   { command: "/model", args: "[provider/model]", description: "Show or change model" },
   { command: "/status", args: "", description: "Show session status" },
+  { command: "/skill list", args: "", description: "List installed skills" },
   { command: "/skill analyze", args: "<url>", description: "Analyze a skill from URL" },
   { command: "/skill install", args: "<url>", description: "Install a skill from URL" },
   { command: "/skill confirm", args: "<token>", description: "Confirm pending skill install" },
+  { command: "/skill remove", args: "<name>", description: "Remove an installed skill" },
+  { command: "/skill update", args: "[name]", description: "Update a skill from its source" },
 ] as const;
 
 function formatFileSize(bytes: number): string {

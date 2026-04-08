@@ -222,6 +222,15 @@ impl TelegramBot {
 
                 text = compose_inbound_text(&text, quoted_text.as_deref());
 
+                // Strip Telegram @botname suffix from commands
+                // (e.g. "/skill_list@mybot" → "/skill_list")
+                if text.starts_with('/') {
+                    if let Some(at) = text.find('@') {
+                        let end = text[at..].find(' ').map_or(text.len(), |i| at + i);
+                        text = format!("{}{}", &text[..at], &text[end..]);
+                    }
+                }
+
                 // Normalize Telegram-style underscore commands to space format
                 for (from, to) in
                     clawhive_schema::command_registry::telegram_normalization_pairs()
