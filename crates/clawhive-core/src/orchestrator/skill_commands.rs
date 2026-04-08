@@ -252,6 +252,65 @@ impl Orchestrator {
         })
     }
 
+    pub(super) async fn handle_skill_update_command(
+        &self,
+        inbound: InboundMessage,
+        skill_name: Option<&str>,
+    ) -> Result<OutboundMessage> {
+        let text = if let Some(name) = skill_name {
+            match crate::skill_install::update_skill(
+                self.workspaces.default_root(),
+                &self.skills_root,
+                name,
+            )
+            .await?
+            {
+                crate::skill_install::UpdateResult::Updated { skill_name } => {
+                    self.reload_skills();
+                    format!("Updated skill '{skill_name}'.")
+                }
+                crate::skill_install::UpdateResult::AlreadyUpToDate { skill_name } => {
+                    format!("Skill '{skill_name}' is already up to date.")
+                }
+            }
+        } else {
+            let (updated, up_to_date, failed) = crate::skill_install::update_all_skills(
+                self.workspaces.default_root(),
+                &self.skills_root,
+            )
+            .await;
+            if !updated.is_empty() {
+                self.reload_skills();
+            }
+            let mut lines = Vec::new();
+            if !updated.is_empty() {
+                lines.push(format!("Updated: {}", updated.join(", ")));
+            }
+            if !up_to_date.is_empty() {
+                lines.push(format!("Already up to date: {}", up_to_date.join(", ")));
+            }
+            for (name, err) in &failed {
+                lines.push(format!("Failed: {name} ({err})"));
+            }
+            if lines.is_empty() {
+                "No skills with known sources to update.".to_string()
+            } else {
+                lines.join("\n")
+            }
+        };
+
+        Ok(OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text,
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        })
+    }
+
     pub(super) fn handle_skill_list_command(
         &self,
         inbound: InboundMessage,

@@ -3,6 +3,9 @@
 //! Commands are processed before reaching the LLM. This module provides:
 //! - Command parsing from message text
 //! - Command execution returning either a direct response or a modified message flow
+//!
+//! The centralized command registry lives in `clawhive_schema::command_registry`
+//! so that channel adapters can access it without depending on `clawhive-core`.
 
 use chrono::Utc;
 
@@ -38,6 +41,10 @@ pub enum SlashCommand {
     },
     /// /skill list - List installed skills
     SkillList,
+    /// /skill update [name|--all] - Update installed skill(s)
+    SkillUpdate {
+        skill_name: Option<String>,
+    },
     /// /skill <subcommand> without required arguments
     SkillUsageHint {
         subcommand: String,
@@ -143,6 +150,21 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
                         })
                     } else {
                         Some(SlashCommand::SkillRemove { skill_name: name })
+                    }
+                }
+                Some("update") => {
+                    let name = rest
+                        .get(1..)
+                        .map(|s| s.join(" "))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if name.is_empty() || name == "--all" || name == "all" {
+                        Some(SlashCommand::SkillUpdate { skill_name: None })
+                    } else {
+                        Some(SlashCommand::SkillUpdate {
+                            skill_name: Some(name),
+                        })
                     }
                 }
                 Some(_) | None => Some(SlashCommand::SkillUsageHint {
@@ -324,6 +346,24 @@ mod tests {
     #[test]
     fn parse_skill_list_command() {
         assert_eq!(parse_command("/skill list"), Some(SlashCommand::SkillList));
+    }
+
+    #[test]
+    fn parse_skill_update_command() {
+        assert_eq!(
+            parse_command("/skill update web-search"),
+            Some(SlashCommand::SkillUpdate {
+                skill_name: Some("web-search".to_string())
+            })
+        );
+        assert_eq!(
+            parse_command("/skill update --all"),
+            Some(SlashCommand::SkillUpdate { skill_name: None })
+        );
+        assert_eq!(
+            parse_command("/skill update"),
+            Some(SlashCommand::SkillUpdate { skill_name: None })
+        );
     }
 
     #[test]

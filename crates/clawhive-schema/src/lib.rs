@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod command_registry;
 pub mod provider_presets;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

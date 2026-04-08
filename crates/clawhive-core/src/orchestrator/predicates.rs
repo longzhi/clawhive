@@ -134,6 +134,47 @@ pub fn detect_skill_install_intent(text: &str) -> Option<String> {
     None
 }
 
+/// Returns `Some(Some(name))` for a specific skill, `Some(None)` for "update all".
+pub fn detect_skill_update_intent(text: &str) -> Option<Option<String>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let en_prefixes = ["update skill", "upgrade skill"];
+    for prefix in en_prefixes {
+        if lower.starts_with(prefix) {
+            let rest = trimmed[prefix.len()..]
+                .trim_start_matches([' ', ':', '\u{ff1a}'])
+                .trim();
+            if rest.is_empty() || rest == "--all" || rest.eq_ignore_ascii_case("all") {
+                return Some(None);
+            }
+            return Some(Some(rest.to_string()));
+        }
+    }
+
+    let cn_prefixes = [
+        "更新skill",
+        "更新 skill",
+        "更新技能",
+        "升级skill",
+        "升级 skill",
+    ];
+    for prefix in cn_prefixes {
+        if let Some(after) = trimmed.strip_prefix(prefix) {
+            let rest = after.trim_start_matches([' ', ':', '\u{ff1a}']).trim();
+            if rest.is_empty() {
+                return Some(None);
+            }
+            return Some(Some(rest.to_string()));
+        }
+    }
+
+    None
+}
+
 pub fn detect_skill_remove_intent(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -690,6 +731,21 @@ mod tests {
             1,
             "I will create the file.",
         ));
+    }
+
+    #[test]
+    fn detect_update_intent() {
+        assert_eq!(
+            detect_skill_update_intent("update skill web-search"),
+            Some(Some("web-search".to_string()))
+        );
+        assert_eq!(detect_skill_update_intent("update skill"), Some(None));
+        assert_eq!(
+            detect_skill_update_intent("更新 skill foo"),
+            Some(Some("foo".to_string()))
+        );
+        assert_eq!(detect_skill_update_intent("更新技能"), Some(None));
+        assert_eq!(detect_skill_update_intent("hello"), None);
     }
 
     #[test]

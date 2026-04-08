@@ -188,79 +188,8 @@ impl EventHandler for DiscordHandler {
             ready.user.name,
             self.connector_id
         );
-        // Register slash commands
-        let commands = vec![
-            CreateCommand::new("new")
-                .description("Start a fresh session")
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "model",
-                        "Model hint (e.g. opus, sonnet)",
-                    )
-                    .required(false),
-                ),
-            CreateCommand::new("stop").description("Cancel the current task"),
-            CreateCommand::new("status").description("Show session status"),
-            CreateCommand::new("model")
-                .description("Show or change current model")
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "model",
-                        "New model (e.g. openai/gpt-5.2)",
-                    )
-                    .required(false),
-                ),
-            CreateCommand::new("help").description("Show available commands"),
-            CreateCommand::new("skill")
-                .description("Manage skills")
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::SubCommand,
-                        "analyze",
-                        "Analyze a skill before installing",
-                    )
-                    .add_sub_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            "source",
-                            "Skill source (URL or path)",
-                        )
-                        .required(true),
-                    ),
-                )
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::SubCommand,
-                        "install",
-                        "Install a skill (analyze first)",
-                    )
-                    .add_sub_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            "source",
-                            "Skill source (URL or path)",
-                        )
-                        .required(true),
-                    ),
-                )
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::SubCommand,
-                        "confirm",
-                        "Confirm a pending skill installation",
-                    )
-                    .add_sub_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            "token",
-                            "Confirmation token from analyze/install",
-                        )
-                        .required(true),
-                    ),
-                ),
-        ];
+        // Register slash commands from centralized registry
+        let commands = build_discord_commands();
         if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::warn!("Failed to register Discord slash commands: {e}");
         }
@@ -608,15 +537,8 @@ impl DiscordHandler {
                 }
             }
             "help" => {
-                // /help replies directly, doesn't go through gateway
-                let help_text = "**Available Commands**\n\
-                    /new — Start a fresh session\n\
-                    /status — Show session status\n\
-                    /model [provider/model] — Show or change model\n\
-                    /skill analyze <source> — Analyze a skill\n\
-                    /skill install <source> — Install a skill\n\
-                    /skill confirm <token> — Confirm installation";
-                respond_to_interaction(ctx, &cmd, help_text).await;
+                let help_text = clawhive_schema::command_registry::help_text();
+                respond_to_interaction(ctx, &cmd, &help_text).await;
                 return;
             }
             other => format!("/{other}"),
@@ -651,6 +573,64 @@ impl DiscordHandler {
             }
         }
     }
+}
+
+/// Build Discord slash commands from the centralized command registry.
+///
+/// Top-level commands (e.g. "new", "status") become standalone commands.
+/// Compound commands sharing a prefix (e.g. "skill list", "skill remove") are
+/// grouped under a parent command with subcommands.
+fn build_discord_commands() -> Vec<CreateCommand> {
+    use clawhive_schema::command_registry::{command_registry, CommandDef};
+    use std::collections::BTreeMap;
+
+    let registry = command_registry();
+
+    // Separate top-level commands from subcommand groups
+    let mut top_level: Vec<&CommandDef> = Vec::new();
+    let mut groups: BTreeMap<&str, Vec<&CommandDef>> = BTreeMap::new();
+
+    for cmd in registry {
+        if cmd.subcommand().is_some() {
+            groups.entry(cmd.root()).or_default().push(cmd);
+        } else {
+            top_level.push(cmd);
+        }
+    }
+
+    let mut commands = Vec::new();
+
+    // Build top-level commands
+    for cmd in &top_level {
+        let mut c = CreateCommand::new(cmd.name).description(cmd.description);
+        for arg in cmd.args {
+            c = c.add_option(
+                CreateCommandOption::new(CommandOptionType::String, arg.name, arg.description)
+                    .required(arg.required),
+            );
+        }
+        commands.push(c);
+    }
+
+    // Build grouped commands (e.g. /skill with subcommands)
+    for (parent, subs) in &groups {
+        let mut c = CreateCommand::new(*parent).description(format!("Manage {parent}s"));
+        for sub in subs {
+            let sub_name = sub.subcommand().expect("grouped cmd must have subcommand");
+            let mut opt =
+                CreateCommandOption::new(CommandOptionType::SubCommand, sub_name, sub.description);
+            for arg in sub.args {
+                opt = opt.add_sub_option(
+                    CreateCommandOption::new(CommandOptionType::String, arg.name, arg.description)
+                        .required(arg.required),
+                );
+            }
+            c = c.add_option(opt);
+        }
+        commands.push(c);
+    }
+
+    commands
 }
 
 const DISCORD_MAX_LEN: usize = 2000;

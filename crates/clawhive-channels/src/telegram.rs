@@ -109,17 +109,11 @@ impl TelegramBot {
     pub async fn run_impl(self) -> anyhow::Result<()> {
         let bot = Bot::new(&self.token);
 
-        // Register bot commands menu with Telegram
-        let commands = vec![
-            BotCommand::new("new", "Start a fresh session"),
-            BotCommand::new("stop", "Cancel the current task"),
-            BotCommand::new("status", "Show session status"),
-            BotCommand::new("model", "Show or change model (e.g. /model openai/gpt-5.2)"),
-            BotCommand::new("help", "Show available commands"),
-            BotCommand::new("skill_analyze", "Analyze a skill before installing"),
-            BotCommand::new("skill_install", "Install a skill (analyze first)"),
-            BotCommand::new("skill_confirm", "Confirm a pending skill installation"),
-        ];
+        // Register bot commands menu from centralized registry
+        let commands: Vec<BotCommand> = clawhive_schema::command_registry::command_registry()
+            .iter()
+            .map(|cmd| BotCommand::new(cmd.telegram_name(), cmd.description))
+            .collect();
         if let Err(e) = bot.set_my_commands(commands).await {
             tracing::warn!("Failed to register Telegram bot commands: {e}");
         }
@@ -229,10 +223,11 @@ impl TelegramBot {
                 text = compose_inbound_text(&text, quoted_text.as_deref());
 
                 // Normalize Telegram-style underscore commands to space format
-                text = text
-                    .replacen("/skill_analyze", "/skill analyze", 1)
-                    .replacen("/skill_install", "/skill install", 1)
-                    .replacen("/skill_confirm", "/skill confirm", 1);
+                for (from, to) in
+                    clawhive_schema::command_registry::telegram_normalization_pairs()
+                {
+                    text = text.replacen(&from, &to, 1);
+                }
 
                 // Skip messages with no text and no media
                 if text.is_empty() && !has_media {
