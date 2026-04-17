@@ -230,3 +230,33 @@ async fn live_chat_smoke() {
     assert!(!resp.text.is_empty(), "empty response");
     eprintln!("live response: {:?}", resp);
 }
+
+#[tokio::test]
+#[ignore = "requires real AWS credentials"]
+async fn live_stream_smoke() {
+    let access_key_id = std::env::var("AWS_BEDROCK_TEST_ACCESS_KEY_ID").unwrap();
+    let secret_access_key = std::env::var("AWS_BEDROCK_TEST_SECRET_ACCESS_KEY").unwrap();
+    let region = std::env::var("AWS_BEDROCK_TEST_REGION").unwrap_or_else(|_| "us-west-2".into());
+    let model = std::env::var("AWS_BEDROCK_TEST_MODEL")
+        .unwrap_or_else(|_| "anthropic.claude-3-5-haiku-20241022-v1:0".into());
+    let creds = AwsCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token: std::env::var("AWS_BEDROCK_TEST_SESSION_TOKEN").ok(),
+    };
+    let provider = BedrockProvider::new(creds, region);
+    let req = LlmRequest::simple(model, Some("Be very brief.".into()), "count 1 to 3".into());
+    let mut stream = provider.stream(req).await.unwrap();
+    let mut text = String::new();
+    let mut got_final = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        text.push_str(&chunk.delta);
+        if chunk.is_final {
+            got_final = true;
+        }
+    }
+    assert!(!text.is_empty());
+    assert!(got_final);
+    eprintln!("live stream: {text}");
+}
