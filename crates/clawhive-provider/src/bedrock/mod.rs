@@ -15,7 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_core::Stream;
 
-use crate::bedrock::converse::{from_converse_response, to_converse_request};
+use crate::bedrock::converse::{from_converse_response, to_converse_request, ConverseStreamState};
+use crate::bedrock::eventstream::{EventStreamDecoder, Frame};
 use crate::bedrock::sigv4::{sign_bedrock_request, AwsCredentials};
 use crate::error::ProviderError;
 use crate::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
@@ -187,8 +188,6 @@ impl LlmProvider for BedrockProvider {
             });
         }
 
-        use crate::bedrock::converse::ConverseStreamState;
-        use crate::bedrock::eventstream::{EventStreamDecoder, Frame};
         use tokio_stream::StreamExt as _;
 
         let byte_stream = resp.bytes_stream();
