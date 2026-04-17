@@ -20,6 +20,8 @@ use tokio_stream::iter as stream_iter;
 
 pub use anthropic::AnthropicProvider;
 pub use azure_openai::AzureOpenAiProvider;
+pub use bedrock::sigv4::AwsCredentials;
+pub use bedrock::BedrockProvider;
 pub use error::ProviderError;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
@@ -188,8 +190,6 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, 
                 Arc::new(AzureOpenAiProvider::new(key, base_url))
             }
             ProviderType::Bedrock => {
-                use crate::bedrock::sigv4::AwsCredentials;
-                use crate::bedrock::BedrockProvider;
                 let access_key_id = config.aws_access_key_id.clone().ok_or_else(|| {
                     ProviderError::MissingConfig {
                         provider: "bedrock".into(),

@@ -128,11 +128,13 @@ impl LlmProvider for BedrockProvider {
             .map_err(|e| ProviderError::Other(e.into()))?;
 
         if !status.is_success() {
-            tracing::error!(
-                status = status.as_u16(),
-                body = %text,
-                "bedrock converse request failed"
-            );
+            // 4xx = client-side mistakes (bad model id, throttling, auth) — warn.
+            // 5xx = AWS-side failures worth escalating — error.
+            if status.as_u16() >= 500 {
+                tracing::error!(status = status.as_u16(), body = %text, "bedrock converse request failed");
+            } else {
+                tracing::warn!(status = status.as_u16(), body = %text, "bedrock converse request failed");
+            }
             return Err(ProviderError::ApiError {
                 status: status.as_u16(),
                 message: extract_aws_error_message(&text),
