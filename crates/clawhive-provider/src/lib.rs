@@ -63,6 +63,7 @@ pub enum ProviderType {
     OpenAI,
     #[serde(rename = "azure-openai")]
     AzureOpenAI,
+    Bedrock,
     Gemini,
     DeepSeek,
     Groq,
@@ -101,6 +102,18 @@ pub struct ProviderConfig {
     /// Custom base URL (optional, uses default for each provider type)
     #[serde(default)]
     pub base_url: Option<String>,
+    /// AWS access key ID (for Bedrock).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_access_key_id: Option<String>,
+    /// AWS secret access key (for Bedrock).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_secret_access_key: Option<String>,
+    /// AWS session token (for Bedrock; used with temporary credentials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_session_token: Option<String>,
+    /// AWS region (for Bedrock, e.g. "us-west-2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl ProviderConfig {
@@ -110,6 +123,10 @@ impl ProviderConfig {
             provider_type,
             api_key: None,
             base_url: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
+            region: None,
         }
     }
 
@@ -167,6 +184,11 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, 
             let key = require_key("azure-openai")?;
             let base_url = require_base_url("azure-openai")?;
             Arc::new(AzureOpenAiProvider::new(key, base_url))
+        }
+        ProviderType::Bedrock => {
+            return Err(ProviderError::Other(anyhow::anyhow!(
+                "bedrock provider not yet implemented"
+            )));
         }
         ProviderType::Gemini => {
             let key = require_key("gemini")?;
@@ -487,4 +509,31 @@ fn provider_config_list_example() {
     assert!(json.contains("openai"));
     assert!(json.contains("deepseek"));
     assert!(json.contains("local-ollama"));
+}
+
+#[test]
+fn provider_config_bedrock_fields_round_trip() {
+    let config = ProviderConfig {
+        id: "bedrock-prod".into(),
+        provider_type: ProviderType::Bedrock,
+        api_key: None,
+        base_url: None,
+        aws_access_key_id: Some("AKIA_TEST".into()),
+        aws_secret_access_key: Some("secret".into()),
+        aws_session_token: Some("token".into()),
+        region: Some("us-west-2".into()),
+    };
+    let json = serde_json::to_string(&config).unwrap();
+    let parsed: ProviderConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.provider_type, ProviderType::Bedrock);
+    assert_eq!(parsed.aws_access_key_id.as_deref(), Some("AKIA_TEST"));
+    assert_eq!(parsed.region.as_deref(), Some("us-west-2"));
+}
+
+#[test]
+fn provider_config_bedrock_omits_optional_fields() {
+    let config = ProviderConfig::new("openai", ProviderType::OpenAI).with_api_key("sk-x");
+    let json = serde_json::to_value(&config).unwrap();
+    assert!(json.get("aws_access_key_id").is_none() || json["aws_access_key_id"].is_null());
+    assert!(json.get("region").is_none() || json["region"].is_null());
 }
