@@ -74,3 +74,23 @@ async fn chat_api_error_4xx() {
         "expected AWS message in: {s}"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires real AWS credentials; run with AWS_BEDROCK_TEST_*"]
+async fn live_chat_smoke() {
+    let access_key_id = std::env::var("AWS_BEDROCK_TEST_ACCESS_KEY_ID").unwrap();
+    let secret_access_key = std::env::var("AWS_BEDROCK_TEST_SECRET_ACCESS_KEY").unwrap();
+    let region = std::env::var("AWS_BEDROCK_TEST_REGION").unwrap_or_else(|_| "us-west-2".into());
+    let model = std::env::var("AWS_BEDROCK_TEST_MODEL")
+        .unwrap_or_else(|_| "anthropic.claude-3-5-haiku-20241022-v1:0".into());
+    let creds = AwsCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token: std::env::var("AWS_BEDROCK_TEST_SESSION_TOKEN").ok(),
+    };
+    let provider = BedrockProvider::new(creds, region);
+    let req = LlmRequest::simple(model, Some("Be brief.".into()), "say 'bedrock ok'".into());
+    let resp = provider.chat(req).await.unwrap();
+    assert!(!resp.text.is_empty(), "empty response");
+    eprintln!("live response: {:?}", resp);
+}
