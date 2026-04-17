@@ -1,9 +1,10 @@
 //! Converse API request/response schema + mapping to/from LlmRequest/LlmResponse.
 
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-use crate::types::{ContentBlock, LlmMessage, LlmRequest};
+use crate::types::{ContentBlock, LlmMessage, LlmRequest, LlmResponse};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -197,6 +198,65 @@ fn media_type_to_format(mt: &str) -> String {
     }
 }
 
+pub fn from_converse_response(raw: JsonValue) -> Result<LlmResponse> {
+    let message = raw
+        .get("output")
+        .and_then(|o| o.get("message"))
+        .ok_or_else(|| anyhow!("converse response missing output.message"))?;
+    let content_array = message
+        .get("content")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| anyhow!("converse response missing output.message.content array"))?;
+
+    let mut blocks: Vec<ContentBlock> = Vec::with_capacity(content_array.len());
+    let mut text_parts: Vec<String> = Vec::new();
+
+    for item in content_array {
+        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+            blocks.push(ContentBlock::Text {
+                text: text.to_string(),
+            });
+            text_parts.push(text.to_string());
+        } else if let Some(tool_use) = item.get("toolUse") {
+            let id = tool_use
+                .get("toolUseId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("toolUse missing toolUseId"))?
+                .to_string();
+            let name = tool_use
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("toolUse missing name"))?
+                .to_string();
+            let input = tool_use.get("input").cloned().unwrap_or(JsonValue::Null);
+            blocks.push(ContentBlock::ToolUse { id, name, input });
+        }
+    }
+
+    let stop_reason = raw
+        .get("stopReason")
+        .and_then(|s| s.as_str())
+        .map(String::from);
+    let input_tokens = raw
+        .get("usage")
+        .and_then(|u| u.get("inputTokens"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let output_tokens = raw
+        .get("usage")
+        .and_then(|u| u.get("outputTokens"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    Ok(LlmResponse {
+        text: text_parts.join(""),
+        content: blocks,
+        input_tokens,
+        output_tokens,
+        stop_reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +417,57 @@ mod tests {
             json["messages"][0]["content"][0]["toolResult"]["status"],
             "error"
         );
+    }
+
+    #[test]
+    fn from_converse_response_text_only() {
+        use crate::types::ContentBlock;
+        let raw = serde_json::json!({
+            "output": { "message": { "role": "assistant", "content": [ {"text": "hi there"} ] } },
+            "stopReason": "end_turn",
+            "usage": { "inputTokens": 10, "outputTokens": 5 }
+        });
+        let resp = from_converse_response(raw).unwrap();
+        assert_eq!(resp.text, "hi there");
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.input_tokens, Some(10));
+        assert_eq!(resp.output_tokens, Some(5));
+        assert_eq!(resp.content.len(), 1);
+        assert!(matches!(&resp.content[0], ContentBlock::Text { text } if text == "hi there"));
+    }
+
+    #[test]
+    fn from_converse_response_tool_use() {
+        use crate::types::ContentBlock;
+        let raw = serde_json::json!({
+            "output": { "message": { "role": "assistant", "content": [
+                {"text": "let me search"},
+                {"toolUse": { "toolUseId": "tool_123", "name": "search", "input": {"q": "rust"} }}
+            ]}},
+            "stopReason": "tool_use",
+            "usage": { "inputTokens": 50, "outputTokens": 20 }
+        });
+        let resp = from_converse_response(raw).unwrap();
+        assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(resp.content.len(), 2);
+        assert!(matches!(&resp.content[1],
+            ContentBlock::ToolUse { id, name, .. } if id == "tool_123" && name == "search"));
+    }
+
+    #[test]
+    fn from_converse_response_missing_usage_ok() {
+        let raw = serde_json::json!({
+            "output": { "message": { "role": "assistant", "content": [{"text": "ok"}] } },
+            "stopReason": "end_turn"
+        });
+        let resp = from_converse_response(raw).unwrap();
+        assert_eq!(resp.input_tokens, None);
+        assert_eq!(resp.output_tokens, None);
+    }
+
+    #[test]
+    fn from_converse_response_malformed_errors() {
+        let raw = serde_json::json!({ "output": {} });
+        assert!(from_converse_response(raw).is_err());
     }
 }
