@@ -19,3 +19,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 clawhive-auth = { path = "../clawhive-auth" }
 uuid = { workspace = true, features = ["v4"] }
+aws-sigv4.workspace = true
+crc32fast.workspace = true
+urlencoding.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
