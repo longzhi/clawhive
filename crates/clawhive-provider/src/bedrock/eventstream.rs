@@ -73,10 +73,14 @@ impl EventStreamDecoder {
             return Ok(None);
         }
 
-        // Read prelude without consuming.
-        let total_length = u32::from_be_bytes(self.buf[0..4].try_into().unwrap()) as usize;
-        let headers_len = u32::from_be_bytes(self.buf[4..8].try_into().unwrap()) as usize;
-        let prelude_crc = u32::from_be_bytes(self.buf[8..12].try_into().unwrap());
+        // Read prelude without consuming. Indices 0..12 are guaranteed by the
+        // `buf.len() < PRELUDE_LEN` check above, so the array form cannot panic.
+        let total_length =
+            u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        let headers_len =
+            u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
+        let prelude_crc =
+            u32::from_be_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]]);
 
         if total_length < MIN_FRAME_LEN {
             // Consume the junk prelude so we don't loop forever.
@@ -98,8 +102,12 @@ impl EventStreamDecoder {
 
         // Validate message CRC over bytes [0 .. total_length - 4].
         let msg_crc_offset = total_length - MESSAGE_CRC_LEN;
-        let expected_msg_crc =
-            u32::from_be_bytes(self.buf[msg_crc_offset..total_length].try_into().unwrap());
+        let expected_msg_crc = u32::from_be_bytes([
+            self.buf[msg_crc_offset],
+            self.buf[msg_crc_offset + 1],
+            self.buf[msg_crc_offset + 2],
+            self.buf[msg_crc_offset + 3],
+        ]);
         let computed_msg_crc = crc32fast::hash(&self.buf[0..msg_crc_offset]);
         if computed_msg_crc != expected_msg_crc {
             self.buf.advance(total_length);
@@ -170,33 +178,88 @@ fn parse_headers(bytes: &[u8]) -> Result<(Option<String>, Option<String>), Decod
             .ok_or_else(|| DecodeError::InvalidHeader("truncated at value_type".into()))?;
         i += 1;
 
-        if value_type != 7 {
+        // Parse (or skip past) the value according to its type. AWS event-stream
+        // defines 10 value types; we only care about `:event-type` and
+        // `:message-type` (both strings, type 7), but we must still correctly
+        // advance past unfamiliar headers so future AWS additions don't abort
+        // the whole stream.
+        let value = read_header_value(bytes, &mut i, value_type, name)?;
+
+        if let Some(v) = value {
+            match name {
+                ":event-type" => event_type = Some(v),
+                ":message-type" => message_type = Some(v),
+                _ => { /* ignore unknown string header */ }
+            }
+        }
+    }
+    Ok((event_type, message_type))
+}
+
+/// Parse or skip an event-stream header value. Returns `Some(string)` for
+/// string types (value_type 7) that we actually consume, or `None` for
+/// types that are skipped (0/1 = no value, fixed-size numerics, bytebuffer,
+/// timestamp, uuid). Unknown value types fail loudly.
+fn read_header_value(
+    bytes: &[u8],
+    i: &mut usize,
+    value_type: u8,
+    name: &str,
+) -> Result<Option<String>, DecodeError> {
+    let skip_fixed = |i: &mut usize, n: usize, bytes: &[u8]| -> Result<(), DecodeError> {
+        if *i + n > bytes.len() {
             return Err(DecodeError::InvalidHeader(format!(
-                "unsupported value_type {value_type} for header {name}"
+                "truncated {n}-byte value for header {name}"
             )));
         }
-
-        // value: [u16 length][utf8]
-        if i + 2 > bytes.len() {
+        *i += n;
+        Ok(())
+    };
+    let skip_variable = |i: &mut usize, bytes: &[u8]| -> Result<(), DecodeError> {
+        if *i + 2 > bytes.len() {
             return Err(DecodeError::InvalidHeader(
                 "truncated at value length".into(),
             ));
         }
-        let value_len = u16::from_be_bytes(bytes[i..i + 2].try_into().unwrap()) as usize;
-        i += 2;
-        if i + value_len > bytes.len() {
+        let len = u16::from_be_bytes([bytes[*i], bytes[*i + 1]]) as usize;
+        *i += 2;
+        if *i + len > bytes.len() {
             return Err(DecodeError::InvalidHeader("truncated header value".into()));
         }
-        let value = std::str::from_utf8(&bytes[i..i + value_len]).map_err(|_| DecodeError::Utf8)?;
-        i += value_len;
+        *i += len;
+        Ok(())
+    };
 
-        match name {
-            ":event-type" => event_type = Some(value.to_string()),
-            ":message-type" => message_type = Some(value.to_string()),
-            _ => { /* ignore unknown headers */ }
+    match value_type {
+        0 | 1 => Ok(None),                           // true / false, no value bytes
+        2 => skip_fixed(i, 1, bytes).map(|()| None), // byte
+        3 => skip_fixed(i, 2, bytes).map(|()| None), // short
+        4 => skip_fixed(i, 4, bytes).map(|()| None), // integer
+        5 => skip_fixed(i, 8, bytes).map(|()| None), // long
+        6 => skip_variable(i, bytes).map(|()| None), // bytebuffer
+        7 => {
+            // string — [u16 len][utf8]
+            if *i + 2 > bytes.len() {
+                return Err(DecodeError::InvalidHeader(
+                    "truncated at value length".into(),
+                ));
+            }
+            let value_len = u16::from_be_bytes([bytes[*i], bytes[*i + 1]]) as usize;
+            *i += 2;
+            if *i + value_len > bytes.len() {
+                return Err(DecodeError::InvalidHeader("truncated header value".into()));
+            }
+            let value =
+                std::str::from_utf8(&bytes[*i..*i + value_len]).map_err(|_| DecodeError::Utf8)?;
+            *i += value_len;
+            Ok(Some(value.to_string()))
         }
+        8 => skip_fixed(i, 8, bytes).map(|()| None), // timestamp (epoch ms, i64)
+        9 => skip_fixed(i, 16, bytes).map(|()| None), // uuid
+        other => Err(DecodeError::InvalidHeader(format!(
+            "unknown value_type {other} for header {name}"
+        ))),
     }
-    Ok((event_type, message_type))
 }
 
 #[cfg(test)]
@@ -301,6 +364,56 @@ mod tests {
             _ => panic!("expected two Events"),
         }
         assert!(d.next_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_frame_with_extra_non_string_header_still_parses() {
+        // Build a frame where, in addition to :event-type and :message-type
+        // (type 7 strings), we include a `:timestamp` header with value_type 8
+        // (8-byte int64). Our decoder should skip it without failing.
+        let mut headers = Vec::new();
+        for (name, value) in [
+            (":event-type", "contentBlockDelta"),
+            (":message-type", "event"),
+        ] {
+            headers.push(name.len() as u8);
+            headers.extend_from_slice(name.as_bytes());
+            headers.push(7);
+            headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            headers.extend_from_slice(value.as_bytes());
+        }
+        // :timestamp, value_type 8, 8-byte epoch ms
+        let ts_name = ":timestamp";
+        headers.push(ts_name.len() as u8);
+        headers.extend_from_slice(ts_name.as_bytes());
+        headers.push(8);
+        headers.extend_from_slice(&1_705_320_000_000_i64.to_be_bytes());
+
+        let payload = br#"{"delta":{"text":"ok"}}"#;
+        let total_length = 12 + headers.len() + payload.len() + 4;
+        let mut frame = Vec::with_capacity(total_length);
+        frame.extend_from_slice(&(total_length as u32).to_be_bytes());
+        frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+        let prelude_crc = crc32fast::hash(&frame[0..8]);
+        frame.extend_from_slice(&prelude_crc.to_be_bytes());
+        frame.extend_from_slice(&headers);
+        frame.extend_from_slice(payload);
+        let msg_crc = crc32fast::hash(&frame);
+        frame.extend_from_slice(&msg_crc.to_be_bytes());
+
+        let mut d = EventStreamDecoder::new();
+        d.feed(&frame);
+        let f = d.next_frame().unwrap().unwrap();
+        match f {
+            Frame::Event {
+                event_type,
+                payload,
+            } => {
+                assert_eq!(event_type, "contentBlockDelta");
+                assert_eq!(payload, br#"{"delta":{"text":"ok"}}"#);
+            }
+            _ => panic!("expected Event"),
+        }
     }
 
     #[test]
