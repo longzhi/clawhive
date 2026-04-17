@@ -122,7 +122,7 @@ clawhive auth login openai
 - ReAct 推理循环 + 防空转保护、子 Agent 生成
 - Skill 系统（SKILL.md frontmatter + 权限声明）
 - 按用户 Token 桶限流
-- LLM 提供商抽象 + 重试 + 指数退避（Anthropic、OpenAI、Gemini、DeepSeek、Groq、Ollama、OpenRouter、Together、Fireworks，以及任何 OpenAI 兼容端点）
+- LLM 提供商抽象 + 重试 + 指数退避（Anthropic、OpenAI、Gemini、Amazon Bedrock、DeepSeek、Groq、Ollama、OpenRouter、Together、Fireworks，以及任何 OpenAI 兼容端点）
 - 实时 TUI 仪表板、YAML 驱动配置
 
 ## 架构
@@ -242,7 +242,7 @@ permissions:
 - `providers.d/<provider>.yaml` — 提供商类型、API 地址、认证方式
 - `routing.yaml` — 默认 Agent ID、渠道到 Agent 的路由绑定
 
-支持的提供商：Anthropic、OpenAI、Gemini、DeepSeek、Qwen、Moonshot、Zhipu GLM、MiniMax、Volcengine、Qianfan、Groq、Ollama、OpenRouter、Together、Fireworks，以及任何 OpenAI 兼容端点。
+支持的提供商：Anthropic、OpenAI、Gemini、Amazon Bedrock、DeepSeek、Qwen、Moonshot、Zhipu GLM、MiniMax、Volcengine、Qianfan、Groq、Ollama、OpenRouter、Together、Fireworks，以及任何 OpenAI 兼容端点。
 
 </details>
 
@@ -290,7 +290,7 @@ just release v0.1.0-alpha.15
 | 组件 | 技术 |
 |------|------|
 | 语言 | Rust（2021 edition） |
-| LLM 提供商 | Anthropic、OpenAI、Gemini、DeepSeek、Qwen、Moonshot、Zhipu GLM、MiniMax、Volcengine、Qianfan、Groq、Ollama、OpenRouter、Together、Fireworks |
+| LLM 提供商 | Anthropic、OpenAI、Gemini、Amazon Bedrock、DeepSeek、Qwen、Moonshot、Zhipu GLM、MiniMax、Volcengine、Qianfan、Groq、Ollama、OpenRouter、Together、Fireworks |
 | 渠道 | Telegram、Discord、Slack、WhatsApp、iMessage、Feishu、DingTalk、WeCom、CLI |
 | 数据库 | SQLite（rusqlite，bundled） |
 | 向量搜索 | sqlite-vec |

@@ -124,7 +124,7 @@ clawhive auth login openai
 - ReAct reasoning loop with repeat guard and sub-agent spawning
 - Skill system (SKILL.md with frontmatter + permission declarations)
 - Token-bucket rate limiting per user
-- LLM provider abstraction with retry + exponential backoff (Anthropic, OpenAI, Gemini, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint)
+- LLM provider abstraction with retry + exponential backoff (Anthropic, OpenAI, Gemini, Amazon Bedrock, DeepSeek, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint)
 - Real-time TUI dashboard and YAML-driven configuration
 
 ## Architecture
@@ -352,7 +352,7 @@ Configuration is managed through `clawhive setup`, which interactively generates
 - `providers.d/<provider>.yaml` — provider type, API base URL, authentication
 - `routing.yaml` — default agent ID, channel-to-agent routing bindings
 
-Supported providers: Anthropic, OpenAI, Gemini, DeepSeek, Qwen, Moonshot, Zhipu GLM, MiniMax, Volcengine, Qianfan, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint.
+Supported providers: Anthropic, OpenAI, Gemini, Amazon Bedrock, DeepSeek, Qwen, Moonshot, Zhipu GLM, MiniMax, Volcengine, Qianfan, Groq, Ollama, OpenRouter, Together, Fireworks, and any OpenAI-compatible endpoint.
 
 </details>
 

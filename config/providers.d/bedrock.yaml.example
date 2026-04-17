@@ -1,0 +1,20 @@
+# Amazon Bedrock via AWS Converse API.
+# Supports Claude, Llama, Mistral, Nova, Titan, Cohere models on AWS Bedrock.
+#
+# Note: api_base is ignored for Bedrock — the endpoint is derived from `region`.
+# `${VAR}` expands environment variables at config-load time.
+
+provider_id: bedrock
+enabled: false
+api_base: ""
+region: us-west-2
+aws_access_key_id: ${AWS_ACCESS_KEY_ID}
+aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+# Optional: for STS temporary credentials
+# aws_session_token: ${AWS_SESSION_TOKEN}
+models:
+  - anthropic.claude-3-5-sonnet-20241022-v2:0
+  - anthropic.claude-3-5-haiku-20241022-v1:0
+  - us.anthropic.claude-sonnet-4-20250514-v1:0
+  - meta.llama3-1-70b-instruct-v1:0
+  - amazon.nova-pro-v1:0

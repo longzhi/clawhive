@@ -118,6 +118,10 @@ mod tests {
                 auth_profile: None,
                 provider_type: None,
                 models: vec!["gpt-4o".to_string()],
+                aws_access_key_id: None,
+                aws_secret_access_key: None,
+                aws_session_token: None,
+                region: None,
             }],
             agents: vec![FullAgentConfig {
                 agent_id: "agent-a".to_string(),

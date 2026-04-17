@@ -476,6 +476,18 @@ pub struct ProviderConfig {
     pub provider_type: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    /// AWS access key ID (Bedrock only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_access_key_id: Option<String>,
+    /// AWS secret access key (Bedrock only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_secret_access_key: Option<String>,
+    /// AWS session token (Bedrock only; for STS temporary credentials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_session_token: Option<String>,
+    /// AWS region (Bedrock only, e.g. "us-west-2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1177,6 +1189,18 @@ fn resolve_providers_env(providers: &mut [ProviderConfig]) {
         }
         for model in &mut provider.models {
             *model = resolve_env_var(model);
+        }
+        if let Some(v) = &mut provider.aws_access_key_id {
+            *v = resolve_env_var(v);
+        }
+        if let Some(v) = &mut provider.aws_secret_access_key {
+            *v = resolve_env_var(v);
+        }
+        if let Some(v) = &mut provider.aws_session_token {
+            *v = resolve_env_var(v);
+        }
+        if let Some(v) = &mut provider.region {
+            *v = resolve_env_var(v);
         }
     }
 }

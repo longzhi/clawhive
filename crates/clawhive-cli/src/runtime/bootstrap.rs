@@ -781,6 +781,37 @@ pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRout
                     tracing::warn!("Azure OpenAI: no API key set, skipping");
                 }
             }
+            "bedrock" => {
+                use clawhive_provider::bedrock::{sigv4::AwsCredentials, BedrockProvider};
+                let access_key_id = provider_config
+                    .aws_access_key_id
+                    .clone()
+                    .filter(|v| !v.is_empty());
+                let secret_access_key = provider_config
+                    .aws_secret_access_key
+                    .clone()
+                    .filter(|v| !v.is_empty());
+                let region = provider_config.region.clone().filter(|v| !v.is_empty());
+                match (access_key_id, secret_access_key, region) {
+                    (Some(access_key_id), Some(secret_access_key), Some(region)) => {
+                        let creds = AwsCredentials {
+                            access_key_id,
+                            secret_access_key,
+                            session_token: provider_config
+                                .aws_session_token
+                                .clone()
+                                .filter(|v| !v.is_empty()),
+                        };
+                        let provider = Arc::new(BedrockProvider::new(creds, region));
+                        registry.register("bedrock", provider);
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "Bedrock: aws_access_key_id / aws_secret_access_key / region all required, skipping"
+                        );
+                    }
+                }
+            }
             "qwen" => {
                 let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
                 if let Some(api_key) = api_key {
@@ -1080,6 +1111,10 @@ mod tests {
                     auth_profile: Some("named-openai".to_string()),
                     provider_type: None,
                     models: Vec::new(),
+                    aws_access_key_id: None,
+                    aws_secret_access_key: None,
+                    aws_session_token: None,
+                    region: None,
                 },
                 ProviderConfig {
                     provider_id: "openai-chatgpt".to_string(),
@@ -1089,6 +1124,10 @@ mod tests {
                     auth_profile: None,
                     provider_type: None,
                     models: Vec::new(),
+                    aws_access_key_id: None,
+                    aws_secret_access_key: None,
+                    aws_session_token: None,
+                    region: None,
                 },
                 ProviderConfig {
                     provider_id: "anthropic".to_string(),
@@ -1098,6 +1137,10 @@ mod tests {
                     auth_profile: Some("anthropic-session".to_string()),
                     provider_type: None,
                     models: Vec::new(),
+                    aws_access_key_id: None,
+                    aws_secret_access_key: None,
+                    aws_session_token: None,
+                    region: None,
                 },
                 ProviderConfig {
                     provider_id: "openai".to_string(),
@@ -1107,6 +1150,10 @@ mod tests {
                     auth_profile: Some("disabled-openai".to_string()),
                     provider_type: None,
                     models: Vec::new(),
+                    aws_access_key_id: None,
+                    aws_secret_access_key: None,
+                    aws_session_token: None,
+                    region: None,
                 },
             ],
             agents: Vec::new(),
