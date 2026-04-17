@@ -1,4 +1,6 @@
 use anyhow::Result;
+use chrono::{Datelike, Duration, Local, NaiveDate};
+use clawhive_memory::search_index::TimeRange;
 use clawhive_schema::SessionKey;
 
 use crate::config_view::ConfigView;
@@ -39,7 +41,7 @@ impl Orchestrator {
             MemorySearchParams {
                 max_results: 6,
                 min_score: 0.25,
-                time_range: None,
+                time_range: detect_time_range_from_query(query),
             },
         )
         .await;
@@ -360,6 +362,46 @@ pub(super) fn truncate_tool_result_preview(text: &str, max_chars: usize) -> Stri
     format!("{truncated}…")
 }
 
+/// Detect temporal keywords in query and convert to a TimeRange filter.
+/// Supports Chinese and English temporal expressions.
+fn detect_time_range_from_query(query: &str) -> Option<TimeRange> {
+    let today = Local::now().date_naive();
+    let lower = query.to_lowercase();
+
+    let (from, to) =
+        if lower.contains("昨天") || lower.contains("昨日") || lower.contains("yesterday") {
+            let d = today - Duration::days(1);
+            (d, d)
+        } else if lower.contains("今天") || lower.contains("今日") || lower.contains("today") {
+            (today, today)
+        } else if lower.contains("前天") || lower.contains("前日") {
+            let d = today - Duration::days(2);
+            (d, d)
+        } else if lower.contains("上周") || lower.contains("上一周") || lower.contains("last week")
+        {
+            let end = today - Duration::days(today.weekday().num_days_from_monday() as i64 + 1);
+            let start = end - Duration::days(6);
+            (start, end)
+        } else if lower.contains("这周") || lower.contains("本周") || lower.contains("this week")
+        {
+            let start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+            (start, today)
+        } else if lower.contains("上个月") || lower.contains("上月") || lower.contains("last month")
+        {
+            let first_of_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+            let end = first_of_month - Duration::days(1);
+            let start = NaiveDate::from_ymd_opt(end.year(), end.month(), 1).unwrap();
+            (start, end)
+        } else {
+            return None;
+        };
+
+    Some(TimeRange {
+        from: Some(from.format("%Y-%m-%d").to_string()),
+        to: Some(to.format("%Y-%m-%d").to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +540,28 @@ mod tests {
             MemoryRoutingBias::ShortTerm,
             std::slice::from_ref(&long_term_hit),
         ));
+    }
+
+    #[test]
+    fn detect_time_range_yesterday_chinese() {
+        let range = detect_time_range_from_query("昨天我们聊了什么").unwrap();
+        let yesterday = (Local::now().date_naive() - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(range.from.as_deref(), Some(yesterday.as_str()));
+        assert_eq!(range.to.as_deref(), Some(yesterday.as_str()));
+    }
+
+    #[test]
+    fn detect_time_range_today() {
+        let range = detect_time_range_from_query("今天做了什么").unwrap();
+        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        assert_eq!(range.from.as_deref(), Some(today.as_str()));
+        assert_eq!(range.to.as_deref(), Some(today.as_str()));
+    }
+
+    #[test]
+    fn detect_time_range_none_for_generic_query() {
+        assert!(detect_time_range_from_query("记忆系统怎么工作的").is_none());
     }
 }
