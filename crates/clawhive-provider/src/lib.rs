@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod azure_openai;
+pub mod bedrock;
 pub mod error;
 pub mod gemini;
 pub mod openai;
