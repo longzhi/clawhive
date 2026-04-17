@@ -9,23 +9,23 @@ pub mod converse;
 pub mod eventstream;
 pub mod sigv4;
 
+use std::pin::Pin;
 use std::time::Duration;
 
-use crate::bedrock::sigv4::AwsCredentials;
+use async_trait::async_trait;
+use futures_core::Stream;
+
+use crate::bedrock::converse::{from_converse_response, to_converse_request};
+use crate::bedrock::sigv4::{sign_bedrock_request, AwsCredentials};
+use crate::error::ProviderError;
+use crate::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
 /// Bedrock Runtime provider.
 ///
-/// HTTP calls and Converse request/response plumbing are wired up in later
-/// batches; this type currently exposes only the static URL builder used by
-/// the HTTP path.
+/// Implements the Converse API via hand-rolled SigV4 signing.
 #[derive(Debug, Clone)]
 pub struct BedrockProvider {
-    // `http` and `creds` are consumed by the chat / stream paths landed in
-    // Batch 4+; silence dead-code warnings until then to keep the clippy gate
-    // green during incremental landing.
-    #[allow(dead_code)]
     http: reqwest::Client,
-    #[allow(dead_code)]
     creds: AwsCredentials,
     region: String,
     /// Override base URL — tests set this to point at wiremock. `None` means
@@ -70,7 +70,6 @@ impl BedrockProvider {
     /// `streaming = true` targets `/converse-stream`; otherwise `/converse`.
     /// Model ids containing `:` (e.g. `anthropic.claude-3-5-sonnet-20241022-v2:0`)
     /// must be percent-encoded into the path.
-    #[allow(dead_code)]
     pub(crate) fn build_url(&self, model_id: &str, streaming: bool) -> String {
         let encoded = urlencoding::encode(model_id);
         let suffix = if streaming {
@@ -96,6 +95,83 @@ impl BedrockProvider {
     pub(crate) fn region(&self) -> &str {
         &self.region
     }
+}
+
+#[async_trait]
+impl LlmProvider for BedrockProvider {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        let url = self.build_url(&request.model, false);
+        let converse = to_converse_request(&request);
+        let body = serde_json::to_vec(&converse)
+            .map_err(|e| ProviderError::InvalidResponse(format!("serialize converse body: {e}")))?;
+
+        let signed_headers = sign_bedrock_request(&self.creds, &self.region, "POST", &url, &body)
+            .map_err(ProviderError::Other)?;
+
+        let mut req = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body);
+        for (name, value) in signed_headers {
+            req = req.header(name, value);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
+
+        if !status.is_success() {
+            tracing::error!(
+                status = status.as_u16(),
+                body = %text,
+                "bedrock converse request failed"
+            );
+            return Err(ProviderError::ApiError {
+                status: status.as_u16(),
+                message: extract_aws_error_message(&text),
+            });
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            ProviderError::InvalidResponse(format!("parse converse response: {e}: {text}"))
+        })?;
+        from_converse_response(json).map_err(|e| ProviderError::InvalidResponse(e.to_string()))
+    }
+
+    async fn stream(
+        &self,
+        _request: LlmRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamChunk>> + Send>>, ProviderError>
+    {
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "bedrock streaming not yet implemented"
+        )))
+    }
+}
+
+/// Extract a human-readable error message from an AWS error response body.
+///
+/// AWS is inconsistent across services about the casing and field name:
+/// some return `{"message": "..."}`, others `{"Message": "..."}`, and
+/// a few include `{"__type": "...", "message": "..."}`. Falls back to the
+/// raw body if none match.
+fn extract_aws_error_message(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+            return m.to_string();
+        }
+        if let Some(m) = v.get("Message").and_then(|m| m.as_str()) {
+            return m.to_string();
+        }
+    }
+    body.to_string()
 }
 
 #[cfg(test)]
