@@ -524,6 +524,8 @@ fn provider_config_bedrock_fields_round_trip() {
         aws_session_token: Some("token".into()),
         region: Some("us-west-2".into()),
     };
+    let json_value = serde_json::to_value(&config).unwrap();
+    assert_eq!(json_value["type"], "bedrock");
     let json = serde_json::to_string(&config).unwrap();
     let parsed: ProviderConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.provider_type, ProviderType::Bedrock);
@@ -535,6 +537,6 @@ fn provider_config_bedrock_fields_round_trip() {
 fn provider_config_bedrock_omits_optional_fields() {
     let config = ProviderConfig::new("openai", ProviderType::OpenAI).with_api_key("sk-x");
     let json = serde_json::to_value(&config).unwrap();
-    assert!(json.get("aws_access_key_id").is_none() || json["aws_access_key_id"].is_null());
-    assert!(json.get("region").is_none() || json["region"].is_null());
+    assert!(json.get("aws_access_key_id").is_none());
+    assert!(json.get("region").is_none());
 }
