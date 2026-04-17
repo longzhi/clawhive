@@ -195,6 +195,11 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const [customModelInput, setCustomModelInput] = useState("");
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [customModels, setCustomModels] = useState<string[]>([]);
+  // Bedrock / AWS credentials
+  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
+  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
+  const [awsSessionToken, setAwsSessionToken] = useState("");
+  const [awsRegion, setAwsRegion] = useState("us-west-2");
   const createProvider = useCreateProvider();
   const { data: presets } = useProviderPresets();
   const { data: authStatus } = useAuthStatus();
@@ -218,6 +223,10 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
     setCustomModelInput("");
     setSelectedModels(new Set());
     setCustomModels([]);
+    setAwsAccessKeyId("");
+    setAwsSecretAccessKey("");
+    setAwsSessionToken("");
+    setAwsRegion("us-west-2");
   };
 
   const handleSelect = (p: ProviderPreset) => {
@@ -258,6 +267,18 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
           models,
         });
         toast.success(`Custom provider ${customProviderId} added`);
+      } else if (selected.needs_aws_credentials) {
+        const modelList = Array.from(selectedModels);
+        await createProvider.mutateAsync({
+          provider_id: selected.id,
+          api_base: "",
+          aws_access_key_id: awsAccessKeyId,
+          aws_secret_access_key: awsSecretAccessKey,
+          aws_session_token: awsSessionToken || undefined,
+          region: awsRegion,
+          models: modelList.length > 0 ? modelList : presetModelIds(selected),
+        });
+        toast.success(`Provider ${selected.name} added`);
       } else {
         const modelList = Array.from(selectedModels);
         await createProvider.mutateAsync({
@@ -286,7 +307,11 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
 
   const submitDisabled = isCustom
     ? !customProviderId.trim() || !apiBase.trim() || !customModelInput.trim() || createProvider.isPending
-    : !selected || createProvider.isPending || (selected.needs_key && !apiKey) || (selected.id === "openai-chatgpt" && !hasOpenAiOAuth);
+    : !selected
+      || createProvider.isPending
+      || (selected.needs_key && !apiKey)
+      || (selected.id === "openai-chatgpt" && !hasOpenAiOAuth)
+      || (selected.needs_aws_credentials && (!awsAccessKeyId || !awsSecretAccessKey || !awsRegion));
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset(); }}>
@@ -375,7 +400,85 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
           </div>
         )}
 
-        {selected && !isCustom && (
+        {selected && !isCustom && selected.needs_aws_credentials && (
+          <div className="space-y-3 rounded-lg border p-4">
+            <p className="text-xs text-muted-foreground">
+              Amazon Bedrock uses AWS SigV4 credentials. Get them from{" "}
+              <a
+                href="https://console.aws.amazon.com/iam/home#/security_credentials"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                AWS IAM console
+              </a>
+              .
+            </p>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                AWS Region
+              </label>
+              <Input
+                placeholder="us-west-2"
+                value={awsRegion}
+                onChange={(e) => setAwsRegion(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                AWS Access Key ID
+              </label>
+              <Input
+                placeholder="AKIA…"
+                value={awsAccessKeyId}
+                onChange={(e) => setAwsAccessKeyId(e.target.value)}
+                className="mt-1 font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                AWS Secret Access Key
+              </label>
+              <Input
+                type="password"
+                placeholder="Enter your AWS secret access key"
+                value={awsSecretAccessKey}
+                onChange={(e) => setAwsSecretAccessKey(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                AWS Session Token <span className="normal-case font-normal">(optional, STS)</span>
+              </label>
+              <Input
+                type="password"
+                placeholder="Leave empty unless using temporary credentials"
+                value={awsSessionToken}
+                onChange={(e) => setAwsSessionToken(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <ModelMultiSelect
+              defaultModels={presetModelIds(selected)}
+              selectedModels={selectedModels}
+              customModels={customModels}
+              onToggle={toggleModel}
+              onAddCustom={(model) => {
+                if (selectedModels.has(model) || customModels.includes(model)) return;
+                setCustomModels((prev) => [...prev, model]);
+                setSelectedModels((prev) => new Set([...prev, model]));
+              }}
+              onRemoveCustom={(model) => {
+                setCustomModels((prev) => prev.filter((m) => m !== model));
+                setSelectedModels((prev) => { const next = new Set(prev); next.delete(model); return next; });
+              }}
+            />
+          </div>
+        )}
+
+        {selected && !isCustom && !selected.needs_aws_credentials && (
           <div className="space-y-3 rounded-lg border p-4">
             {selected.id === "openai-chatgpt" && (
               <OpenAiOAuthSetup />

@@ -22,6 +22,7 @@ pub(super) enum ProviderId {
     Anthropic,
     OpenAi,
     AzureOpenAi,
+    Bedrock,
     Gemini,
     DeepSeek,
     Groq,
@@ -42,6 +43,7 @@ pub(super) const ALL_PROVIDERS: &[ProviderId] = &[
     ProviderId::Anthropic,
     ProviderId::OpenAi,
     ProviderId::AzureOpenAi,
+    ProviderId::Bedrock,
     ProviderId::Gemini,
     ProviderId::DeepSeek,
     ProviderId::Groq,
@@ -64,6 +66,7 @@ impl ProviderId {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
             Self::AzureOpenAi => "azure-openai",
+            Self::Bedrock => "bedrock",
             Self::Gemini => "gemini",
             Self::DeepSeek => "deepseek",
             Self::Groq => "groq",
@@ -102,12 +105,26 @@ impl ProviderId {
     fn needs_custom_base_url(self) -> bool {
         matches!(self, Self::AzureOpenAi | Self::Custom)
     }
+
+    fn needs_aws_credentials(self) -> bool {
+        matches!(self, Self::Bedrock)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum AuthChoice {
-    OAuth { profile_name: String },
-    ApiKey { api_key: String },
+    OAuth {
+        profile_name: String,
+    },
+    ApiKey {
+        api_key: String,
+    },
+    AwsCredentials {
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+        region: String,
+    },
 }
 
 pub(super) async fn handle_add_provider(
@@ -174,6 +191,23 @@ pub(super) async fn handle_add_provider(
                 return Ok(());
             }
         }
+    }
+
+    // Bedrock has its own flow — no api_base, uses AWS credentials + region.
+    if provider.needs_aws_credentials() {
+        let auth = match prompt_bedrock_credentials(theme)? {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+        let path = write_provider_config_unchecked(config_root, provider, &auth, None)?;
+        print_done(
+            term,
+            &format!(
+                "Provider configuration saved: {}",
+                display_rel(config_root, &path)
+            ),
+        );
+        return Ok(());
     }
 
     let api_base_override = if provider.needs_custom_base_url() {
@@ -295,6 +329,53 @@ fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<Option<
     let masked = mask_secret(&api_key);
     println!("  {ARROW} Key saved: {masked}");
     Ok(Some(AuthChoice::ApiKey { api_key }))
+}
+
+fn prompt_bedrock_credentials(theme: &ColorfulTheme) -> Result<Option<AuthChoice>> {
+    println!("  {ARROW} Amazon Bedrock uses AWS SigV4 credentials, not an API key.");
+    println!("  {ARROW} Find credentials at: https://console.aws.amazon.com/iam/home#/security_credentials");
+
+    let access_key_id = match input_or_back(theme, "AWS Access Key ID")? {
+        Some(k) if !k.is_empty() => k,
+        Some(_) => anyhow::bail!("Access key ID cannot be empty"),
+        None => return Ok(None),
+    };
+    let secret_access_key = match input_or_back(theme, "AWS Secret Access Key")? {
+        Some(k) if !k.is_empty() => k,
+        Some(_) => anyhow::bail!("Secret access key cannot be empty"),
+        None => return Ok(None),
+    };
+    let region = match input_or_back_with_default(theme, "AWS Region", "us-west-2")? {
+        Some(r) if !r.is_empty() => r,
+        Some(_) => anyhow::bail!("Region cannot be empty"),
+        None => return Ok(None),
+    };
+    let session_token: String = Input::with_theme(theme)
+        .with_prompt("AWS Session Token (optional, for STS temporary creds)")
+        .allow_empty(true)
+        .interact_text()?;
+    let session_token = if session_token.is_empty() {
+        None
+    } else {
+        Some(session_token)
+    };
+
+    println!(
+        "  {ARROW} Access key saved: {}",
+        mask_secret(&access_key_id)
+    );
+    println!(
+        "  {ARROW} Secret key saved: {}",
+        mask_secret(&secret_access_key)
+    );
+    println!("  {ARROW} Region: {region}");
+
+    Ok(Some(AuthChoice::AwsCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token,
+        region,
+    }))
 }
 
 async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
@@ -433,6 +514,23 @@ fn generate_provider_yaml(
                     key = api_key,
                 )
             }
+        }
+        AuthChoice::AwsCredentials {
+            access_key_id,
+            secret_access_key,
+            session_token,
+            region,
+        } => {
+            let pid = provider.as_str();
+            let models_yaml = format_preset_models_yaml(pid);
+            let mut yaml = format!(
+                "provider_id: {pid}\nenabled: true\napi_base: \"\"\nregion: {region}\naws_access_key_id: \"{access_key_id}\"\naws_secret_access_key: \"{secret_access_key}\"\n"
+            );
+            if let Some(token) = session_token {
+                yaml.push_str(&format!("aws_session_token: \"{token}\"\n"));
+            }
+            yaml.push_str(&format!("models:\n{models_yaml}\n"));
+            yaml
         }
     }
 }

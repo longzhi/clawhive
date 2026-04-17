@@ -22,6 +22,11 @@ pub struct ProviderPreset {
     pub api_base: &'static str,
     pub needs_key: bool,
     pub needs_base_url: bool,
+    /// If true, the provider requires AWS credentials (access_key_id +
+    /// secret_access_key + region) instead of a single API key. Used by
+    /// Amazon Bedrock.
+    #[serde(default)]
+    pub needs_aws_credentials: bool,
     pub default_model: &'static str,
     pub models: &'static [ModelPresetInfo],
 }
@@ -49,6 +54,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.anthropic.com/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "claude-opus-4-6",
         models: &[
             m("claude-opus-4-6", 200_000, 32768, false, true),
@@ -64,6 +70,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.openai.com/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "gpt-5.4",
         models: &[
             m("gpt-5.4", 200_000, 16384, false, true),
@@ -83,6 +90,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://chatgpt.com/backend-api/codex",
         needs_key: false,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "gpt-5.4",
         models: &[
             m("gpt-5.4", 200_000, 16384, false, false),
@@ -100,6 +108,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://<your-resource>.openai.azure.com/openai/v1",
         needs_key: true,
         needs_base_url: true,
+        needs_aws_credentials: false,
         default_model: "gpt-5.4",
         models: &[
             m("gpt-5.4", 200_000, 16384, false, true),
@@ -117,6 +126,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://generativelanguage.googleapis.com/v1beta",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "gemini-2.5-pro",
         models: &[
             m("gemini-2.5-pro", 1_000_000, 65536, false, true),
@@ -130,6 +140,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.deepseek.com/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "deepseek-chat",
         models: &[
             m("deepseek-chat", 65_536, 8192, false, false),
@@ -142,6 +153,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.groq.com/openai/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "llama-3.3-70b-versatile",
         models: &[
             m("llama-3.3-70b-versatile", 128_000, 32768, false, false),
@@ -154,6 +166,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "http://localhost:11434/v1",
         needs_key: false,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "llama3.2",
         models: &[
             m("llama3.2", 128_000, 8192, false, false),
@@ -167,6 +180,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://openrouter.ai/api/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "anthropic/claude-sonnet-4-6",
         models: &[
             m("openai/gpt-5.4", 200_000, 16384, false, true),
@@ -182,6 +196,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.together.xyz/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         models: &[
             m(
@@ -206,6 +221,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.fireworks.ai/inference/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
         models: &[
             m(
@@ -230,6 +246,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "qwen-max",
         models: &[
             m("qwen-max", 32_768, 8192, false, false),
@@ -244,6 +261,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.moonshot.cn/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "kimi-k2.5",
         models: &[
             // Flagship multimodal
@@ -276,6 +294,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://open.bigmodel.cn/api/paas/v4",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "glm-4-plus",
         models: &[
             m("glm-4-plus", 128_000, 4096, false, true),
@@ -290,6 +309,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://api.minimax.chat/v1",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "MiniMax-Text-01",
         models: &[
             m("MiniMax-Text-01", 1_000_000, 8192, false, false),
@@ -302,6 +322,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://ark.cn-beijing.volces.com/api/v3",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "doubao-pro-128k",
         models: &[
             m("doubao-pro-128k", 128_000, 4096, false, false),
@@ -315,6 +336,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         api_base: "https://qianfan.baidubce.com/v2",
         needs_key: true,
         needs_base_url: false,
+        needs_aws_credentials: false,
         default_model: "ernie-4.0-8k",
         models: &[
             m("ernie-4.0-8k", 8_192, 4096, false, false),
@@ -323,11 +345,75 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         ],
     },
     ProviderPreset {
+        id: "bedrock",
+        name: "Amazon Bedrock",
+        api_base: "",
+        needs_key: false,
+        needs_base_url: false,
+        needs_aws_credentials: true,
+        default_model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        models: &[
+            m(
+                "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                200_000,
+                8192,
+                false,
+                true,
+            ),
+            m(
+                "anthropic.claude-3-5-haiku-20241022-v1:0",
+                200_000,
+                8192,
+                false,
+                true,
+            ),
+            m(
+                "us.anthropic.claude-sonnet-4-20250514-v1:0",
+                200_000,
+                16384,
+                false,
+                true,
+            ),
+            m(
+                "us.anthropic.claude-opus-4-20250514-v1:0",
+                200_000,
+                32768,
+                false,
+                true,
+            ),
+            m(
+                "meta.llama3-1-70b-instruct-v1:0",
+                128_000,
+                4096,
+                false,
+                false,
+            ),
+            m(
+                "meta.llama3-1-405b-instruct-v1:0",
+                128_000,
+                4096,
+                false,
+                false,
+            ),
+            m("amazon.nova-pro-v1:0", 300_000, 5000, false, true),
+            m("amazon.nova-lite-v1:0", 300_000, 5000, false, true),
+            m(
+                "mistral.mistral-large-2407-v1:0",
+                128_000,
+                8192,
+                false,
+                false,
+            ),
+            m("cohere.command-r-plus-v1:0", 128_000, 4096, false, false),
+        ],
+    },
+    ProviderPreset {
         id: "custom",
         name: "Custom (OpenAI Compatible)",
         api_base: "",
         needs_key: false,
         needs_base_url: true,
+        needs_aws_credentials: false,
         default_model: "",
         models: &[],
     },

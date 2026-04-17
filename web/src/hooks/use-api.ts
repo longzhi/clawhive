@@ -168,6 +168,11 @@ export interface CreateProviderRequest {
   auth_profile?: string;
   provider_type?: string;
   models: string[];
+  // Bedrock / AWS fields
+  aws_access_key_id?: string;
+  aws_secret_access_key?: string;
+  aws_session_token?: string;
+  region?: string;
 }
 
 export interface CreateAgentRequest {
@@ -559,6 +564,7 @@ export interface ProviderPreset {
   api_base: string;
   needs_key: boolean;
   needs_base_url: boolean;
+  needs_aws_credentials?: boolean;
   default_model: string;
   models: ModelPresetInfo[];
 }

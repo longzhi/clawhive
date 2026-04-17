@@ -118,6 +118,7 @@ async fn get_provider_presets() -> Json<Vec<serde_json::Value>> {
                 "api_base": p.api_base,
                 "needs_key": p.needs_key,
                 "needs_base_url": p.needs_base_url,
+                "needs_aws_credentials": p.needs_aws_credentials,
                 "default_model": p.default_model,
                 "models": p.models,
             })
@@ -136,6 +137,15 @@ struct ListModelsRequest {
     api_key: Option<String>,
     #[serde(default)]
     base_url: Option<String>,
+    // Bedrock / AWS fields
+    #[serde(default)]
+    aws_access_key_id: Option<String>,
+    #[serde(default)]
+    aws_secret_access_key: Option<String>,
+    #[serde(default)]
+    aws_session_token: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +188,10 @@ async fn list_models_handler(
     if let Some(url) = req.base_url {
         config = config.with_base_url(url);
     }
+    config.aws_access_key_id = req.aws_access_key_id;
+    config.aws_secret_access_key = req.aws_secret_access_key;
+    config.aws_session_token = req.aws_session_token;
+    config.region = req.region;
 
     let provider = clawhive_provider::create_provider(&config)
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;

@@ -36,6 +36,15 @@ pub struct CreateProviderRequest {
     pub provider_type: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    // Bedrock / AWS fields
+    #[serde(default)]
+    pub aws_access_key_id: Option<String>,
+    #[serde(default)]
+    pub aws_secret_access_key: Option<String>,
+    #[serde(default)]
+    pub aws_session_token: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -163,6 +172,21 @@ async fn create_provider(
             serde_yaml::Value::String("provider_type".to_string()),
             serde_yaml::Value::String(pt),
         );
+    }
+
+    // Bedrock / AWS fields — only serialized when non-empty.
+    for (field, maybe) in [
+        ("aws_access_key_id", body.aws_access_key_id),
+        ("aws_secret_access_key", body.aws_secret_access_key),
+        ("aws_session_token", body.aws_session_token),
+        ("region", body.region),
+    ] {
+        if let Some(v) = maybe.filter(|v| !v.trim().is_empty()) {
+            val.insert(
+                serde_yaml::Value::String(field.to_string()),
+                serde_yaml::Value::String(v),
+            );
+        }
     }
 
     val.insert(
