@@ -20,6 +20,8 @@ thiserror.workspace = true
 clawhive-auth = { path = "../clawhive-auth" }
 uuid = { workspace = true, features = ["v4"] }
 aws-sigv4.workspace = true
+aws-credential-types.workspace = true
+aws-smithy-runtime-api.workspace = true
 crc32fast.workspace = true
 urlencoding.workspace = true
 
