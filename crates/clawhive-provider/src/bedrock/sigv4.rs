@@ -24,6 +24,10 @@ pub struct AwsCredentials {
 }
 
 /// Service name for AWS Bedrock runtime (used in SigV4 credential scope).
+///
+/// Note: the hostname is `bedrock-runtime.{region}.amazonaws.com`, but the
+/// SigV4 service name in the credential scope is just `bedrock`. Do not
+/// "correct" this to `bedrock-runtime` — AWS will return `InvalidSignatureException`.
 const SERVICE_NAME: &str = "bedrock";
 
 /// Sign a Bedrock HTTP request with the current timestamp.
@@ -62,7 +66,9 @@ pub fn sign_bedrock_request_at(
     .into();
 
     // Bedrock expects `x-amz-content-sha256` in the canonical request, so we
-    // opt into `XAmzSha256` (default is `NoHeader`).
+    // opt into `XAmzSha256` (default is `NoHeader`). `session_token_mode`
+    // intentionally stays at the default (`Include`) — Bedrock signs the
+    // session token into the canonical request.
     let mut settings = SigningSettings::default();
     settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
     let signing_params = v4::SigningParams::builder()
@@ -125,8 +131,32 @@ mod tests {
         assert!(map["authorization"]
             .contains("Credential=AKIAIOSFODNN7EXAMPLE/20240115/us-west-2/bedrock/aws4_request"));
         assert_eq!(map["x-amz-date"], "20240115T120000Z");
-        assert!(map.contains_key("x-amz-content-sha256"));
-        assert_eq!(map["x-amz-content-sha256"].len(), 64);
+        // Verify `x-amz-content-sha256` is the *actual* SHA256 of the body,
+        // not a constant / UNSIGNED-PAYLOAD / precomputed stub.
+        use sha2::{Digest, Sha256};
+        let expected = hex::encode(Sha256::digest(body));
+        assert_eq!(map["x-amz-content-sha256"], expected);
+    }
+
+    #[test]
+    fn sign_different_bodies_produce_different_signatures() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIA".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+        };
+        let url = "https://bedrock-runtime.us-west-2.amazonaws.com/model/x/converse";
+        let auth = |body: &[u8]| -> String {
+            let headers =
+                sign_bedrock_request_at(&creds, "us-west-2", "POST", url, body, fixed_time())
+                    .unwrap();
+            headers
+                .into_iter()
+                .find(|(k, _)| k.as_str() == "authorization")
+                .map(|(_, v)| v.to_str().unwrap().to_string())
+                .unwrap()
+        };
+        assert_ne!(auth(b"body-one"), auth(b"body-two"));
     }
 
     #[test]
