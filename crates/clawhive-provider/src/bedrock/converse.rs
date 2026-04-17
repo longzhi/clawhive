@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-use crate::types::{ContentBlock, LlmMessage, LlmRequest, LlmResponse, ThinkingLevel};
+use crate::types::{ContentBlock, LlmMessage, LlmRequest, LlmResponse, StreamChunk, ThinkingLevel};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -277,6 +277,141 @@ pub fn from_converse_response(raw: JsonValue) -> Result<LlmResponse> {
         output_tokens,
         stop_reason,
     })
+}
+
+/// Accumulates Bedrock Converse stream events into `StreamChunk`s.
+///
+/// Bedrock streams fragment assistant output across many small events:
+/// `messageStart`, interleaved `contentBlockStart`/`contentBlockDelta`/
+/// `contentBlockStop` per block (text or toolUse), then `messageStop`
+/// followed by `metadata` carrying usage and the final sentinel.
+///
+/// `apply` maps one event to zero-or-one downstream `StreamChunk`s.
+#[derive(Debug, Default)]
+#[allow(dead_code)] // consumed by Batch 6 stream() implementation
+pub struct ConverseStreamState {
+    open_tool_uses: std::collections::HashMap<u32, OpenToolUse>,
+    pending_stop_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct OpenToolUse {
+    id: String,
+    name: String,
+    input_json: String, // accumulated partial JSON chunks
+}
+
+#[allow(dead_code)] // consumed by Batch 6 stream() implementation
+impl ConverseStreamState {
+    /// Apply a Converse stream event (parsed JSON payload) and optionally
+    /// return a `StreamChunk` to yield downstream.
+    pub fn apply(&mut self, event_type: &str, payload: JsonValue) -> Result<Option<StreamChunk>> {
+        match event_type {
+            "messageStart" => Ok(None),
+            "contentBlockStart" => {
+                if let Some(tool_use) = payload.pointer("/start/toolUse") {
+                    let idx = content_block_index(&payload);
+                    let id = tool_use
+                        .get("toolUseId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = tool_use
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.open_tool_uses.insert(
+                        idx,
+                        OpenToolUse {
+                            id,
+                            name,
+                            input_json: String::new(),
+                        },
+                    );
+                }
+                Ok(None)
+            }
+            "contentBlockDelta" => {
+                if let Some(text) = payload.pointer("/delta/text").and_then(|v| v.as_str()) {
+                    return Ok(Some(StreamChunk {
+                        delta: text.to_string(),
+                        is_final: false,
+                        input_tokens: None,
+                        output_tokens: None,
+                        stop_reason: None,
+                        content_blocks: vec![],
+                    }));
+                }
+                if let Some(partial) = payload
+                    .pointer("/delta/toolUse/input")
+                    .and_then(|v| v.as_str())
+                {
+                    let idx = content_block_index(&payload);
+                    if let Some(open) = self.open_tool_uses.get_mut(&idx) {
+                        open.input_json.push_str(partial);
+                    }
+                }
+                Ok(None)
+            }
+            "contentBlockStop" => {
+                let idx = content_block_index(&payload);
+                if let Some(open) = self.open_tool_uses.remove(&idx) {
+                    let input = if open.input_json.is_empty() {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::from_str(&open.input_json)
+                            .unwrap_or_else(|_| serde_json::json!({}))
+                    };
+                    return Ok(Some(StreamChunk {
+                        delta: String::new(),
+                        is_final: false,
+                        input_tokens: None,
+                        output_tokens: None,
+                        stop_reason: None,
+                        content_blocks: vec![ContentBlock::ToolUse {
+                            id: open.id,
+                            name: open.name,
+                            input,
+                        }],
+                    }));
+                }
+                Ok(None)
+            }
+            "messageStop" => {
+                if let Some(reason) = payload.get("stopReason").and_then(|v| v.as_str()) {
+                    self.pending_stop_reason = Some(reason.to_string());
+                }
+                Ok(None)
+            }
+            "metadata" => {
+                let input_tokens = payload
+                    .pointer("/usage/inputTokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let output_tokens = payload
+                    .pointer("/usage/outputTokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                Ok(Some(StreamChunk {
+                    delta: String::new(),
+                    is_final: true,
+                    input_tokens,
+                    output_tokens,
+                    stop_reason: self.pending_stop_reason.take(),
+                    content_blocks: vec![],
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+fn content_block_index(payload: &JsonValue) -> u32 {
+    payload
+        .get("contentBlockIndex")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
 }
 
 #[cfg(test)]
@@ -561,5 +696,96 @@ mod tests {
             json.get("additionalModelRequestFields").is_none()
                 || json["additionalModelRequestFields"].is_null()
         );
+    }
+
+    #[test]
+    fn stream_state_text_delta_yields_chunk() {
+        let mut s = ConverseStreamState::default();
+        let chunk = s
+            .apply(
+                "contentBlockDelta",
+                serde_json::json!({
+                    "contentBlockIndex": 0,
+                    "delta": {"text": "hello"}
+                }),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.delta, "hello");
+        assert!(!chunk.is_final);
+    }
+
+    #[test]
+    fn stream_state_tool_use_accumulates_and_emits_on_stop() {
+        let mut s = ConverseStreamState::default();
+        s.apply(
+            "contentBlockStart",
+            serde_json::json!({
+                "contentBlockIndex": 1,
+                "start": {"toolUse": {"toolUseId":"tid","name":"search"}}
+            }),
+        )
+        .unwrap();
+        s.apply(
+            "contentBlockDelta",
+            serde_json::json!({
+                "contentBlockIndex": 1,
+                "delta": {"toolUse": {"input": "{\"q\":\"ru"}}
+            }),
+        )
+        .unwrap();
+        s.apply(
+            "contentBlockDelta",
+            serde_json::json!({
+                "contentBlockIndex": 1,
+                "delta": {"toolUse": {"input": "st\"}"}}
+            }),
+        )
+        .unwrap();
+        let chunk = s
+            .apply(
+                "contentBlockStop",
+                serde_json::json!({
+                    "contentBlockIndex": 1
+                }),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.content_blocks.len(), 1);
+        match &chunk.content_blocks[0] {
+            crate::types::ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "tid");
+                assert_eq!(name, "search");
+                assert_eq!(input["q"], "rust");
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn stream_state_metadata_yields_final_chunk_with_usage() {
+        let mut s = ConverseStreamState::default();
+        s.apply("messageStop", serde_json::json!({"stopReason": "end_turn"}))
+            .unwrap();
+        let chunk = s
+            .apply(
+                "metadata",
+                serde_json::json!({
+                    "usage": {"inputTokens": 10, "outputTokens": 5}
+                }),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(chunk.is_final);
+        assert_eq!(chunk.input_tokens, Some(10));
+        assert_eq!(chunk.output_tokens, Some(5));
+        assert_eq!(chunk.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[test]
+    fn stream_state_ignores_unknown_event() {
+        let mut s = ConverseStreamState::default();
+        let r = s.apply("futureEventType", serde_json::json!({})).unwrap();
+        assert!(r.is_none());
     }
 }
