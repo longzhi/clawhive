@@ -164,94 +164,121 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvider>, 
             })
     };
 
-    let provider: Arc<dyn LlmProvider> = match config.provider_type {
-        ProviderType::Anthropic => {
-            let key = require_key("anthropic")?;
-            let base_url = config
-                .base_url
-                .as_deref()
-                .unwrap_or("https://api.anthropic.com");
-            Arc::new(AnthropicProvider::new(key, base_url))
-        }
-        ProviderType::OpenAI => {
-            let key = require_key("openai")?;
-            let base_url = config
-                .base_url
-                .as_deref()
-                .unwrap_or("https://api.openai.com/v1");
-            Arc::new(OpenAiProvider::new(key, base_url))
-        }
-        ProviderType::AzureOpenAI => {
-            let key = require_key("azure-openai")?;
-            let base_url = require_base_url("azure-openai")?;
-            Arc::new(AzureOpenAiProvider::new(key, base_url))
-        }
-        ProviderType::Bedrock => {
-            return Err(ProviderError::Other(anyhow::anyhow!(
-                "bedrock provider not yet implemented"
-            )));
-        }
-        ProviderType::Gemini => {
-            let key = require_key("gemini")?;
-            Arc::new(GeminiProvider::new(key))
-        }
-        ProviderType::DeepSeek => {
-            let key = require_key("deepseek")?;
-            Arc::new(deepseek(key))
-        }
-        ProviderType::Groq => {
-            let key = require_key("groq")?;
-            Arc::new(groq(key))
-        }
-        ProviderType::Ollama => {
-            let base_url = config
-                .base_url
-                .as_deref()
-                .unwrap_or("http://localhost:11434/v1");
-            Arc::new(ollama_with_base(base_url))
-        }
-        ProviderType::OpenRouter => {
-            let key = require_key("openrouter")?;
-            Arc::new(openrouter(key))
-        }
-        ProviderType::Together => {
-            let key = require_key("together")?;
-            Arc::new(together(key))
-        }
-        ProviderType::Fireworks => {
-            let key = require_key("fireworks")?;
-            Arc::new(fireworks(key))
-        }
-        ProviderType::Custom => {
-            let key = require_key("custom")?;
-            let base_url = require_base_url("custom")?;
-            Arc::new(custom(key, base_url))
-        }
-        ProviderType::Qwen => {
-            let key = require_key("qwen")?;
-            Arc::new(qwen(key))
-        }
-        ProviderType::Moonshot => {
-            let key = require_key("moonshot")?;
-            Arc::new(moonshot(key))
-        }
-        ProviderType::Zhipu => {
-            let key = require_key("zhipu")?;
-            Arc::new(zhipu(key))
-        }
-        ProviderType::MiniMax => {
-            let key = require_key("minimax")?;
-            Arc::new(minimax(key))
-        }
-        ProviderType::Volcengine => {
-            let key = require_key("volcengine")?;
-            Arc::new(volcengine(key))
-        }
-        ProviderType::Qianfan => {
-            let key = require_key("qianfan")?;
-            Arc::new(qianfan(key))
-        }
-    };
+    let provider: Arc<dyn LlmProvider> =
+        match config.provider_type {
+            ProviderType::Anthropic => {
+                let key = require_key("anthropic")?;
+                let base_url = config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("https://api.anthropic.com");
+                Arc::new(AnthropicProvider::new(key, base_url))
+            }
+            ProviderType::OpenAI => {
+                let key = require_key("openai")?;
+                let base_url = config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1");
+                Arc::new(OpenAiProvider::new(key, base_url))
+            }
+            ProviderType::AzureOpenAI => {
+                let key = require_key("azure-openai")?;
+                let base_url = require_base_url("azure-openai")?;
+                Arc::new(AzureOpenAiProvider::new(key, base_url))
+            }
+            ProviderType::Bedrock => {
+                use crate::bedrock::sigv4::AwsCredentials;
+                use crate::bedrock::BedrockProvider;
+                let access_key_id = config.aws_access_key_id.clone().ok_or_else(|| {
+                    ProviderError::MissingConfig {
+                        provider: "bedrock".into(),
+                        field: "aws_access_key_id",
+                    }
+                })?;
+                let secret_access_key = config.aws_secret_access_key.clone().ok_or_else(|| {
+                    ProviderError::MissingConfig {
+                        provider: "bedrock".into(),
+                        field: "aws_secret_access_key",
+                    }
+                })?;
+                let region = config
+                    .region
+                    .clone()
+                    .ok_or_else(|| ProviderError::MissingConfig {
+                        provider: "bedrock".into(),
+                        field: "region",
+                    })?;
+                Arc::new(BedrockProvider::new(
+                    AwsCredentials {
+                        access_key_id,
+                        secret_access_key,
+                        session_token: config.aws_session_token.clone(),
+                    },
+                    region,
+                ))
+            }
+            ProviderType::Gemini => {
+                let key = require_key("gemini")?;
+                Arc::new(GeminiProvider::new(key))
+            }
+            ProviderType::DeepSeek => {
+                let key = require_key("deepseek")?;
+                Arc::new(deepseek(key))
+            }
+            ProviderType::Groq => {
+                let key = require_key("groq")?;
+                Arc::new(groq(key))
+            }
+            ProviderType::Ollama => {
+                let base_url = config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("http://localhost:11434/v1");
+                Arc::new(ollama_with_base(base_url))
+            }
+            ProviderType::OpenRouter => {
+                let key = require_key("openrouter")?;
+                Arc::new(openrouter(key))
+            }
+            ProviderType::Together => {
+                let key = require_key("together")?;
+                Arc::new(together(key))
+            }
+            ProviderType::Fireworks => {
+                let key = require_key("fireworks")?;
+                Arc::new(fireworks(key))
+            }
+            ProviderType::Custom => {
+                let key = require_key("custom")?;
+                let base_url = require_base_url("custom")?;
+                Arc::new(custom(key, base_url))
+            }
+            ProviderType::Qwen => {
+                let key = require_key("qwen")?;
+                Arc::new(qwen(key))
+            }
+            ProviderType::Moonshot => {
+                let key = require_key("moonshot")?;
+                Arc::new(moonshot(key))
+            }
+            ProviderType::Zhipu => {
+                let key = require_key("zhipu")?;
+                Arc::new(zhipu(key))
+            }
+            ProviderType::MiniMax => {
+                let key = require_key("minimax")?;
+                Arc::new(minimax(key))
+            }
+            ProviderType::Volcengine => {
+                let key = require_key("volcengine")?;
+                Arc::new(volcengine(key))
+            }
+            ProviderType::Qianfan => {
+                let key = require_key("qianfan")?;
+                Arc::new(qianfan(key))
+            }
+        };
     Ok(provider)
 }
 
@@ -539,4 +566,47 @@ fn provider_config_bedrock_omits_optional_fields() {
     let json = serde_json::to_value(&config).unwrap();
     assert!(json.get("aws_access_key_id").is_none());
     assert!(json.get("region").is_none());
+}
+
+#[test]
+fn create_provider_bedrock_requires_aws_access_key_id() {
+    let config = ProviderConfig::new("my-bedrock", ProviderType::Bedrock);
+    let err = create_provider(&config).err().unwrap();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("aws_access_key_id"),
+        "expected aws_access_key_id in: {msg}"
+    );
+}
+
+#[test]
+fn create_provider_bedrock_requires_secret_access_key() {
+    let mut config = ProviderConfig::new("my-bedrock", ProviderType::Bedrock);
+    config.aws_access_key_id = Some("AKIA".into());
+    let err = create_provider(&config).err().unwrap();
+    assert!(err.to_string().contains("aws_secret_access_key"));
+}
+
+#[test]
+fn create_provider_bedrock_requires_region() {
+    let mut config = ProviderConfig::new("my-bedrock", ProviderType::Bedrock);
+    config.aws_access_key_id = Some("AKIA".into());
+    config.aws_secret_access_key = Some("secret".into());
+    let err = create_provider(&config).err().unwrap();
+    assert!(err.to_string().contains("region"));
+}
+
+#[test]
+fn create_provider_bedrock_success() {
+    let config = ProviderConfig {
+        id: "my-bedrock".into(),
+        provider_type: ProviderType::Bedrock,
+        api_key: None,
+        base_url: None,
+        aws_access_key_id: Some("AKIA".into()),
+        aws_secret_access_key: Some("secret".into()),
+        aws_session_token: Some("t".into()),
+        region: Some("us-west-2".into()),
+    };
+    assert!(create_provider(&config).is_ok());
 }
