@@ -234,4 +234,128 @@ mod tests {
         assert!(json.get("system").is_none());
         assert_eq!(json["inferenceConfig"]["maxTokens"], 512);
     }
+
+    #[test]
+    fn to_converse_request_with_image() {
+        use crate::types::ContentBlock;
+        let req = LlmRequest {
+            model: "anthropic.claude-3-5-sonnet-20241022-v2:0".into(),
+            system: None,
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "what's this?".into(),
+                    },
+                    ContentBlock::Image {
+                        data: "iVBORw0KGgo=".into(),
+                        media_type: "image/png".into(),
+                    },
+                ],
+            }],
+            max_tokens: 1024,
+            tools: vec![],
+            thinking_level: None,
+        };
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        assert_eq!(json["messages"][0]["content"][0]["text"], "what's this?");
+        assert_eq!(json["messages"][0]["content"][1]["image"]["format"], "png");
+        assert_eq!(
+            json["messages"][0]["content"][1]["image"]["source"]["bytes"],
+            "iVBORw0KGgo="
+        );
+    }
+
+    #[test]
+    fn to_converse_request_with_tool_use_and_result() {
+        use crate::types::{ContentBlock, ToolDef};
+        let req = LlmRequest {
+            model: "anthropic.claude-3-5-sonnet-20241022-v2:0".into(),
+            system: None,
+            messages: vec![
+                LlmMessage::user("search rust"),
+                LlmMessage {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "search".into(),
+                        input: serde_json::json!({"q": "rust"}),
+                    }],
+                },
+                LlmMessage {
+                    role: "user".into(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        content: "no results".into(),
+                        is_error: false,
+                    }],
+                },
+            ],
+            max_tokens: 1024,
+            tools: vec![ToolDef {
+                name: "search".into(),
+                description: "search the web".into(),
+                input_schema: serde_json::json!({"type":"object","properties":{"q":{"type":"string"}}}),
+            }],
+            thinking_level: None,
+        };
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        assert_eq!(json["toolConfig"]["tools"][0]["toolSpec"]["name"], "search");
+        assert_eq!(
+            json["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"]["type"],
+            "object"
+        );
+        assert_eq!(
+            json["messages"][1]["content"][0]["toolUse"]["toolUseId"],
+            "toolu_1"
+        );
+        assert_eq!(
+            json["messages"][1]["content"][0]["toolUse"]["name"],
+            "search"
+        );
+        assert_eq!(
+            json["messages"][1]["content"][0]["toolUse"]["input"]["q"],
+            "rust"
+        );
+        assert_eq!(
+            json["messages"][2]["content"][0]["toolResult"]["toolUseId"],
+            "toolu_1"
+        );
+        assert_eq!(
+            json["messages"][2]["content"][0]["toolResult"]["status"],
+            "success"
+        );
+        assert_eq!(
+            json["messages"][2]["content"][0]["toolResult"]["content"][0]["text"],
+            "no results"
+        );
+    }
+
+    #[test]
+    fn to_converse_request_tool_result_error_status() {
+        use crate::types::ContentBlock;
+        let req = LlmRequest {
+            model: "x".into(),
+            system: None,
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "boom".into(),
+                    is_error: true,
+                }],
+            }],
+            max_tokens: 100,
+            tools: vec![],
+            thinking_level: None,
+        };
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        assert_eq!(
+            json["messages"][0]["content"][0]["toolResult"]["status"],
+            "error"
+        );
+    }
 }
