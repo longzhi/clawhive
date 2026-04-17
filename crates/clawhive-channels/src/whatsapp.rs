@@ -153,9 +153,9 @@ pub async fn run_pairing(
         .on_event(move |event, _client| {
             let tx = tx_event.clone();
             async move {
-                match event {
+                match event.as_ref() {
                     Event::PairingQrCode { code, timeout } => {
-                        let _ = tx.send(PairStatus::QrCode(code, timeout)).await;
+                        let _ = tx.send(PairStatus::QrCode(code.clone(), *timeout)).await;
                     }
                     Event::PairSuccess { .. } => {
                         let _ = tx.send(PairStatus::Paired).await;
@@ -206,7 +206,7 @@ pub async fn start_whatsapp(
             let policy = policy_for_bot.clone();
 
             async move {
-                match event {
+                match event.as_ref() {
                     Event::PairingQrCode { code, .. } => {
                         tracing::info!("WhatsApp QR code for pairing:\n{}", code);
                     }
@@ -234,7 +234,7 @@ pub async fn start_whatsapp(
                                 }
                             } else {
                                 is_self_chat = false;
-                                &msg
+                                msg
                             };
 
                         let chat_jid = info.source.chat.to_string();
@@ -251,25 +251,26 @@ pub async fn start_whatsapp(
 
                         let policy_jid = if sender_jid.ends_with("@lid") {
                             let lid_user = extract_number_from_jid(&sender_jid);
-                            if let Some(phone) = client.get_phone_number_from_lid(&lid_user).await {
+                            let lid_jid = Jid::lid(&lid_user);
+                            if let Some(entry) = client.get_lid_pn_entry(&lid_jid).await {
                                 tracing::info!(
                                     lid = %lid_user,
-                                    resolved_phone = %phone,
+                                    resolved_phone = %entry.phone_number,
                                     "LID resolved to phone number"
                                 );
-                                format!("{phone}@s.whatsapp.net")
+                                format!("{}@s.whatsapp.net", entry.phone_number)
                             } else {
                                 // LID cache may not be populated yet — retry once after a short delay
                                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                                if let Some(phone) =
-                                    client.get_phone_number_from_lid(&lid_user).await
+                                if let Some(entry) =
+                                    client.get_lid_pn_entry(&lid_jid).await
                                 {
                                     tracing::info!(
                                         lid = %lid_user,
-                                        resolved_phone = %phone,
+                                        resolved_phone = %entry.phone_number,
                                         "LID resolved to phone number (retry)"
                                     );
-                                    format!("{phone}@s.whatsapp.net")
+                                    format!("{}@s.whatsapp.net", entry.phone_number)
                                 } else {
                                     tracing::warn!(
                                         lid = %lid_user,
