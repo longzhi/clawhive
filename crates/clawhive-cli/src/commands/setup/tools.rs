@@ -43,6 +43,7 @@ pub(super) fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) 
         enabled: enable_ws,
         provider: provider.clone(),
         api_key: api_key.clone(),
+        providers: vec![],
     });
     save_main_config(config_root, &cfg)?;
 

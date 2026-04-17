@@ -40,7 +40,7 @@ pub mod templates;
 pub mod tool;
 pub mod wait_tool;
 pub mod web_fetch_tool;
-pub mod web_search_tool;
+pub mod web_search;
 pub mod workspace;
 mod workspace_manager;
 
@@ -80,7 +80,7 @@ pub use subagent_tool::*;
 pub use templates::*;
 pub use tool::*;
 pub use web_fetch_tool::*;
-pub use web_search_tool::*;
+pub use web_search::*;
 pub use workspace::*;
 
 use clawhive_provider::ThinkingLevel;

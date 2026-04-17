@@ -609,17 +609,15 @@ pub async fn build_embedding_provider(config: &ClawhiveConfig) -> Arc<dyn Embedd
                 return Arc::new(ollama);
             }
         }
-        "gemini" | "google" => {
-            if !embedding_config.api_key.is_empty() {
-                return Arc::new(
-                    GeminiEmbeddingProvider::with_model(
-                        embedding_config.api_key.clone(),
-                        embedding_config.model.clone(),
-                        embedding_config.dimensions,
-                    )
-                    .with_base_url(embedding_config.base_url.clone()),
-                );
-            }
+        "gemini" | "google" if !embedding_config.api_key.is_empty() => {
+            return Arc::new(
+                GeminiEmbeddingProvider::with_model(
+                    embedding_config.api_key.clone(),
+                    embedding_config.model.clone(),
+                    embedding_config.dimensions,
+                )
+                .with_base_url(embedding_config.base_url.clone()),
+            );
         }
         _ => {}
     }
@@ -662,6 +660,54 @@ pub async fn build_personas_from_config(
     personas
 }
 
+pub fn build_search_providers(
+    tools: &crate::config::ToolsConfig,
+) -> Vec<std::sync::Arc<dyn crate::web_search::provider::SearchProvider>> {
+    let Some(ws_config) = &tools.web_search else {
+        return vec![];
+    };
+    if !ws_config.enabled {
+        return vec![];
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    ws_config
+        .resolved_providers()
+        .into_iter()
+        .filter_map(
+            |p| -> Option<std::sync::Arc<dyn crate::web_search::provider::SearchProvider>> {
+                match p.provider.as_str() {
+                    "brave" => Some(std::sync::Arc::new(
+                        crate::web_search::brave::BraveSearchProvider::new(
+                            p.api_key,
+                            client.clone(),
+                        ),
+                    )),
+                    "tavily" => Some(std::sync::Arc::new(
+                        crate::web_search::tavily::TavilySearchProvider::new(
+                            p.api_key,
+                            client.clone(),
+                        ),
+                    )),
+                    "serper" => Some(std::sync::Arc::new(
+                        crate::web_search::serper::SerperSearchProvider::new(
+                            p.api_key,
+                            client.clone(),
+                        ),
+                    )),
+                    other => {
+                        tracing::warn!(provider = other, "unknown web search provider, skipping");
+                        None
+                    }
+                }
+            },
+        )
+        .collect()
+}
+
 pub async fn build_config_view(
     config: &ClawhiveConfig,
     generation: u64,
@@ -680,14 +726,7 @@ pub async fn build_config_view(
         "",
         to_search_config(&config.main.memory_search),
     );
-    let brave_api_key = config
-        .main
-        .tools
-        .web_search
-        .as_ref()
-        .filter(|cfg| cfg.enabled)
-        .and_then(|cfg| cfg.api_key.clone())
-        .filter(|key| !key.is_empty());
+    let search_providers = build_search_providers(&config.main.tools);
     let router_arc = Arc::new(router.clone());
     let tool_registry = build_tool_registry(
         &file_store,
@@ -699,7 +738,7 @@ pub async fn build_config_view(
         approval_registry,
         publisher,
         schedule_manager,
-        brave_api_key,
+        search_providers,
         &router_arc,
         &config.agents,
         &personas,

@@ -413,7 +413,7 @@ fn build_test_config_view(
         &None,
         deps.publisher,
         deps.schedule_manager,
-        None,
+        vec![],
         &router,
         &agents,
         &personas,

@@ -305,14 +305,47 @@ pub struct ChannelsConfig {
     pub weixin: Option<WeixinChannelConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchProviderConfig {
+    pub provider: String,
+    pub api_key: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WebSearchConfig {
     #[serde(default)]
     pub enabled: bool,
+    // Legacy single-provider format (backward compat)
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    // New multi-provider format
+    #[serde(default)]
+    pub providers: Vec<WebSearchProviderConfig>,
+}
+
+impl WebSearchConfig {
+    /// Merge legacy and new format into a single provider list.
+    /// If both exist and overlap on provider name, the new format wins.
+    pub fn resolved_providers(&self) -> Vec<WebSearchProviderConfig> {
+        let mut result = self.providers.clone();
+
+        // Prepend legacy format if it's not already in the list
+        if let (Some(provider), Some(api_key)) = (&self.provider, &self.api_key) {
+            if !api_key.is_empty() && !result.iter().any(|p| p.provider == *provider) {
+                result.insert(
+                    0,
+                    WebSearchProviderConfig {
+                        provider: provider.clone(),
+                        api_key: api_key.clone(),
+                    },
+                );
+            }
+        }
+
+        result
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1673,5 +1706,88 @@ auth:
         let lc = agent.turn_lifecycle();
         assert_eq!(lc.turn_timeout_secs, 90);
         assert_eq!(lc.typing_ttl_secs, 90);
+    }
+
+    #[test]
+    fn resolved_providers_old_format_only() {
+        let cfg = WebSearchConfig {
+            enabled: true,
+            provider: Some("brave".into()),
+            api_key: Some("key1".into()),
+            providers: vec![],
+        };
+        let providers = cfg.resolved_providers();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider, "brave");
+        assert_eq!(providers[0].api_key, "key1");
+    }
+
+    #[test]
+    fn resolved_providers_new_format_only() {
+        let cfg = WebSearchConfig {
+            enabled: true,
+            provider: None,
+            api_key: None,
+            providers: vec![
+                WebSearchProviderConfig {
+                    provider: "brave".into(),
+                    api_key: "k1".into(),
+                },
+                WebSearchProviderConfig {
+                    provider: "tavily".into(),
+                    api_key: "k2".into(),
+                },
+            ],
+        };
+        let providers = cfg.resolved_providers();
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].provider, "brave");
+        assert_eq!(providers[1].provider, "tavily");
+    }
+
+    #[test]
+    fn resolved_providers_both_formats_dedup() {
+        let cfg = WebSearchConfig {
+            enabled: true,
+            provider: Some("brave".into()),
+            api_key: Some("key-old".into()),
+            providers: vec![
+                WebSearchProviderConfig {
+                    provider: "brave".into(),
+                    api_key: "key-new".into(),
+                },
+                WebSearchProviderConfig {
+                    provider: "tavily".into(),
+                    api_key: "k2".into(),
+                },
+            ],
+        };
+        let providers = cfg.resolved_providers();
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].provider, "brave");
+        assert_eq!(providers[0].api_key, "key-new");
+    }
+
+    #[test]
+    fn resolved_providers_both_formats_no_overlap() {
+        let cfg = WebSearchConfig {
+            enabled: true,
+            provider: Some("brave".into()),
+            api_key: Some("key-old".into()),
+            providers: vec![WebSearchProviderConfig {
+                provider: "tavily".into(),
+                api_key: "k2".into(),
+            }],
+        };
+        let providers = cfg.resolved_providers();
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].provider, "brave");
+        assert_eq!(providers[1].provider, "tavily");
+    }
+
+    #[test]
+    fn resolved_providers_empty() {
+        let cfg = WebSearchConfig::default();
+        assert!(cfg.resolved_providers().is_empty());
     }
 }

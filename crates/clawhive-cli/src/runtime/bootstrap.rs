@@ -461,14 +461,8 @@ pub(crate) async fn bootstrap(
         to_search_config(&config.main.memory_search),
     );
 
-    let brave_api_key = config
-        .main
-        .tools
-        .web_search
-        .as_ref()
-        .filter(|ws| ws.enabled)
-        .and_then(|ws| ws.api_key.clone())
-        .filter(|k| !k.is_empty());
+    let search_providers =
+        clawhive_core::runtime_config::build_search_providers(&config.main.tools);
 
     let tool_registry = build_tool_registry(
         &file_store,
@@ -480,7 +474,7 @@ pub(crate) async fn bootstrap(
         &Some(approval_registry.clone()),
         &publisher,
         Arc::clone(&schedule_manager),
-        brave_api_key.clone(),
+        search_providers,
         &router,
         &config.agents,
         &personas,

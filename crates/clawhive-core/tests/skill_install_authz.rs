@@ -95,7 +95,7 @@ async fn make_orchestrator(
         &approval_registry,
         &publisher,
         Arc::clone(&schedule_manager),
-        None,
+        vec![],
         &router,
         &agents,
         &personas,

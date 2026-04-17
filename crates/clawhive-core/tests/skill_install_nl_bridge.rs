@@ -90,7 +90,7 @@ async fn make_orchestrator() -> (Orchestrator, tempfile::TempDir) {
         &None,
         &publisher,
         Arc::clone(&schedule_manager),
-        None,
+        vec![],
         &router,
         &agents,
         &personas,

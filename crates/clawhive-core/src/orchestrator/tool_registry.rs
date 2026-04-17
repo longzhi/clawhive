@@ -21,7 +21,7 @@ use crate::schedule_tool::ScheduleTool;
 use crate::shell_tool::ExecuteCommandTool;
 use crate::tool::ToolRegistry;
 use crate::web_fetch_tool::WebFetchTool;
-use crate::web_search_tool::WebSearchTool;
+use crate::web_search::WebSearchTool;
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_tool_registry(
@@ -34,7 +34,7 @@ pub fn build_tool_registry(
     approval_registry: &Option<Arc<ApprovalRegistry>>,
     bus: &BusPublisher,
     schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
-    brave_api_key: Option<String>,
+    search_providers: Vec<std::sync::Arc<dyn crate::web_search::provider::SearchProvider>>,
     router: &LlmRouter,
     agents: &[FullAgentConfig],
     personas: &HashMap<String, Persona>,
@@ -127,10 +127,8 @@ pub fn build_tool_registry(
     registry.register(Box::new(ScheduleTool::new(schedule_manager)));
     registry.register(Box::new(crate::skill_tool::SkillTool::new()));
     registry.register(Box::new(crate::message_tool::MessageTool::new(bus.clone())));
-    if let Some(api_key) = brave_api_key {
-        if !api_key.is_empty() {
-            registry.register(Box::new(WebSearchTool::new(api_key)));
-        }
+    if !search_providers.is_empty() {
+        registry.register(Box::new(WebSearchTool::new(search_providers)));
     }
     registry
 }
@@ -183,7 +181,7 @@ mod tests {
             &None,
             &bus.publisher(),
             schedule_manager,
-            None,
+            vec![],
             &router,
             &agents,
             &personas,

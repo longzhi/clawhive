@@ -124,7 +124,7 @@ async fn make_orchestrator_with_provider(
         &None,
         &publisher,
         Arc::clone(&schedule_manager),
-        None,
+        vec![],
         &router,
         &agents,
         &personas,
