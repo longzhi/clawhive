@@ -240,7 +240,7 @@ impl MemoryFileStore {
             }
         }
 
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|x| std::cmp::Reverse(x.0));
         Ok(out)
     }
 
@@ -320,7 +320,7 @@ impl MemoryFileStore {
             }
         }
 
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|x| std::cmp::Reverse(x.0));
         Ok(out)
     }
 

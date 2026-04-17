@@ -119,11 +119,9 @@ impl App {
                 KeyCode::Up => {
                     self.approval_selected = self.approval_selected.saturating_sub(1);
                 }
-                KeyCode::Down => {
-                    if !self.pending_approvals.is_empty() {
-                        self.approval_selected =
-                            (self.approval_selected + 1).min(self.pending_approvals.len() - 1);
-                    }
+                KeyCode::Down if !self.pending_approvals.is_empty() => {
+                    self.approval_selected =
+                        (self.approval_selected + 1).min(self.pending_approvals.len() - 1);
                 }
                 KeyCode::Esc => {
                     self.approval_overlay = false;

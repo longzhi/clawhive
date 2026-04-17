@@ -226,11 +226,9 @@ fn to_llm_response(body: GeminiResponse) -> Result<LlmResponse, ProviderError> {
 
     for part in &candidate.content.parts {
         match part {
-            GeminiPart::Text { text: t } => {
-                if !t.is_empty() {
-                    text.push_str(t);
-                    content.push(ContentBlock::Text { text: t.clone() });
-                }
+            GeminiPart::Text { text: t } if !t.is_empty() => {
+                text.push_str(t);
+                content.push(ContentBlock::Text { text: t.clone() });
             }
             GeminiPart::FunctionCall { function_call } => {
                 content.push(ContentBlock::ToolUse {
@@ -291,18 +289,16 @@ fn parse_sse_stream(
                                     if let Some(candidate) = response.candidates.first() {
                                         for part in &candidate.content.parts {
                                             match part {
-                                                GeminiPart::Text { text } => {
-                                                    if !text.is_empty() {
-                                                        accumulated_text.push_str(text);
-                                                        yield Ok(StreamChunk {
-                                                            delta: text.clone(),
-                                                            is_final: false,
-                                                            input_tokens: None,
-                                                            output_tokens: None,
-                                                            stop_reason: None,
-                                                            content_blocks: vec![],
-                                                        });
-                                                    }
+                                                GeminiPart::Text { text } if !text.is_empty() => {
+                                                    accumulated_text.push_str(text);
+                                                    yield Ok(StreamChunk {
+                                                        delta: text.clone(),
+                                                        is_final: false,
+                                                        input_tokens: None,
+                                                        output_tokens: None,
+                                                        stop_reason: None,
+                                                        content_blocks: vec![],
+                                                    });
                                                 }
                                                 GeminiPart::FunctionCall { function_call } => {
                                                     tool_calls.push(ContentBlock::ToolUse {

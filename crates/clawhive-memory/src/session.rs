@@ -264,7 +264,7 @@ impl SessionReader {
             items.push((stem.to_owned(), modified));
         }
 
-        items.sort_by(|a, b| b.1.cmp(&a.1));
+        items.sort_by_key(|x| std::cmp::Reverse(x.1));
         Ok(items.into_iter().map(|(id, _)| id).collect())
     }
 }

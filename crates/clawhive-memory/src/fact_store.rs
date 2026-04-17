@@ -535,7 +535,7 @@ impl FactStore {
                     "UPDATE facts SET access_count = access_count + 1, last_accessed = ?1 \
                      WHERE id IN ({placeholders})"
                 ),
-                rusqlite::params_from_iter(std::iter::once(now).chain(ids.into_iter())),
+                rusqlite::params_from_iter(std::iter::once(now).chain(ids)),
             )?;
             Ok::<(), anyhow::Error>(())
         })

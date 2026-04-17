@@ -528,7 +528,7 @@ async fn list_conversations(
         }
     }
 
-    items.sort_by(|a, b| b.0.cmp(&a.0));
+    items.sort_by_key(|x| std::cmp::Reverse(x.0));
     Ok(Json(items.into_iter().map(|(_, item)| item).collect()))
 }
 

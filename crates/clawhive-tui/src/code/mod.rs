@@ -230,22 +230,22 @@ impl CodeApp {
                     self.history_scroll.ensure_bottom(self.history.len(), 20);
                 }
             }
-            BusMessage::ReplyReady { outbound } => {
-                if outbound.channel_type == "code" && outbound.connector_id == connector_id {
-                    if let Some(HistoryCell::AssistantText { is_streaming, .. }) =
-                        self.history.last_mut()
-                    {
-                        *is_streaming = false;
-                    }
-                    if !matches!(self.history.last(), Some(HistoryCell::AssistantText { .. })) {
-                        self.history.push(HistoryCell::AssistantText {
-                            text: outbound.text,
-                            is_streaming: false,
-                        });
-                    }
-                    self.is_running = false;
-                    self.history_scroll.ensure_bottom(self.history.len(), 20);
+            BusMessage::ReplyReady { outbound }
+                if outbound.channel_type == "code" && outbound.connector_id == connector_id =>
+            {
+                if let Some(HistoryCell::AssistantText { is_streaming, .. }) =
+                    self.history.last_mut()
+                {
+                    *is_streaming = false;
                 }
+                if !matches!(self.history.last(), Some(HistoryCell::AssistantText { .. })) {
+                    self.history.push(HistoryCell::AssistantText {
+                        text: outbound.text,
+                        is_streaming: false,
+                    });
+                }
+                self.is_running = false;
+                self.history_scroll.ensure_bottom(self.history.len(), 20);
             }
             BusMessage::TaskFailed { trace_id, error } => {
                 self.history.push(HistoryCell::Error {
