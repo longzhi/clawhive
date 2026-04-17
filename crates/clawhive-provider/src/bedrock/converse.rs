@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-use crate::types::{ContentBlock, LlmMessage, LlmRequest, LlmResponse};
+use crate::types::{ContentBlock, LlmMessage, LlmRequest, LlmResponse, ThinkingLevel};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +132,7 @@ pub fn to_converse_request(req: &LlmRequest) -> ConverseRequest {
                 .collect(),
         })
     };
+    let additional_model_request_fields = thinking_extra_fields(&req.model, req.thinking_level);
     ConverseRequest {
         messages,
         system,
@@ -139,8 +140,29 @@ pub fn to_converse_request(req: &LlmRequest) -> ConverseRequest {
             max_tokens: req.max_tokens,
         },
         tool_config,
-        additional_model_request_fields: None,
+        additional_model_request_fields,
     }
+}
+
+fn thinking_extra_fields(model_id: &str, level: Option<ThinkingLevel>) -> Option<JsonValue> {
+    let level = level?;
+    if !is_claude_on_bedrock(model_id) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "reasoning_config": {
+            "type": "enabled",
+            "budget_tokens": level.anthropic_budget_tokens(),
+        }
+    }))
+}
+
+fn is_claude_on_bedrock(model_id: &str) -> bool {
+    model_id.starts_with("anthropic.claude-")
+        || model_id
+            .split_once('.')
+            .map(|(_region, rest)| rest.starts_with("anthropic.claude-"))
+            .unwrap_or(false)
 }
 
 fn message_to_converse(msg: &LlmMessage) -> ConverseMessage {
@@ -469,5 +491,75 @@ mod tests {
     fn from_converse_response_malformed_errors() {
         let raw = serde_json::json!({ "output": {} });
         assert!(from_converse_response(raw).is_err());
+    }
+
+    use crate::types::ThinkingLevel;
+
+    #[test]
+    fn thinking_level_injected_for_claude() {
+        let req = LlmRequest {
+            model: "anthropic.claude-sonnet-4-20250514-v1:0".into(),
+            system: None,
+            messages: vec![LlmMessage::user("think")],
+            max_tokens: 8192,
+            tools: vec![],
+            thinking_level: Some(ThinkingLevel::Medium),
+        };
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        let extra = &json["additionalModelRequestFields"];
+        assert_eq!(extra["reasoning_config"]["type"], "enabled");
+        assert_eq!(extra["reasoning_config"]["budget_tokens"], 4096);
+    }
+
+    #[test]
+    fn thinking_level_injected_for_inference_profile_claude() {
+        let req = LlmRequest {
+            model: "us.anthropic.claude-sonnet-4-20250514-v1:0".into(),
+            system: None,
+            messages: vec![LlmMessage::user("think")],
+            max_tokens: 8192,
+            tools: vec![],
+            thinking_level: Some(ThinkingLevel::High),
+        };
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        assert_eq!(
+            json["additionalModelRequestFields"]["reasoning_config"]["budget_tokens"],
+            16384
+        );
+    }
+
+    #[test]
+    fn thinking_level_not_injected_for_non_anthropic() {
+        let req = LlmRequest {
+            model: "meta.llama3-1-70b-instruct-v1:0".into(),
+            system: None,
+            messages: vec![LlmMessage::user("think")],
+            max_tokens: 8192,
+            tools: vec![],
+            thinking_level: Some(ThinkingLevel::High),
+        };
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        assert!(
+            json.get("additionalModelRequestFields").is_none()
+                || json["additionalModelRequestFields"].is_null()
+        );
+    }
+
+    #[test]
+    fn thinking_level_none_no_extra_fields() {
+        let req = LlmRequest::simple(
+            "anthropic.claude-3-5-sonnet-20241022-v2:0".into(),
+            None,
+            "hi".into(),
+        );
+        let cv = to_converse_request(&req);
+        let json = serde_json::to_value(&cv).unwrap();
+        assert!(
+            json.get("additionalModelRequestFields").is_none()
+                || json["additionalModelRequestFields"].is_null()
+        );
     }
 }
