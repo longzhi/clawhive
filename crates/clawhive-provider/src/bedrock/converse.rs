@@ -288,7 +288,6 @@ pub fn from_converse_response(raw: JsonValue) -> Result<LlmResponse> {
 ///
 /// `apply` maps one event to zero-or-one downstream `StreamChunk`s.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // consumed by Batch 6 stream() implementation
 pub struct ConverseStreamState {
     open_tool_uses: std::collections::HashMap<u32, OpenToolUse>,
     pending_stop_reason: Option<String>,
@@ -301,7 +300,6 @@ struct OpenToolUse {
     input_json: String, // accumulated partial JSON chunks
 }
 
-#[allow(dead_code)] // consumed by Batch 6 stream() implementation
 impl ConverseStreamState {
     /// Apply a Converse stream event (parsed JSON payload) and optionally
     /// return a `StreamChunk` to yield downstream.

@@ -149,12 +149,81 @@ impl LlmProvider for BedrockProvider {
 
     async fn stream(
         &self,
-        _request: LlmRequest,
+        request: LlmRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamChunk>> + Send>>, ProviderError>
     {
-        Err(ProviderError::Other(anyhow::anyhow!(
-            "bedrock streaming not yet implemented"
-        )))
+        let url = self.build_url(&request.model, true);
+        let converse = to_converse_request(&request);
+        let body = serde_json::to_vec(&converse)
+            .map_err(|e| ProviderError::InvalidResponse(format!("serialize converse body: {e}")))?;
+
+        let signed_headers = sign_bedrock_request(&self.creds, &self.region, "POST", &url, &body)
+            .map_err(ProviderError::Other)?;
+
+        let mut req = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body);
+        for (name, value) in signed_headers {
+            req = req.header(name, value);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Other(e.into()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            if status.as_u16() >= 500 {
+                tracing::error!(status = status.as_u16(), body = %text, "bedrock converse-stream request failed");
+            } else {
+                tracing::warn!(status = status.as_u16(), body = %text, "bedrock converse-stream request failed");
+            }
+            return Err(ProviderError::ApiError {
+                status: status.as_u16(),
+                message: extract_aws_error_message(&text),
+            });
+        }
+
+        use crate::bedrock::converse::ConverseStreamState;
+        use crate::bedrock::eventstream::{EventStreamDecoder, Frame};
+        use tokio_stream::StreamExt as _;
+
+        let byte_stream = resp.bytes_stream();
+        let out = async_stream::try_stream! {
+            let mut decoder = EventStreamDecoder::new();
+            let mut state = ConverseStreamState::default();
+            tokio::pin!(byte_stream);
+            while let Some(chunk_result) = byte_stream.next().await {
+                let bytes = chunk_result
+                    .map_err(|e| anyhow::anyhow!("bedrock stream transport error: {e}"))?;
+                decoder.feed(&bytes);
+                loop {
+                    match decoder.next_frame() {
+                        Ok(None) => break,
+                        Ok(Some(Frame::Event { event_type, payload })) => {
+                            let payload_json: serde_json::Value = serde_json::from_slice(&payload)
+                                .map_err(|e| anyhow::anyhow!(
+                                    "bedrock stream event payload parse ({event_type}): {e}"
+                                ))?;
+                            if let Some(sc) = state.apply(&event_type, payload_json)? {
+                                yield sc;
+                            }
+                        }
+                        Ok(Some(Frame::Exception { exception_type, payload })) => {
+                            let msg = String::from_utf8_lossy(&payload);
+                            Err(anyhow::anyhow!(
+                                "bedrock stream exception [{exception_type}]: {msg}"
+                            ))?;
+                        }
+                        Err(e) => Err(anyhow::anyhow!("bedrock stream decode error: {e}"))?,
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(out))
     }
 }
 
