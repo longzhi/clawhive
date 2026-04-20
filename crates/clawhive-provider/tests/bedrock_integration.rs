@@ -4,7 +4,7 @@ use clawhive_provider::bedrock::sigv4::AwsCredentials;
 use clawhive_provider::bedrock::BedrockProvider;
 use clawhive_provider::{LlmProvider, LlmRequest};
 use tokio_stream::StreamExt;
-use wiremock::matchers::{header_exists, method, path};
+use wiremock::matchers::{header, header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn creds() -> AwsCredentials {
@@ -49,6 +49,40 @@ async fn chat_happy_path() {
     assert_eq!(resp.input_tokens, Some(12));
     assert_eq!(resp.output_tokens, Some(7));
     assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+}
+
+#[tokio::test]
+async fn chat_with_api_key_sends_bearer_token() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path(
+            "/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse",
+        ))
+        .and(header("authorization", "Bearer ABSK_test_key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [ {"text": "hi via api key"} ]
+                }
+            },
+            "stopReason": "end_turn",
+            "usage": { "inputTokens": 3, "outputTokens": 4 }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider =
+        BedrockProvider::new_with_base_url_api_key("ABSK_test_key", "us-west-2", server.uri());
+    let req = LlmRequest::simple(
+        "anthropic.claude-3-5-sonnet-20241022-v2:0".into(),
+        None,
+        "ping".into(),
+    );
+    let resp = provider.chat(req).await.unwrap();
+    assert_eq!(resp.text, "hi via api key");
+    assert_eq!(resp.input_tokens, Some(3));
 }
 
 #[tokio::test]

@@ -195,7 +195,9 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
   const [customModelInput, setCustomModelInput] = useState("");
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [customModels, setCustomModels] = useState<string[]>([]);
-  // Bedrock / AWS credentials
+  // Bedrock auth
+  const [bedrockAuthMode, setBedrockAuthMode] = useState<"api_key" | "sigv4">("api_key");
+  const [bedrockApiKey, setBedrockApiKey] = useState("");
   const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
   const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
   const [awsSessionToken, setAwsSessionToken] = useState("");
@@ -223,6 +225,8 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
     setCustomModelInput("");
     setSelectedModels(new Set());
     setCustomModels([]);
+    setBedrockAuthMode("api_key");
+    setBedrockApiKey("");
     setAwsAccessKeyId("");
     setAwsSecretAccessKey("");
     setAwsSessionToken("");
@@ -269,15 +273,25 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
         toast.success(`Custom provider ${customProviderId} added`);
       } else if (selected.needs_aws_credentials) {
         const modelList = Array.from(selectedModels);
-        await createProvider.mutateAsync({
+        const baseReq = {
           provider_id: selected.id,
           api_base: "",
-          aws_access_key_id: awsAccessKeyId,
-          aws_secret_access_key: awsSecretAccessKey,
-          aws_session_token: awsSessionToken || undefined,
           region: awsRegion,
           models: modelList.length > 0 ? modelList : presetModelIds(selected),
-        });
+        };
+        if (bedrockAuthMode === "api_key") {
+          await createProvider.mutateAsync({
+            ...baseReq,
+            api_key: bedrockApiKey,
+          });
+        } else {
+          await createProvider.mutateAsync({
+            ...baseReq,
+            aws_access_key_id: awsAccessKeyId,
+            aws_secret_access_key: awsSecretAccessKey,
+            aws_session_token: awsSessionToken || undefined,
+          });
+        }
         toast.success(`Provider ${selected.name} added`);
       } else {
         const modelList = Array.from(selectedModels);
@@ -311,7 +325,9 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
       || createProvider.isPending
       || (selected.needs_key && !apiKey)
       || (selected.id === "openai-chatgpt" && !hasOpenAiOAuth)
-      || (selected.needs_aws_credentials && (!awsAccessKeyId || !awsSecretAccessKey || !awsRegion));
+      || (selected.needs_aws_credentials && !awsRegion)
+      || (selected.needs_aws_credentials && bedrockAuthMode === "api_key" && !bedrockApiKey)
+      || (selected.needs_aws_credentials && bedrockAuthMode === "sigv4" && (!awsAccessKeyId || !awsSecretAccessKey));
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset(); }}>
@@ -402,18 +418,30 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
 
         {selected && !isCustom && selected.needs_aws_credentials && (
           <div className="space-y-3 rounded-lg border p-4">
-            <p className="text-xs text-muted-foreground">
-              Amazon Bedrock uses AWS SigV4 credentials. Get them from{" "}
-              <a
-                href="https://console.aws.amazon.com/iam/home#/security_credentials"
-                target="_blank"
-                rel="noreferrer"
-                className="underline"
+            <div className="flex gap-2 p-1 bg-muted rounded-md">
+              <button
+                type="button"
+                onClick={() => setBedrockAuthMode("api_key")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition ${
+                  bedrockAuthMode === "api_key"
+                    ? "bg-background shadow text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
               >
-                AWS IAM console
-              </a>
-              .
-            </p>
+                Bedrock API Key
+              </button>
+              <button
+                type="button"
+                onClick={() => setBedrockAuthMode("sigv4")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition ${
+                  bedrockAuthMode === "sigv4"
+                    ? "bg-background shadow text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                AWS Access Key (SigV4)
+              </button>
+            </div>
             <div>
               <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                 AWS Region
@@ -425,41 +453,84 @@ function AddProviderDialog({ existingIds }: { existingIds: Set<string> }) {
                 className="mt-1"
               />
             </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                AWS Access Key ID
-              </label>
-              <Input
-                placeholder="AKIA…"
-                value={awsAccessKeyId}
-                onChange={(e) => setAwsAccessKeyId(e.target.value)}
-                className="mt-1 font-mono"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                AWS Secret Access Key
-              </label>
-              <Input
-                type="password"
-                placeholder="Enter your AWS secret access key"
-                value={awsSecretAccessKey}
-                onChange={(e) => setAwsSecretAccessKey(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                AWS Session Token <span className="normal-case font-normal">(optional, STS)</span>
-              </label>
-              <Input
-                type="password"
-                placeholder="Leave empty unless using temporary credentials"
-                value={awsSessionToken}
-                onChange={(e) => setAwsSessionToken(e.target.value)}
-                className="mt-1"
-              />
-            </div>
+            {bedrockAuthMode === "api_key" ? (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Generate from{" "}
+                  <a
+                    href="https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                  >
+                    Bedrock API Keys
+                  </a>{" "}
+                  — bearer token starting with <code>ABSK</code>.
+                </p>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Bedrock API Key
+                  </label>
+                  <Input
+                    type="password"
+                    placeholder="ABSK…"
+                    value={bedrockApiKey}
+                    onChange={(e) => setBedrockApiKey(e.target.value)}
+                    className="mt-1 font-mono"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Get credentials from{" "}
+                  <a
+                    href="https://console.aws.amazon.com/iam/home#/security_credentials"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                  >
+                    AWS IAM console
+                  </a>
+                  .
+                </p>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    AWS Access Key ID
+                  </label>
+                  <Input
+                    placeholder="AKIA…"
+                    value={awsAccessKeyId}
+                    onChange={(e) => setAwsAccessKeyId(e.target.value)}
+                    className="mt-1 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    AWS Secret Access Key
+                  </label>
+                  <Input
+                    type="password"
+                    placeholder="Enter your AWS secret access key"
+                    value={awsSecretAccessKey}
+                    onChange={(e) => setAwsSecretAccessKey(e.target.value)}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    AWS Session Token <span className="normal-case font-normal">(optional, STS)</span>
+                  </label>
+                  <Input
+                    type="password"
+                    placeholder="Leave empty unless using temporary credentials"
+                    value={awsSessionToken}
+                    onChange={(e) => setAwsSessionToken(e.target.value)}
+                    className="mt-1"
+                  />
+                </div>
+              </>
+            )}
             <ModelMultiSelect
               defaultModels={presetModelIds(selected)}
               selectedModels={selectedModels}

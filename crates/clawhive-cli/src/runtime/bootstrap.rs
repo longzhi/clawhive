@@ -783,6 +783,8 @@ pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRout
             }
             "bedrock" => {
                 use clawhive_provider::bedrock::{sigv4::AwsCredentials, BedrockProvider};
+                let region = provider_config.region.clone().filter(|v| !v.is_empty());
+                let api_key = provider_config.api_key.clone().filter(|v| !v.is_empty());
                 let access_key_id = provider_config
                     .aws_access_key_id
                     .clone()
@@ -791,25 +793,33 @@ pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRout
                     .aws_secret_access_key
                     .clone()
                     .filter(|v| !v.is_empty());
-                let region = provider_config.region.clone().filter(|v| !v.is_empty());
-                match (access_key_id, secret_access_key, region) {
-                    (Some(access_key_id), Some(secret_access_key), Some(region)) => {
-                        let creds = AwsCredentials {
-                            access_key_id,
-                            secret_access_key,
-                            session_token: provider_config
-                                .aws_session_token
-                                .clone()
-                                .filter(|v| !v.is_empty()),
-                        };
-                        let provider = Arc::new(BedrockProvider::new(creds, region));
-                        registry.register("bedrock", provider);
-                    }
-                    _ => {
-                        tracing::warn!(
-                            "Bedrock: aws_access_key_id / aws_secret_access_key / region all required, skipping"
-                        );
-                    }
+
+                let Some(region) = region else {
+                    tracing::warn!("Bedrock: region is required, skipping");
+                    continue;
+                };
+
+                // Prefer Bedrock API Key (bearer token) over SigV4 AK/SK.
+                if let Some(key) = api_key {
+                    let provider = Arc::new(BedrockProvider::new_api_key(key, region));
+                    registry.register("bedrock", provider);
+                } else if let (Some(access_key_id), Some(secret_access_key)) =
+                    (access_key_id, secret_access_key)
+                {
+                    let creds = AwsCredentials {
+                        access_key_id,
+                        secret_access_key,
+                        session_token: provider_config
+                            .aws_session_token
+                            .clone()
+                            .filter(|v| !v.is_empty()),
+                    };
+                    let provider = Arc::new(BedrockProvider::new(creds, region));
+                    registry.register("bedrock", provider);
+                } else {
+                    tracing::warn!(
+                        "Bedrock: provide either api_key OR aws_access_key_id+aws_secret_access_key, skipping"
+                    );
                 }
             }
             "qwen" => {

@@ -125,6 +125,10 @@ pub(super) enum AuthChoice {
         session_token: Option<String>,
         region: String,
     },
+    BedrockApiKey {
+        api_key: String,
+        region: String,
+    },
 }
 
 pub(super) async fn handle_add_provider(
@@ -332,8 +336,46 @@ fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<Option<
 }
 
 fn prompt_bedrock_credentials(theme: &ColorfulTheme) -> Result<Option<AuthChoice>> {
-    println!("  {ARROW} Amazon Bedrock uses AWS SigV4 credentials, not an API key.");
-    println!("  {ARROW} Find credentials at: https://console.aws.amazon.com/iam/home#/security_credentials");
+    let methods = [
+        "Bedrock API Key (simpler, bearer token starting with ABSK…)",
+        "AWS Access Key + Secret (traditional SigV4)",
+        "← Back",
+    ];
+    let method = Select::with_theme(theme)
+        .with_prompt("Authentication method")
+        .items(&methods)
+        .default(0)
+        .interact()?;
+
+    let region = match input_or_back_with_default(theme, "AWS Region", "us-west-2")? {
+        Some(r) if !r.is_empty() => r,
+        Some(_) => anyhow::bail!("Region cannot be empty"),
+        None => return Ok(None),
+    };
+
+    match method {
+        0 => {
+            println!(
+                "  {ARROW} Bedrock API Keys: https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html"
+            );
+            let api_key = match input_or_back(theme, "Paste Bedrock API key (ABSK…)")? {
+                Some(k) if !k.is_empty() => k,
+                Some(_) => anyhow::bail!("API key cannot be empty"),
+                None => return Ok(None),
+            };
+            println!("  {ARROW} Region: {region}");
+            println!("  {ARROW} Key saved: {}", mask_secret(&api_key));
+            Ok(Some(AuthChoice::BedrockApiKey { api_key, region }))
+        }
+        1 => prompt_bedrock_sigv4(theme, region),
+        _ => Ok(None),
+    }
+}
+
+fn prompt_bedrock_sigv4(theme: &ColorfulTheme, region: String) -> Result<Option<AuthChoice>> {
+    println!(
+        "  {ARROW} AWS credentials: https://console.aws.amazon.com/iam/home#/security_credentials"
+    );
 
     let access_key_id = match input_or_back(theme, "AWS Access Key ID")? {
         Some(k) if !k.is_empty() => k,
@@ -343,11 +385,6 @@ fn prompt_bedrock_credentials(theme: &ColorfulTheme) -> Result<Option<AuthChoice
     let secret_access_key = match input_or_back(theme, "AWS Secret Access Key")? {
         Some(k) if !k.is_empty() => k,
         Some(_) => anyhow::bail!("Secret access key cannot be empty"),
-        None => return Ok(None),
-    };
-    let region = match input_or_back_with_default(theme, "AWS Region", "us-west-2")? {
-        Some(r) if !r.is_empty() => r,
-        Some(_) => anyhow::bail!("Region cannot be empty"),
         None => return Ok(None),
     };
     let session_token: String = Input::with_theme(theme)
@@ -514,6 +551,13 @@ fn generate_provider_yaml(
                     key = api_key,
                 )
             }
+        }
+        AuthChoice::BedrockApiKey { api_key, region } => {
+            let pid = provider.as_str();
+            let models_yaml = format_preset_models_yaml(pid);
+            format!(
+                "provider_id: {pid}\nenabled: true\napi_base: \"\"\nregion: {region}\napi_key: \"{api_key}\"\nmodels:\n{models_yaml}\n"
+            )
         }
         AuthChoice::AwsCredentials {
             access_key_id,

@@ -3,15 +3,33 @@
 #
 # Note: api_base is ignored for Bedrock — the endpoint is derived from `region`.
 # `${VAR}` expands environment variables at config-load time.
+#
+# Two authentication modes are supported. Use ONE:
+#
+# 1) Bedrock API Key (simpler — AWS 2024-Q4 feature):
+#
+#    api_key: ${BEDROCK_API_KEY}   # bearer token, starts with "ABSK…"
+#
+# 2) AWS SigV4 (traditional):
+#
+#    aws_access_key_id: ${AWS_ACCESS_KEY_ID}
+#    aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+#    # Optional for STS temporary credentials
+#    # aws_session_token: ${AWS_SESSION_TOKEN}
+#
+# If both are set, api_key (Bedrock API Key) wins.
 
 provider_id: bedrock
 enabled: false
 api_base: ""
 region: us-west-2
-aws_access_key_id: ${AWS_ACCESS_KEY_ID}
-aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}
-# Optional: for STS temporary credentials
+
+# --- pick one ---
+api_key: ${BEDROCK_API_KEY}
+# aws_access_key_id: ${AWS_ACCESS_KEY_ID}
+# aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}
 # aws_session_token: ${AWS_SESSION_TOKEN}
+
 models:
   - anthropic.claude-3-5-sonnet-20241022-v2:0
   - anthropic.claude-3-5-haiku-20241022-v1:0

@@ -21,13 +21,28 @@ use crate::bedrock::sigv4::{sign_bedrock_request, AwsCredentials};
 use crate::error::ProviderError;
 use crate::{LlmProvider, LlmRequest, LlmResponse, StreamChunk};
 
+/// Authentication mode for Bedrock Runtime requests.
+///
+/// AWS Bedrock accepts two kinds of credentials:
+/// - **Bedrock API Keys** (introduced 2024-Q4): bearer-token auth,
+///   `Authorization: Bearer ABSK…`. Simpler — no SigV4 signing. Long-term
+///   and short-term variants both work.
+/// - **AWS SigV4**: traditional `access_key_id + secret_access_key` (+ optional
+///   session token) with per-request signing. Compatible with all IAM features.
+#[derive(Debug, Clone)]
+pub enum BedrockAuth {
+    ApiKey(String),
+    SigV4(AwsCredentials),
+}
+
 /// Bedrock Runtime provider.
 ///
-/// Implements the Converse API via hand-rolled SigV4 signing.
+/// Speaks the Converse API. Authentication is either an AWS Bedrock API Key
+/// (bearer token) or full SigV4 signing — see [`BedrockAuth`].
 #[derive(Debug, Clone)]
 pub struct BedrockProvider {
     http: reqwest::Client,
-    creds: AwsCredentials,
+    auth: BedrockAuth,
     region: String,
     /// Override base URL — tests set this to point at wiremock. `None` means
     /// the real AWS endpoint is used.
@@ -35,14 +50,24 @@ pub struct BedrockProvider {
 }
 
 impl BedrockProvider {
+    /// Construct with SigV4 credentials (access key + secret + optional session token).
     pub fn new(creds: AwsCredentials, region: impl Into<String>) -> Self {
+        Self::with_auth(BedrockAuth::SigV4(creds), region)
+    }
+
+    /// Construct with a Bedrock API Key (bearer token, no SigV4 signing).
+    pub fn new_api_key(api_key: impl Into<String>, region: impl Into<String>) -> Self {
+        Self::with_auth(BedrockAuth::ApiKey(api_key.into()), region)
+    }
+
+    fn with_auth(auth: BedrockAuth, region: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
             .unwrap_or_default();
         Self {
             http,
-            creds,
+            auth,
             region: region.into(),
             base_url: None,
         }
@@ -54,15 +79,61 @@ impl BedrockProvider {
         region: impl Into<String>,
         base_url: impl Into<String>,
     ) -> Self {
+        Self::with_base_url(BedrockAuth::SigV4(creds), region, base_url)
+    }
+
+    /// Same as [`new_with_base_url`] but for API-key auth (for wiremock tests).
+    pub fn new_with_base_url_api_key(
+        api_key: impl Into<String>,
+        region: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        Self::with_base_url(BedrockAuth::ApiKey(api_key.into()), region, base_url)
+    }
+
+    fn with_base_url(
+        auth: BedrockAuth,
+        region: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
             .unwrap_or_default();
         Self {
             http,
-            creds,
+            auth,
             region: region.into(),
             base_url: Some(base_url.into()),
+        }
+    }
+
+    /// Build an outbound request with the right auth headers applied.
+    fn authed_request(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        let req = self
+            .http
+            .post(url)
+            .header("content-type", "application/json");
+        match &self.auth {
+            BedrockAuth::ApiKey(key) => {
+                // Bedrock API Key — simple bearer token, no SigV4 needed.
+                Ok(req
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(body))
+            }
+            BedrockAuth::SigV4(creds) => {
+                let signed_headers = sign_bedrock_request(creds, &self.region, "POST", url, &body)
+                    .map_err(ProviderError::Other)?;
+                let mut req = req.body(body);
+                for (name, value) in signed_headers {
+                    req = req.header(name, value);
+                }
+                Ok(req)
+            }
         }
     }
 
@@ -106,17 +177,7 @@ impl LlmProvider for BedrockProvider {
         let body = serde_json::to_vec(&converse)
             .map_err(|e| ProviderError::InvalidResponse(format!("serialize converse body: {e}")))?;
 
-        let signed_headers = sign_bedrock_request(&self.creds, &self.region, "POST", &url, &body)
-            .map_err(ProviderError::Other)?;
-
-        let mut req = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .body(body);
-        for (name, value) in signed_headers {
-            req = req.header(name, value);
-        }
+        let req = self.authed_request(&url, body)?;
 
         let resp = req
             .send()
@@ -158,17 +219,7 @@ impl LlmProvider for BedrockProvider {
         let body = serde_json::to_vec(&converse)
             .map_err(|e| ProviderError::InvalidResponse(format!("serialize converse body: {e}")))?;
 
-        let signed_headers = sign_bedrock_request(&self.creds, &self.region, "POST", &url, &body)
-            .map_err(ProviderError::Other)?;
-
-        let mut req = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .body(body);
-        for (name, value) in signed_headers {
-            req = req.header(name, value);
-        }
+        let req = self.authed_request(&url, body)?;
 
         let resp = req
             .send()
