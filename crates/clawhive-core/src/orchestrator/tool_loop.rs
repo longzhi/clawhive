@@ -171,6 +171,11 @@ impl Orchestrator {
     }
 
     /// Require human approval before granting filesystem access.
+    ///
+    /// Scheduled tasks auto-grant without prompting — mirrors the bypass applied to
+    /// shell command and network approvals in `shell_tool::execution`. HardBaseline
+    /// is still enforced inside `GrantAccessTool::execute` → `AccessGate::grant`,
+    /// so sensitive paths remain unreachable even on the fast path.
     pub(super) async fn approve_then_grant(
         &self,
         agent_id: &str,
@@ -181,6 +186,16 @@ impl Orchestrator {
         let path_str = input["path"].as_str().unwrap_or("unknown");
         let level_str = input["level"].as_str().unwrap_or("unknown");
         let description = format!("grant_{level_str} {path_str}");
+
+        if ctx.is_scheduled_task() {
+            tracing::info!(
+                target: "clawhive::audit::access",
+                agent_id = %agent_id,
+                description = %description,
+                "auto-approved: scheduled task grant_access"
+            );
+            return GrantAccessTool::new(gate.clone()).execute(input, ctx).await;
+        }
 
         if let Some(registry) = self.approval_registry.as_ref() {
             let trace_id = uuid::Uuid::new_v4();
@@ -982,10 +997,12 @@ mod tests {
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
+    use crate::approval::ApprovalRegistry;
     use crate::config::SecurityMode;
     use crate::orchestrator::test_helpers::{
         llm_text_response, llm_tool_use_response, make_memory_tool_orchestrator,
-        make_tool_loop_test_orchestrator, wait_for_call_count, SequenceProvider,
+        make_tool_loop_test_orchestrator, make_tool_loop_test_orchestrator_with_approval,
+        wait_for_call_count, SequenceProvider,
     };
     use crate::tool::ToolContext;
 
@@ -1271,5 +1288,63 @@ mod tests {
         assert!(output.content.contains("[fact:preference]"));
         assert!(output.content.contains("[fact]"));
         assert!(output.content.contains("Chinese replies"));
+    }
+
+    /// Scheduled tasks must bypass the 60s human-approval wait on `grant_access`
+    /// so they never stall waiting for a user who isn't there. HardBaseline
+    /// checks inside `AccessGate::grant` still reject sensitive paths — only
+    /// the human-in-the-loop gate is short-circuited.
+    #[tokio::test]
+    async fn approve_then_grant_auto_grants_for_scheduled_task() {
+        use std::time::Duration;
+
+        use crate::access_gate::{AccessGate, AccessLevel};
+
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "unused", "end_turn",
+        )]));
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+        let (orchestrator, tmp, _memory) = make_tool_loop_test_orchestrator_with_approval(
+            provider,
+            Some(1),
+            approval_registry.clone(),
+        )
+        .await;
+
+        let grant_target = tmp.path().join("schedule-target");
+        std::fs::create_dir_all(&grant_target).unwrap();
+
+        let policy_path = tmp.path().join("access_policy.json");
+        let gate = Arc::new(AccessGate::new(tmp.path().to_path_buf(), policy_path));
+        let ctx = ToolContext::builtin().with_scheduled_task(true);
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(3),
+            orchestrator.approve_then_grant(
+                "agent-a",
+                &gate,
+                json!({ "path": grant_target.to_string_lossy(), "level": "rw" }),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("scheduled task must not block on human approval")
+        .unwrap();
+
+        assert!(
+            !output.is_error,
+            "expected auto-grant success, got error: {}",
+            output.content
+        );
+        assert!(output.content.contains("Granted rw"));
+        assert!(!approval_registry.has_pending().await);
+
+        let entries = gate.list().await;
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.level == AccessLevel::Rw && e.path.ends_with("schedule-target")),
+            "gate should contain the granted path, got {entries:?}"
+        );
     }
 }

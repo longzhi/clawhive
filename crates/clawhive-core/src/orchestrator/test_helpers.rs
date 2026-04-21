@@ -17,6 +17,7 @@ use clawhive_scheduler::{ScheduleManager, SqliteStore};
 use serde_json::json;
 use tempfile::TempDir;
 
+use crate::approval::ApprovalRegistry;
 use crate::config::{FullAgentConfig, SecurityMode};
 use crate::config_view::ConfigView;
 use crate::RoutingConfig;
@@ -203,6 +204,22 @@ pub(super) async fn make_tool_loop_test_orchestrator(
     provider: Arc<dyn LlmProvider>,
     max_iterations: Option<u32>,
 ) -> (Orchestrator, TempDir, Arc<MemoryStore>) {
+    make_tool_loop_test_orchestrator_inner(provider, max_iterations, None).await
+}
+
+pub(super) async fn make_tool_loop_test_orchestrator_with_approval(
+    provider: Arc<dyn LlmProvider>,
+    max_iterations: Option<u32>,
+    approval_registry: Arc<ApprovalRegistry>,
+) -> (Orchestrator, TempDir, Arc<MemoryStore>) {
+    make_tool_loop_test_orchestrator_inner(provider, max_iterations, Some(approval_registry)).await
+}
+
+async fn make_tool_loop_test_orchestrator_inner(
+    provider: Arc<dyn LlmProvider>,
+    max_iterations: Option<u32>,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+) -> (Orchestrator, TempDir, Arc<MemoryStore>) {
     let tmp = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
     let bus = EventBus::new(16);
@@ -259,15 +276,18 @@ pub(super) async fn make_tool_loop_test_orchestrator(
         embedding_provider,
     );
 
-    let orchestrator = OrchestratorBuilder::new(
+    let mut builder = OrchestratorBuilder::new(
         config_view,
         publisher,
         Arc::clone(&memory),
         Arc::new(NativeExecutor),
         tmp.path().to_path_buf(),
         schedule_manager,
-    )
-    .build();
+    );
+    if let Some(registry) = approval_registry {
+        builder = builder.approval_registry(registry);
+    }
+    let orchestrator = builder.build();
 
     (orchestrator, tmp, memory)
 }
