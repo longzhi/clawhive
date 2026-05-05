@@ -73,8 +73,8 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         needs_aws_credentials: false,
         default_model: "gpt-5.4",
         models: &[
+            m("gpt-5.5", 200_000, 16384, false, true),
             m("gpt-5.4", 200_000, 16384, false, true),
-            m("gpt-5.4-mini", 200_000, 16384, false, true),
             m("gpt-5.3", 200_000, 16384, false, true),
             m("gpt-5.2", 200_000, 16384, false, true),
             m("gpt-5.2-pro", 200_000, 32768, false, true),
@@ -93,8 +93,8 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         needs_aws_credentials: false,
         default_model: "gpt-5.4",
         models: &[
+            m("gpt-5.5", 200_000, 16384, false, false),
             m("gpt-5.4", 200_000, 16384, false, false),
-            m("gpt-5.4-mini", 200_000, 16384, false, false),
             m("gpt-5.3-codex", 200_000, 16384, false, false),
             m("gpt-5.2-codex", 200_000, 16384, false, false),
             m("gpt-5.2", 200_000, 16384, false, false),
@@ -111,8 +111,8 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         needs_aws_credentials: false,
         default_model: "gpt-5.4",
         models: &[
+            m("gpt-5.5", 200_000, 16384, false, true),
             m("gpt-5.4", 200_000, 16384, false, true),
-            m("gpt-5.4-mini", 200_000, 16384, false, true),
             m("gpt-5.3-codex", 200_000, 16384, false, false),
             m("gpt-5.2", 200_000, 16384, false, true),
             m("gpt-5.2-codex", 200_000, 16384, false, false),
@@ -183,6 +183,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         needs_aws_credentials: false,
         default_model: "anthropic/claude-sonnet-4-6",
         models: &[
+            m("openai/gpt-5.5", 200_000, 16384, false, true),
             m("openai/gpt-5.4", 200_000, 16384, false, true),
             m("openai/gpt-5.3-codex", 200_000, 16384, false, false),
             m("anthropic/claude-opus-4-6", 200_000, 32768, false, true),
@@ -451,8 +452,8 @@ mod tests {
         assert_eq!(
             models,
             vec![
+                "openai/gpt-5.5",
                 "openai/gpt-5.4",
-                "openai/gpt-5.4-mini",
                 "openai/gpt-5.3",
                 "openai/gpt-5.2",
                 "openai/gpt-5.2-pro",
@@ -485,8 +486,8 @@ mod tests {
         assert_eq!(
             models,
             vec![
+                "openai-chatgpt/gpt-5.5",
                 "openai-chatgpt/gpt-5.4",
-                "openai-chatgpt/gpt-5.4-mini",
                 "openai-chatgpt/gpt-5.3-codex",
                 "openai-chatgpt/gpt-5.2-codex",
                 "openai-chatgpt/gpt-5.2",
