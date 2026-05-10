@@ -6,56 +6,6 @@ This file provides guidance to AI coding agents when working with code in this r
 
 Clawhive is a Rust-native single-binary (~14MB) multi-agent AI platform for deploying agents across messaging channels (Telegram, Discord, Slack, WhatsApp, iMessage). 13-crate workspace, edition 2021, Rust **1.92.0+**, version `0.1.0-alpha.*`.
 
-## Agent Workflow
-
-### Planning
-- ≥3 steps or architecture decisions → enter plan mode first
-- Execution deviates → stop immediately, re-plan. Never force through
-- Plans must include verification steps, not just build steps
-- Write detailed specs upfront to reduce ambiguity
-
-### Subagents
-- Use subagents liberally to keep main context clean
-- Delegate research, exploration, parallel analysis to subagents
-- Throw more compute at complex problems via subagents
-- One subagent = one focused task
-
-### Self-Optimization
-- On any correction → update pattern to `tasks/lessons.md`
-- Set rules for yourself to prevent repeat mistakes
-- Iterate on lessons strictly until error rate drops
-- Review `tasks/lessons.md` at session start
-
-### Verification Before Completion
-- Never mark done until functionality is proven working
-- Compare behavior against main branch when needed
-- Self-check: "Would a senior engineer approve this?"
-- Run tests, check logs, prove correctness
-
-### Elegance (Balanced)
-- For non-trivial changes → pause and ask "Is there a more elegant way?"
-- Hacky fix → rewrite with full context for an elegant solution
-- Simple, clear fixes → skip this step, avoid over-engineering
-- Cross-review your own work before delivery
-
-### Bug Fixing
-- On bug report → fix directly, no hand-holding needed
-- Locate logs, errors, failing tests → complete the fix
-- Zero context-switching required from user
-- Proactively fix failing CI without being asked
-
-### Task Management
-1. Write execution plan with checkable items to `tasks/todo.md`
-2. Verify plan before starting development
-3. Mark items complete as you go
-4. Add high-level summary for each step
-5. Add retrospective section to `tasks/todo.md` on completion
-6. On corrections → update `tasks/lessons.md`
-
-### Core Principles
-- **Minimal footprint**: smallest possible code changes
-- **No shortcuts**: find root cause, no temp fixes, senior engineer standards
-
 ## Build / Test / Lint
 
 ```bash
