@@ -1755,20 +1755,29 @@ async fn explicit_reset_flushes_before_clearing_previous_session() {
         .expect("fresh session should exist after reset");
     let session_reader = SessionReader::new(tmp.path());
     assert_ne!(current_session.session_id, previous_session_id);
-    assert!(!session_reader.session_exists(&previous_session_id).await);
-    assert!(memory
-        .get_session_memory_state("clawhive-main", &previous_session_id)
-        .await
-        .unwrap()
-        .is_none());
 
+    // Boundary flush + transcript cleanup run in a background tokio task so /new
+    // returns to the user without waiting on memory consolidation. Poll for the
+    // eventual state instead of asserting it synchronously.
     let today = chrono::Utc::now().date_naive();
-    let daily = file_store
-        .read_daily(today)
-        .await
-        .unwrap()
-        .expect("daily file should exist after explicit reset");
-    assert!(daily.contains("first turn"));
+    wait_until(Duration::from_secs(3), || async {
+        if session_reader.session_exists(&previous_session_id).await {
+            return false;
+        }
+        let state_cleared = memory
+            .get_session_memory_state("clawhive-main", &previous_session_id)
+            .await
+            .unwrap()
+            .is_none();
+        if !state_cleared {
+            return false;
+        }
+        match file_store.read_daily(today).await.unwrap() {
+            Some(daily) => daily.contains("first turn"),
+            None => false,
+        }
+    })
+    .await;
 }
 
 #[tokio::test]

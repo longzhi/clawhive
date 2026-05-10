@@ -685,35 +685,22 @@ impl Orchestrator {
         if let Some(previous_session) = previous_session.as_ref() {
             self.schedule_session_end_flush(view, agent_id, previous_session, agent)
                 .await;
-            if let Some(snapshot) = self
+            // Capture the snapshot synchronously (cheap: just reads state into memory),
+            // then run the boundary-flush LLM calls and transcript cleanup in the background
+            // so /new returns to the user without waiting on memory consolidation.
+            let snapshot = self
                 .capture_boundary_flush_snapshot(agent_id, previous_session, agent)
-                .await
-            {
-                let _ = self
-                    .run_boundary_flush_snapshot(
-                        view,
-                        agent_id,
-                        previous_session,
-                        agent,
-                        "explicit_reset",
-                        snapshot,
-                    )
-                    .await;
-            }
+                .await;
+            self.spawn_explicit_reset_flush_and_cleanup(
+                view,
+                agent_id,
+                previous_session,
+                agent,
+                snapshot,
+            );
         }
 
         let _ = self.session_mgr.reset(session_key).await;
-        if let Some(previous_session) = previous_session.as_ref() {
-            let workspace = self.workspace_state_for(agent_id);
-            let _ = workspace
-                .session_writer
-                .clear_session(&previous_session.session_id)
-                .await;
-            let _ = self
-                .memory
-                .delete_session_memory_state(agent_id, &previous_session.session_id)
-                .await;
-        }
 
         let post_reset_prompt = slash_commands::build_post_reset_prompt(agent_id);
         if let Some(hint) = model_hint {
@@ -729,5 +716,106 @@ impl Orchestrator {
             &post_reset_prompt,
         )
         .await
+    }
+
+    /// Run the boundary flush LLM summarization and stale-transcript cleanup
+    /// asynchronously after an explicit /new or /reset.
+    ///
+    /// The snapshot already owns the messages it needs (`capture_boundary_flush_snapshot`
+    /// loads them into memory), and `generate_summary_from_messages_static` operates on
+    /// those owned messages — so it's safe to delete the JSONL transcript and the
+    /// session memory state row once the spawned task finishes.
+    fn spawn_explicit_reset_flush_and_cleanup(
+        &self,
+        view: &ConfigView,
+        agent_id: &str,
+        previous_session: &Session,
+        agent: &FullAgentConfig,
+        snapshot: Option<BoundaryFlushSnapshot>,
+    ) {
+        let agent_id = agent_id.to_string();
+        let previous_session = previous_session.clone();
+        let agent = agent.clone();
+        let workspace = self.workspace_state_for(&agent_id);
+        let memory = Arc::clone(&self.memory);
+        let router = view.router.clone();
+        let embedding_provider = Arc::clone(&view.embedding_provider);
+        let file_store = self.file_store_for(&agent_id);
+
+        tokio::spawn(async move {
+            if let Some(snapshot) = snapshot {
+                let batches = split_boundary_flush_episode_batches(
+                    &snapshot.episodes,
+                    MAX_BOUNDARY_FLUSH_TURNS_PER_BATCH,
+                );
+                let mut episode_index = 0_usize;
+                for batch in batches {
+                    let mut handles = Vec::with_capacity(batch.len());
+                    for episode in batch {
+                        episode_index += 1;
+                        let episode_source = format!("explicit_reset:episode:{episode_index}");
+                        let router = router.clone();
+                        let file_store = file_store.clone();
+                        let memory = Arc::clone(&memory);
+                        let embedding_provider = Arc::clone(&embedding_provider);
+                        let agent_id = agent_id.clone();
+                        let session = previous_session.clone();
+                        let agent = agent.clone();
+                        let recent_writes = snapshot.recent_explicit_writes.clone();
+                        handles.push(tokio::spawn(async move {
+                            Orchestrator::generate_summary_from_messages_static(
+                                SummaryGenerationRequest {
+                                    router: &router,
+                                    file_store: &file_store,
+                                    memory: &memory,
+                                    embedding_provider: &embedding_provider,
+                                    agent_id: &agent_id,
+                                    session: &session,
+                                    agent: &agent,
+                                    source: &episode_source,
+                                    messages: episode.messages,
+                                    recent_explicit_writes: recent_writes,
+                                },
+                            )
+                            .await
+                        }));
+                    }
+                    for handle in handles {
+                        if let Err(error) = handle.await {
+                            tracing::warn!(
+                                %error,
+                                agent_id = %agent_id,
+                                session_id = %previous_session.session_id,
+                                "explicit reset boundary flush task panicked"
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Err(error) = workspace
+                .session_writer
+                .clear_session(&previous_session.session_id)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    agent_id = %agent_id,
+                    session_id = %previous_session.session_id,
+                    "Failed to clear session transcript after explicit reset flush"
+                );
+            }
+            if let Err(error) = memory
+                .delete_session_memory_state(&agent_id, &previous_session.session_id)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    agent_id = %agent_id,
+                    session_id = %previous_session.session_id,
+                    "Failed to delete session memory state after explicit reset flush"
+                );
+            }
+        });
     }
 }
