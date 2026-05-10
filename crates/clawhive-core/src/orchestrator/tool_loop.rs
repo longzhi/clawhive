@@ -5,7 +5,9 @@ use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest};
 use clawhive_schema::*;
 use tokio_util::sync::CancellationToken;
 
-use crate::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
+use crate::access_gate::{
+    AccessGate, AccessLevel, AccessResult, GrantAccessTool, ListAccessTool, RevokeAccessTool,
+};
 use crate::config::{ExecSecurityConfig, SandboxPolicyConfig, SecurityMode};
 use crate::config_view::ConfigView;
 use crate::file_tools::{EditFileTool, ReadFileTool, WriteFileTool};
@@ -186,6 +188,21 @@ impl Orchestrator {
         let path_str = input["path"].as_str().unwrap_or("unknown");
         let level_str = input["level"].as_str().unwrap_or("unknown");
         let description = format!("grant_{level_str} {path_str}");
+
+        if let Some(level) = match level_str {
+            "ro" => Some(AccessLevel::Ro),
+            "rw" => Some(AccessLevel::Rw),
+            _ => None,
+        } {
+            let path = std::path::Path::new(path_str);
+            if path.is_absolute() && matches!(gate.check(path, level).await, AccessResult::Allowed)
+            {
+                return Ok(crate::tool::ToolOutput {
+                    content: format!("Granted {level} access to {path_str}"),
+                    is_error: false,
+                });
+            }
+        }
 
         if ctx.is_scheduled_task() {
             tracing::info!(
@@ -1290,6 +1307,49 @@ mod tests {
         assert!(output.content.contains("Chinese replies"));
     }
 
+    #[tokio::test]
+    async fn approve_then_grant_skips_approval_when_access_already_allowed() {
+        use std::time::Duration;
+
+        use crate::access_gate::{AccessGate, AccessLevel};
+
+        let provider = Arc::new(SequenceProvider::new(vec![llm_text_response(
+            "unused", "end_turn",
+        )]));
+        let approval_registry = Arc::new(ApprovalRegistry::new());
+        let (orchestrator, tmp, _memory) = make_tool_loop_test_orchestrator_with_approval(
+            provider,
+            Some(1),
+            approval_registry.clone(),
+        )
+        .await;
+
+        let external = tempfile::tempdir().unwrap();
+        let grant_target = external.path().join("already-granted-target");
+        std::fs::create_dir_all(&grant_target).unwrap();
+
+        let policy_path = tmp.path().join("access_policy.json");
+        let gate = Arc::new(AccessGate::new(tmp.path().to_path_buf(), policy_path));
+        gate.grant(&grant_target, AccessLevel::Rw).await.unwrap();
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(3),
+            orchestrator.approve_then_grant(
+                "agent-a",
+                &gate,
+                json!({ "path": grant_target.to_string_lossy(), "level": "rw" }),
+                &ToolContext::builtin(),
+            ),
+        )
+        .await
+        .expect("already allowed grant_access must not wait for approval")
+        .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("Granted rw"));
+        assert!(!approval_registry.has_pending().await);
+    }
+
     /// Scheduled tasks must bypass the 60s human-approval wait on `grant_access`
     /// so they never stall waiting for a user who isn't there. HardBaseline
     /// checks inside `AccessGate::grant` still reject sensitive paths — only
@@ -1311,7 +1371,8 @@ mod tests {
         )
         .await;
 
-        let grant_target = tmp.path().join("schedule-target");
+        let external = tempfile::tempdir().unwrap();
+        let grant_target = external.path().join("schedule-target");
         std::fs::create_dir_all(&grant_target).unwrap();
 
         let policy_path = tmp.path().join("access_policy.json");
