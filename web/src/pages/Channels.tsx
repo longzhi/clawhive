@@ -436,6 +436,7 @@ function WhatsAppQrPair({ connectorId, status }: { connectorId: string; status: 
   const [qrData, setQrData] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [pairStatus, setPairStatus] = useState<string | null>(null);
+  const pairingFailed = pairStatus === "failed" || pairStatus === "expired";
 
   const startPairing = async () => {
     setPairStatus(null);
@@ -518,10 +519,17 @@ function WhatsAppQrPair({ connectorId, status }: { connectorId: string; status: 
           {polling && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
         </div>
       ) : (
-        <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={startPairing} disabled={polling}>
-          <Key className="h-3.5 w-3.5" />
-          {polling ? "Connecting..." : "Pair Device"}
-        </Button>
+        <>
+          <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={startPairing} disabled={polling}>
+            <Key className="h-3.5 w-3.5" />
+            {polling ? "Connecting..." : "Pair Device"}
+          </Button>
+          {pairingFailed && (
+            <p className="text-xs text-destructive">
+              Pairing {pairStatus}. Try again.
+            </p>
+          )}
+        </>
       )}
     </div>
   );

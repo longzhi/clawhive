@@ -408,7 +408,7 @@ export function useRemoveConnector() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ kind, connectorId }: { kind: string; connectorId: string }) =>
-      apiFetch(`/api/channels/${kind}/connectors/${connectorId}`, { method: "DELETE" }),
+      apiFetch(`/api/channels/${encodeURIComponent(kind)}/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["channels"] });
       qc.invalidateQueries({ queryKey: ["channel-status"] });
