@@ -212,12 +212,26 @@ async fn get_channels_status(
                         && !secret.starts_with("${")
                 }
                 "whatsapp" => {
-                    // Check if session DB exists (paired)
-                    let db_path = state
-                        .root
-                        .join("data")
-                        .join(format!("whatsapp-{connector_id}.db"));
-                    db_path.exists()
+                    let pairing_failed = state
+                        .whatsapp_pairing
+                        .read()
+                        .ok()
+                        .and_then(|sessions| {
+                            sessions
+                                .get(&connector_id)
+                                .map(|session| session.status == "failed")
+                        })
+                        .unwrap_or(false);
+                    if pairing_failed {
+                        false
+                    } else {
+                        // Check if session DB exists (paired)
+                        let db_path = state
+                            .root
+                            .join("data")
+                            .join(format!("whatsapp-{connector_id}.db"));
+                        db_path.exists()
+                    }
                 }
                 "imessage" => true,
                 "weixin" => {
@@ -774,6 +788,21 @@ async fn remove_connector(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let mut main = load_main_config(&state)?;
     let connectors = connectors_mut(&mut main, &kind)?;
+    let whatsapp_session_db_path = if kind == "whatsapp" {
+        connectors.iter().find_map(|item| {
+            let connector_id = item["connector_id"].as_str()?;
+            if connector_id != id {
+                return None;
+            }
+            Some(whatsapp_db_path(
+                &state,
+                item["db_path"].as_str(),
+                connector_id,
+            ))
+        })
+    } else {
+        None
+    };
 
     let before = connectors.len();
     connectors.retain(|item| {
@@ -788,12 +817,68 @@ async fn remove_connector(
     }
 
     write_main_config(&state, &main)?;
+    if kind == "whatsapp" {
+        if let Ok(mut sessions) = state.whatsapp_pairing.write() {
+            sessions.remove(&id);
+        }
+        if let Some(path) = whatsapp_session_db_path {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        connector_id = %id,
+                        path = %path.display(),
+                        error = %error,
+                        "failed to remove WhatsApp session DB"
+                    );
+                    return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
         "kind": kind,
         "connector_id": id,
     })))
+}
+
+fn whatsapp_db_path(
+    state: &AppState,
+    configured_db_path: Option<&str>,
+    connector_id: &str,
+) -> std::path::PathBuf {
+    let default_path = state
+        .root
+        .join("data")
+        .join(format!("whatsapp-{connector_id}.db"));
+    let Some(path) = configured_db_path else {
+        return default_path;
+    };
+    let Some(stripped) = path.strip_prefix("~/.clawhive/") else {
+        return std::path::PathBuf::from(path);
+    };
+    state.root.join(stripped)
+}
+
+#[cfg(any(feature = "whatsapp", test))]
+fn mark_whatsapp_pairing_task_finished(
+    session: &mut crate::state::WhatsAppPairSession,
+    task_completed: bool,
+) {
+    if !task_completed {
+        return;
+    }
+    if !matches!(
+        session.status.as_str(),
+        "paired" | "already_paired" | "failed" | "expired"
+    ) {
+        session.status = "failed".to_string();
+        session.qr_data = None;
+        session.qr_timeout = None;
+    }
 }
 
 #[cfg(feature = "whatsapp")]
@@ -889,7 +974,13 @@ async fn whatsapp_qr_pair(
         }
 
         match pairing_task.await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                if let Ok(mut guard) = sessions.write() {
+                    if let Some(session) = guard.get_mut(&connector_id) {
+                        mark_whatsapp_pairing_task_finished(session, true);
+                    }
+                }
+            }
             Ok(Err(error)) => {
                 tracing::error!(
                     connector_id = %connector_id,
@@ -1118,7 +1209,7 @@ mod tests {
         root
     }
 
-    fn setup_test_app() -> (Router, std::path::PathBuf) {
+    fn setup_test_state() -> (AppState, std::path::PathBuf) {
         let root = setup_test_root();
         let state = AppState {
             root: root.clone(),
@@ -1137,6 +1228,11 @@ mod tests {
             schedule_manager: None,
             reload_coordinator: None,
         };
+        (state, root)
+    }
+
+    fn setup_test_app() -> (Router, std::path::PathBuf) {
+        let (state, root) = setup_test_state();
         (
             Router::new()
                 .nest("/api/channels", super::router())
@@ -1157,6 +1253,19 @@ mod tests {
     fn read_main_yaml(root: &std::path::Path) -> serde_yaml::Value {
         let content = std::fs::read_to_string(root.join("config/main.yaml")).expect("read yaml");
         serde_yaml::from_str(&content).expect("parse yaml")
+    }
+
+    fn write_whatsapp_connector(root: &std::path::Path, connector_id: &str) {
+        let yaml = format!(
+            r#"channels:
+  whatsapp:
+    enabled: true
+    connectors:
+      - connector_id: {connector_id}
+        db_path: ~/.clawhive/data/whatsapp-{connector_id}.db
+"#
+        );
+        std::fs::write(root.join("config/main.yaml"), yaml).expect("write whatsapp config");
     }
 
     #[tokio::test]
@@ -1214,6 +1323,113 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(read_connectors_len(&root, "telegram"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_whatsapp_connector_cleans_session_state_and_db() {
+        let (state, root) = setup_test_state();
+        write_whatsapp_connector(&root, "wa_main");
+        std::fs::create_dir_all(root.join("data")).expect("create data dir");
+        let session_db = root.join("data/whatsapp-wa_main.db");
+        std::fs::write(&session_db, b"stale session").expect("write session db");
+        state
+            .whatsapp_pairing
+            .write()
+            .expect("lock pairing state")
+            .insert(
+                "wa_main".to_string(),
+                crate::state::WhatsAppPairSession {
+                    status: "waiting_qr".to_string(),
+                    qr_data: None,
+                    qr_timeout: None,
+                    started_at: std::time::Instant::now(),
+                },
+            );
+        let app = Router::new()
+            .nest("/api/channels", super::router())
+            .with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/channels/whatsapp/connectors/wa_main")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_connectors_len(&root, "whatsapp"), 0);
+        assert!(
+            !session_db.exists(),
+            "stale WhatsApp session DB should be removed"
+        );
+        assert!(
+            !state
+                .whatsapp_pairing
+                .read()
+                .expect("lock pairing state")
+                .contains_key("wa_main"),
+            "stale pairing state should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_whatsapp_failed_pairing_status_reports_error_even_with_session_db() {
+        let (state, root) = setup_test_state();
+        write_whatsapp_connector(&root, "wa_main");
+        std::fs::create_dir_all(root.join("data")).expect("create data dir");
+        std::fs::write(root.join("data/whatsapp-wa_main.db"), b"stale session")
+            .expect("write session db");
+        state
+            .whatsapp_pairing
+            .write()
+            .expect("lock pairing state")
+            .insert(
+                "wa_main".to_string(),
+                crate::state::WhatsAppPairSession {
+                    status: "failed".to_string(),
+                    qr_data: None,
+                    qr_timeout: None,
+                    started_at: std::time::Instant::now(),
+                },
+            );
+        let app = Router::new()
+            .nest("/api/channels", super::router())
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/channels/status")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body bytes");
+        let statuses: serde_json::Value = serde_json::from_slice(&body).expect("parse status json");
+        assert_eq!(statuses[0]["status"], "error");
+    }
+
+    #[test]
+    fn test_whatsapp_pairing_task_ok_without_terminal_event_marks_failed() {
+        let mut session = crate::state::WhatsAppPairSession {
+            status: "waiting_qr".to_string(),
+            qr_data: None,
+            qr_timeout: None,
+            started_at: std::time::Instant::now(),
+        };
+
+        super::mark_whatsapp_pairing_task_finished(&mut session, true);
+
+        assert_eq!(session.status, "failed");
     }
 
     #[tokio::test]
